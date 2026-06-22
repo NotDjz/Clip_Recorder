@@ -1,14 +1,8 @@
 """
 Clip Recorder — Replay screen recorder.
 
-Capture continue de l'écran via FFmpeg. Un raccourci sauvegarde
-les dernières X secondes en MP4.
-
-Raccourcis :
-  Ctrl+Alt+R → Sauver le replay
-  Ctrl+Alt+P → Pause / reprendre
-  Ctrl+Alt+S → Paramètres
-  Ctrl+Alt+Q → Quitter
+Capture continue de l'écran + son via FFmpeg.
+Ctrl+Alt+R sauvegarde les dernières X secondes en MP4.
 """
 
 import atexit
@@ -27,8 +21,10 @@ import uuid
 import winsound
 import ctypes
 import ctypes.wintypes as wt
+import wave
 import pystray
 from PIL import Image, ImageDraw, ImageTk
+import pyaudiowpatch as pyaudio
 
 # ─── Chemins ─────────────────────────────────────────────────────────────────
 
@@ -55,8 +51,6 @@ except Exception:
     except Exception:
         pass
 
-GWL_EXSTYLE = -20
-WS_EX_TRANSPARENT = 0x00000020
 WM_HOTKEY = 0x0312
 MOD_CTRL_ALT = 0x0002 | 0x0001 | 0x4000
 
@@ -75,10 +69,7 @@ FONT_S = ("Segoe UI", 9)
 # ─── Constantes capture ─────────────────────────────────────────────────────
 
 SEGMENT_DURATION = 5
-QUALITY_LABELS = ["Basse (rapide)", "Moyenne", "Haute (lent)"]
-QUALITY_CRF = [32, 23, 18]
-QUALITY_QP = [32, 28, 23]
-FPS_OPTIONS = [15, 30, 60]
+FPS_OPTIONS = [30, 60, 120]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
 # ─── Moniteurs ───────────────────────────────────────────────────────────────
@@ -119,12 +110,127 @@ def get_monitors():
     return monitors
 
 
+# ─── WASAPI Audio Capture ────────────────────────────────────────────────────
+
+class AudioCapture:
+    """Captures system audio via WASAPI loopback into a circular buffer."""
+
+    def __init__(self, max_seconds=120):
+        self.max_seconds = max_seconds
+        self._pa = None
+        self._stream = None
+        self._lock = threading.Lock()
+        self._buffer = bytearray()
+        self._channels = 2
+        self._rate = 48000
+        self._sample_width = 2  # 16-bit
+        self._running = False
+        self._loopback_device = None
+        self._detect()
+
+    def _detect(self):
+        try:
+            self._pa = pyaudio.PyAudio()
+            wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            speakers = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            self._rate = int(speakers["defaultSampleRate"])
+            self._channels = speakers["maxOutputChannels"]
+
+            if speakers.get("isLoopbackDevice"):
+                self._loopback_device = speakers
+            else:
+                for i in range(self._pa.get_device_count()):
+                    dev = self._pa.get_device_info_by_index(i)
+                    if (dev.get("name", "").startswith(speakers["name"])
+                            and dev.get("isLoopbackDevice")):
+                        self._loopback_device = dev
+                        self._channels = dev["maxInputChannels"]
+                        break
+        except Exception:
+            self._loopback_device = None
+
+    @property
+    def available(self):
+        return self._loopback_device is not None
+
+    @property
+    def device_name(self):
+        if self._loopback_device:
+            return self._loopback_device["name"]
+        return None
+
+    def start(self):
+        if not self.available or self._running:
+            return
+        self._buffer = bytearray()
+        self._running = True
+        try:
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=self._channels,
+                rate=self._rate,
+                input=True,
+                input_device_index=self._loopback_device["index"],
+                frames_per_buffer=1024,
+                stream_callback=self._callback,
+            )
+        except Exception:
+            self._running = False
+
+    def stop(self):
+        self._running = False
+        if self._stream:
+            try:
+                self._stream.stop_stream()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def _callback(self, in_data, frame_count, time_info, status):
+        if not self._running:
+            return (None, pyaudio.paComplete)
+        max_bytes = self.max_seconds * self._rate * self._channels * self._sample_width
+        with self._lock:
+            self._buffer.extend(in_data)
+            if len(self._buffer) > max_bytes:
+                self._buffer = self._buffer[-max_bytes:]
+        return (None, pyaudio.paContinue)
+
+    def get_last_seconds(self, seconds):
+        """Return raw PCM bytes for the last N seconds."""
+        bytes_needed = seconds * self._rate * self._channels * self._sample_width
+        with self._lock:
+            if len(self._buffer) >= bytes_needed:
+                return bytes(self._buffer[-bytes_needed:])
+            return bytes(self._buffer)
+
+    def save_wav(self, path, seconds):
+        """Save the last N seconds to a WAV file. Returns True if audio was saved."""
+        pcm = self.get_last_seconds(seconds)
+        if not pcm:
+            return False
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(self._channels)
+            wf.setsampwidth(self._sample_width)
+            wf.setframerate(self._rate)
+            wf.writeframes(pcm)
+        return True
+
+    def cleanup(self):
+        self.stop()
+        if self._pa:
+            try:
+                self._pa.terminate()
+            except Exception:
+                pass
+
+
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 DEFAULTS = {
     "monitor": 0,
-    "fps": 30,
-    "quality": 1,
+    "fps": 60,
     "buffer_seconds": 30,
     "output_folder": "",
 }
@@ -183,13 +289,12 @@ def detect_nvenc():
 # ─── FFmpeg Capture ──────────────────────────────────────────────────────────
 
 class FFmpegCapture:
-    def __init__(self, root, config, monitors, on_status_change=None):
+    def __init__(self, root, config, monitors, audio_capture):
         self.root = root
         self.config = config
         self.monitors = monitors
-        self.on_status_change = on_status_change
+        self.audio = audio_capture
         self.proc = None
-        self.paused = False
         self.segment_dir = tempfile.mkdtemp(prefix="cliprec_")
         self.has_nvenc = detect_nvenc()
         self._poll_id = None
@@ -203,50 +308,48 @@ class FFmpegCapture:
 
         mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
         mon = self.monitors[mon_idx]
-        fps = self.config.get("fps", 30)
-        quality = self.config.get("quality", 1)
+        fps = self.config.get("fps", 60)
         buffer_secs = self.config.get("buffer_seconds", 30)
         segment_wrap = math.ceil(buffer_secs / SEGMENT_DURATION) + 2
+        keyframe_interval = fps * SEGMENT_DURATION
         seg_pattern = os.path.join(self.segment_dir, "seg_%03d.ts")
 
+        # Video input
+        cmd = [FFMPEG, "-y"]
+        cmd += [
+            "-f", "gdigrab",
+            "-framerate", str(fps),
+            "-offset_x", str(mon["x"]),
+            "-offset_y", str(mon["y"]),
+            "-video_size", f"{mon['w']}x{mon['h']}",
+            "-i", "desktop",
+        ]
+
+        # Video encoding
         if self.has_nvenc:
-            cmd = [
-                FFMPEG, "-y",
-                "-f", "gdigrab",
-                "-framerate", str(fps),
-                "-offset_x", str(mon["x"]),
-                "-offset_y", str(mon["y"]),
-                "-video_size", f"{mon['w']}x{mon['h']}",
-                "-i", "desktop",
+            cmd += [
                 "-c:v", "h264_nvenc",
                 "-preset", "p1", "-tune", "ll",
-                "-rc", "constqp", "-qp", str(QUALITY_QP[quality]),
-                "-f", "segment",
-                "-segment_time", str(SEGMENT_DURATION),
-                "-segment_wrap", str(segment_wrap),
-                "-reset_timestamps", "1",
-                "-segment_format", "mpegts",
-                seg_pattern,
+                "-rc", "constqp", "-qp", "20",
+                "-g", str(keyframe_interval),
             ]
         else:
-            cmd = [
-                FFMPEG, "-y",
-                "-f", "gdigrab",
-                "-framerate", str(fps),
-                "-offset_x", str(mon["x"]),
-                "-offset_y", str(mon["y"]),
-                "-video_size", f"{mon['w']}x{mon['h']}",
-                "-i", "desktop",
+            cmd += [
                 "-c:v", "libx264",
                 "-preset", "ultrafast", "-tune", "zerolatency",
-                "-crf", str(QUALITY_CRF[quality]),
-                "-f", "segment",
-                "-segment_time", str(SEGMENT_DURATION),
-                "-segment_wrap", str(segment_wrap),
-                "-reset_timestamps", "1",
-                "-segment_format", "mpegts",
-                seg_pattern,
+                "-crf", "18",
+                "-g", str(keyframe_interval),
             ]
+
+        # Segment output
+        cmd += [
+            "-f", "segment",
+            "-segment_time", str(SEGMENT_DURATION),
+            "-segment_wrap", str(segment_wrap),
+            "-reset_timestamps", "1",
+            "-segment_format", "mpegts",
+            seg_pattern,
+        ]
 
         self.proc = subprocess.Popen(
             cmd,
@@ -255,13 +358,14 @@ class FFmpegCapture:
             stderr=subprocess.DEVNULL,
             creationflags=0x08000000,
         )
-        self.paused = False
+        if self.audio:
+            self.audio.start()
         self._start_poll()
-        if self.on_status_change:
-            self.on_status_change("recording")
 
     def stop(self):
         self._stop_poll()
+        if self.audio:
+            self.audio.stop()
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write(b"q")
@@ -273,15 +377,6 @@ class FFmpegCapture:
             except subprocess.TimeoutExpired:
                 self.proc.kill()
         self.proc = None
-
-    def toggle_pause(self):
-        if self.paused:
-            self.start()
-        else:
-            self.stop()
-            self.paused = True
-            if self.on_status_change:
-                self.on_status_change("paused")
 
     def restart(self):
         self.stop()
@@ -340,23 +435,59 @@ class FFmpegCapture:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(output_folder, f"Clip_{timestamp}.mp4")
 
-        cmd = [
-            FFMPEG, "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_file,
-            "-ss", str(ss),
-            "-t", str(replay_secs),
-            "-c", "copy",
-            "-movflags", "+faststart",
-            output_path,
-        ]
+        has_audio = self.audio and self.audio.available
+        wav_path = os.path.join(self.segment_dir, f"audio_{concat_id}.wav") if has_audio else None
+
+        if has_audio:
+            self.audio.save_wav(wav_path, replay_secs)
+
+        if has_audio and wav_path and os.path.exists(wav_path):
+            video_only = os.path.join(self.segment_dir, f"video_{concat_id}.mp4")
+            cmd_video = [
+                FFMPEG, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-ss", str(ss),
+                "-t", str(replay_secs),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                video_only,
+            ]
+            cmd_mux = [
+                FFMPEG, "-y",
+                "-i", video_only,
+                "-i", wav_path,
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+        else:
+            video_only = None
+            cmd_video = [
+                FFMPEG, "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_file,
+                "-ss", str(ss),
+                "-t", str(replay_secs),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+            cmd_mux = None
 
         def _run():
             try:
                 subprocess.run(
-                    cmd, capture_output=True, timeout=30,
+                    cmd_video, capture_output=True, timeout=30,
                     creationflags=0x08000000,
                 )
+                if cmd_mux:
+                    subprocess.run(
+                        cmd_mux, capture_output=True, timeout=30,
+                        creationflags=0x08000000,
+                    )
                 winsound.PlaySound(
                     "SystemExclamation",
                     winsound.SND_ALIAS | winsound.SND_ASYNC,
@@ -364,10 +495,12 @@ class FFmpegCapture:
             except Exception:
                 pass
             finally:
-                try:
-                    os.remove(concat_file)
-                except Exception:
-                    pass
+                for tmp in [concat_file, wav_path, video_only]:
+                    if tmp:
+                        try:
+                            os.remove(tmp)
+                        except Exception:
+                            pass
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -380,7 +513,7 @@ class FFmpegCapture:
             self._poll_id = None
 
     def _check_health(self):
-        if self.proc and self.proc.poll() is not None and not self.paused:
+        if self.proc and self.proc.poll() is not None:
             self.proc = None
             self.root.after(1000, self.start)
             return
@@ -394,123 +527,105 @@ class FFmpegCapture:
             pass
 
 
-# ─── Hotkeys ─────────────────────────────────────────────────────────────────
+# ─── Notification Banner ────────────────────────────────────────────────────
+
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_TOOLWINDOW = 0x00000080
+
+
+class NotificationBanner:
+    def __init__(self, root, monitors, config):
+        self.root = root
+        self.monitors = monitors
+        self.config = config
+        self._win = None
+        self._hide_id = None
+
+    def show(self, text="Clip enregistré", duration_ms=3000):
+        if self._win and self._win.winfo_exists():
+            self._win.destroy()
+        if self._hide_id:
+            self.root.after_cancel(self._hide_id)
+
+        mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
+        mon = self.monitors[mon_idx]
+
+        self._win = tk.Toplevel(self.root)
+        self._win.overrideredirect(True)
+        self._win.attributes("-topmost", True)
+        self._win.configure(bg="#1a1a2e")
+
+        w, h = 220, 36
+        x = mon["x"] + mon["w"] - w - 20
+        y = mon["y"] + 20
+        self._win.geometry(f"{w}x{h}+{x}+{y}")
+
+        tk.Label(
+            self._win, text=f"  {text}  ✓", bg="#1a1a2e", fg="#22cc66",
+            font=("Segoe UI", 11, "bold"), anchor="center",
+        ).pack(fill="both", expand=True)
+
+        self._win.after(100, self._make_click_through)
+        self._hide_id = self.root.after(duration_ms, self._hide)
+
+    def _make_click_through(self):
+        if not self._win or not self._win.winfo_exists():
+            return
+        hwnd = user32.GetParent(self._win.winfo_id())
+        if not hwnd:
+            hwnd = self._win.winfo_id()
+        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongPtrW(
+            hwnd, GWL_EXSTYLE,
+            ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+        )
+        try:
+            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+        except Exception:
+            pass
+
+    def _hide(self):
+        if self._win and self._win.winfo_exists():
+            self._win.destroy()
+        self._win = None
+        self._hide_id = None
+
+
+# ─── Hotkey (Ctrl+Alt+R only) ───────────────────────────────────────────────
 
 HOTKEY_SAVE = 1
-HOTKEY_PAUSE = 2
-HOTKEY_SETTINGS = 3
-HOTKEY_QUIT = 4
-
-HOTKEY_DEFS = {
-    HOTKEY_SAVE:     0x52,  # R
-    HOTKEY_PAUSE:    0x50,  # P
-    HOTKEY_SETTINGS: 0x53,  # S
-    HOTKEY_QUIT:     0x51,  # Q
-}
 
 
 class HotkeyManager:
-    def __init__(self, root, callbacks):
+    def __init__(self, root, on_save):
         self.root = root
-        self.callbacks = callbacks
+        self.on_save = on_save
         self._thread_id = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        for hk_id, vk in HOTKEY_DEFS.items():
-            user32.RegisterHotKey(None, hk_id, MOD_CTRL_ALT, vk)
+        user32.RegisterHotKey(None, HOTKEY_SAVE, MOD_CTRL_ALT, 0x52)  # R
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_HOTKEY:
-                hk_id = msg.wParam
-                cb = self.callbacks.get(hk_id)
-                if cb:
-                    self.root.after(0, cb)
+            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_SAVE:
+                self.root.after(0, self.on_save)
 
     def stop(self):
         if self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
 
 
-# ─── Status Overlay ──────────────────────────────────────────────────────────
-
-class StatusOverlay:
-    def __init__(self, root, monitors, config):
-        self.root = root
-        self.monitors = monitors
-        self.config = config
-        self.status = "recording"
-        self.TC = "#FF00FE"
-
-        self.win = tk.Toplevel(root)
-        self.win.withdraw()
-        self.win.title("ClipRecStatus")
-        self.win.overrideredirect(True)
-        self.win.attributes("-topmost", True)
-        self.win.attributes("-transparentcolor", self.TC)
-        self.win.config(bg=self.TC)
-
-        self.canvas = tk.Canvas(
-            self.win, width=90, height=28,
-            bg=self.TC, highlightthickness=0, bd=0,
-        )
-        self.canvas.pack()
-
-        self._position()
-        self._draw()
-        self.win.deiconify()
-        self.win.after(500, self._make_click_through)
-        self._keep_on_top()
-
-    def _position(self):
-        mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
-        mon = self.monitors[mon_idx]
-        x = mon["x"] + mon["w"] - 110
-        y = mon["y"] + 16
-        self.win.geometry(f"90x28+{x}+{y}")
-
-    def _draw(self):
-        self.canvas.delete("all")
-        if self.status == "recording":
-            self.canvas.create_oval(6, 7, 20, 21, fill="#ff4444", outline="")
-            self.canvas.create_text(52, 14, text="REC", fill="#ffffff",
-                                    font=("Segoe UI", 9, "bold"))
-        elif self.status == "paused":
-            self.canvas.create_text(45, 14, text="PAUSE", fill="#ffaa00",
-                                    font=("Segoe UI", 9, "bold"))
-
-    def set_status(self, status):
-        self.status = status
-        self._draw()
-
-    def _make_click_through(self):
-        hwnd = user32.GetParent(self.win.winfo_id())
-        if not hwnd:
-            hwnd = self.win.winfo_id()
-        self.hwnd = hwnd
-        ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT)
-        try:
-            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
-        except Exception:
-            pass
-
-    def _keep_on_top(self):
-        self.win.attributes("-topmost", True)
-        self.root.after(2000, self._keep_on_top)
-
-
 # ─── Settings ────────────────────────────────────────────────────────────────
 
 class SettingsWindow:
-    def __init__(self, root, config, monitors, capture, overlay):
+    def __init__(self, root, config, monitors, capture):
         self.root = root
         self.config = config
         self.monitors = monitors
         self.capture = capture
-        self.overlay = overlay
         self.win = None
 
     def toggle(self):
@@ -523,7 +638,7 @@ class SettingsWindow:
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Paramètres")
-        self.win.geometry("400x500")
+        self.win.geometry("420x420")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
@@ -559,30 +674,29 @@ class SettingsWindow:
         row.pack(fill="x", padx=10, pady=4)
         tk.Label(row, text="FPS :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
-        self.fps_var = tk.StringVar(value=str(self.config.get("fps", 30)))
+        self.fps_var = tk.StringVar(value=str(self.config.get("fps", 60)))
         om2 = tk.OptionMenu(row, self.fps_var, *[str(f) for f in FPS_OPTIONS])
         om2.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
                    highlightthickness=0, font=FONT_S, relief="flat")
         om2["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
         om2.pack(side="left")
 
-        # Quality
+        # Audio (WASAPI loopback — read-only)
         row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=4)
-        tk.Label(row, text="Qualité :", bg=BG2, fg=FG, font=FONT,
+        row.pack(fill="x", padx=10, pady=(4, 2))
+        tk.Label(row, text="Audio :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
-        self.quality_var = tk.StringVar(
-            value=QUALITY_LABELS[self.config.get("quality", 1)]
-        )
-        om3 = tk.OptionMenu(row, self.quality_var, *QUALITY_LABELS)
-        om3.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                   highlightthickness=0, font=FONT_S, relief="flat")
-        om3["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-        om3.pack(side="left", fill="x", expand=True)
+        audio_name = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else None
+        if audio_name:
+            tk.Label(row, text=audio_name, bg=BG2, fg="#22cc66", font=FONT_S,
+                     anchor="w").pack(side="left", fill="x", expand=True)
+        else:
+            tk.Label(row, text="Non disponible", bg=BG2, fg=FG2, font=FONT_S,
+                     anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Encoder (read-only)
+        # Encoder
         row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(4, 8))
+        row.pack(fill="x", padx=10, pady=(0, 8))
         tk.Label(row, text="Encodeur :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         enc = "NVENC (GPU)" if self.capture.has_nvenc else "x264 (CPU)"
@@ -593,7 +707,7 @@ class SettingsWindow:
         rf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
         rf.pack(fill="x", padx=15, pady=(0, 10))
 
-        # Buffer duration
+        # Buffer
         row = tk.Frame(rf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(8, 4))
         tk.Label(row, text="Durée (s) :", bg=BG2, fg=FG, font=FONT,
@@ -620,28 +734,19 @@ class SettingsWindow:
                   bg=BG3, fg=FG, relief="flat", font=FONT_S,
                   cursor="hand2", width=3).pack(side="left")
 
-        # ── Raccourcis ──
-        self._section("Raccourcis")
+        # ── Raccourci ──
+        self._section("Raccourci")
         kf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
         kf.pack(fill="x", padx=15, pady=(0, 10))
-
-        shortcuts = [
-            ("Ctrl+Alt+R", "Sauver le replay"),
-            ("Ctrl+Alt+P", "Pause / reprendre"),
-            ("Ctrl+Alt+S", "Paramètres"),
-            ("Ctrl+Alt+Q", "Quitter"),
-        ]
-        for key, desc in shortcuts:
-            row = tk.Frame(kf, bg=BG2)
-            row.pack(fill="x", padx=10, pady=2)
-            tk.Label(row, text=key, bg=BG2, fg=ACCENT, font=FONT_B,
-                     width=14, anchor="w").pack(side="left")
-            tk.Label(row, text=desc, bg=BG2, fg=FG2, font=FONT_S).pack(side="left")
-        tk.Frame(kf, bg=BG2, height=4).pack()
+        row = tk.Frame(kf, bg=BG2)
+        row.pack(fill="x", padx=10, pady=6)
+        tk.Label(row, text="Ctrl+Alt+R", bg=BG2, fg=ACCENT, font=FONT_B,
+                 width=14, anchor="w").pack(side="left")
+        tk.Label(row, text="Sauver le clip", bg=BG2, fg=FG2, font=FONT_S).pack(side="left")
 
         # ── Boutons ──
         bf = tk.Frame(self.win, bg=BG)
-        bf.pack(fill="x", padx=15, pady=(5, 10))
+        bf.pack(fill="x", padx=15, pady=(8, 10))
         tk.Button(bf, text="Appliquer", command=self._apply,
                   bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
                   padx=15, cursor="hand2").pack(side="left", padx=(0, 8))
@@ -664,40 +769,28 @@ class SettingsWindow:
         if folder:
             self.folder_var.set(folder)
 
-    def _read_values(self):
+    def _apply(self):
         mon_str = self.monitor_var.get()
         try:
             monitor = int(mon_str.split(":")[0]) - 1
         except Exception:
             monitor = 0
 
-        quality = 1
-        qval = self.quality_var.get()
-        for i, label in enumerate(QUALITY_LABELS):
-            if label == qval:
-                quality = i
-                break
-
-        return {
+        new = {
             "monitor": monitor,
             "fps": int(self.fps_var.get()),
-            "quality": quality,
             "buffer_seconds": int(self.buffer_var.get()),
             "output_folder": self.folder_var.get(),
         }
 
-    def _apply(self):
-        new = self._read_values()
         capture_changed = (
             new["monitor"] != self.config["monitor"]
             or new["fps"] != self.config.get("fps")
-            or new["quality"] != self.config.get("quality")
             or new["buffer_seconds"] != self.config.get("buffer_seconds")
         )
         self.config.update(new)
         if capture_changed:
             self.capture.restart()
-            self.overlay._position()
 
     def _save(self):
         self._apply()
@@ -711,13 +804,13 @@ class SettingsWindow:
 # ─── System Tray ─────────────────────────────────────────────────────────────
 
 class TrayIcon:
-    def __init__(self, root, config, capture, settings, overlay, shutdown_fn):
+    def __init__(self, root, config, capture, settings, shutdown_fn, save_fn):
         self.root = root
         self.config = config
         self.capture = capture
         self.settings = settings
-        self.overlay = overlay
         self.shutdown_fn = shutdown_fn
+        self.save_fn = save_fn
         self.icon = None
         self._start()
 
@@ -725,12 +818,8 @@ class TrayIcon:
         image = create_tray_icon_image()
         menu = pystray.Menu(
             pystray.MenuItem(
-                "Sauver le clip",
-                lambda: self.root.after(0, self.capture.save_replay),
-            ),
-            pystray.MenuItem(
-                "Pause / Reprendre",
-                lambda: self.root.after(0, self.capture.toggle_pause),
+                "Sauver le clip (Ctrl+Alt+R)",
+                lambda: self.root.after(0, self.save_fn),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -747,7 +836,7 @@ class TrayIcon:
                 lambda: self.root.after(0, self.shutdown_fn),
             ),
         )
-        self.icon = pystray.Icon("Clip Recorder", image, "Clip Recorder", menu)
+        self.icon = pystray.Icon("Clip Recorder", image, "Clip Recorder — REC", menu)
         threading.Thread(target=self.icon.run, daemon=True).start()
 
     def _open_folder(self):
@@ -797,20 +886,22 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
-    overlay = StatusOverlay(root, monitors, config)
-
-    def on_status_change(status):
-        overlay.set_status(status)
-
-    capture = FFmpegCapture(root, config, monitors, on_status_change)
-    settings = SettingsWindow(root, config, monitors, capture, overlay)
+    audio = AudioCapture(max_seconds=max(BUFFER_OPTIONS))
+    capture = FFmpegCapture(root, config, monitors, audio)
+    banner = NotificationBanner(root, monitors, config)
+    settings = SettingsWindow(root, config, monitors, capture)
 
     tray = None
     hotkeys = None
 
+    def do_save():
+        capture.save_replay()
+        banner.show()
+
     def shutdown():
         nonlocal tray, hotkeys
         capture.cleanup()
+        audio.cleanup()
         if hotkeys:
             hotkeys.stop()
         if tray:
@@ -818,15 +909,8 @@ def main():
         root.destroy()
         sys.exit(0)
 
-    callbacks = {
-        HOTKEY_SAVE:     capture.save_replay,
-        HOTKEY_PAUSE:    capture.toggle_pause,
-        HOTKEY_SETTINGS: settings.toggle,
-        HOTKEY_QUIT:     shutdown,
-    }
-
-    hotkeys = HotkeyManager(root, callbacks)
-    tray = TrayIcon(root, config, capture, settings, overlay, shutdown)
+    hotkeys = HotkeyManager(root, do_save)
+    tray = TrayIcon(root, config, capture, settings, shutdown, do_save)
 
     capture.start()
     root.mainloop()

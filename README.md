@@ -1,28 +1,20 @@
 # Clip Recorder
 
-Enregistreur d'écran "replay" — capture en continu, sauvegarde les dernières X secondes en MP4 via un raccourci clavier. Léger, pas de bloatware.
+Enregistreur d'écran "replay" — capture en continu, sauvegarde les dernières X secondes en MP4 avec le son. Léger, pas de bloatware.
 
 ## Utilisation
 
-Lancer `ClipRecorder.exe` — la capture démarre automatiquement.
-Un indicateur "REC" apparaît en haut à droite de l'écran.
+Lancer `ClipRecorder.exe` — la capture démarre automatiquement en arrière-plan.
+Une icône rouge apparaît dans la barre des tâches (system tray).
 
-## Raccourcis
+**`Ctrl+Alt+R`** → Sauvegarde un clip des dernières X secondes.
 
-| Raccourci | Action |
-|-----------|--------|
-| `Ctrl+Alt+R` | Sauver le replay (dernières X secondes) |
-| `Ctrl+Alt+P` | Pause / reprendre la capture |
-| `Ctrl+Alt+S` | Ouvrir les paramètres |
-| `Ctrl+Alt+Q` | Quitter |
+Clic droit sur l'icône pour : sauver le clip, paramètres, ouvrir le dossier, quitter.
 
-## Paramètres
+## Audio
 
-- Écran à capturer (multi-moniteur supporté)
-- FPS : 15, 30 ou 60
-- Qualité : basse / moyenne / haute
-- Durée du buffer : 15 à 120 secondes
-- Dossier de sortie
+L'audio système est capturé automatiquement via WASAPI loopback (pyaudiowpatch).
+Aucune configuration nécessaire — le son des haut-parleurs par défaut est enregistré.
 
 L'encodeur GPU (NVENC) est utilisé automatiquement si disponible.
 
