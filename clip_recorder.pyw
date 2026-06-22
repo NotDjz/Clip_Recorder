@@ -443,9 +443,13 @@ class FFmpegCapture:
             except Exception:
                 pass
             try:
-                self.proc.wait(timeout=3)
+                self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.proc.kill()
+                try:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=1)
+                except Exception:
+                    self.proc.kill()
         self.proc = None
 
     def restart(self):
@@ -960,6 +964,20 @@ class TrayIcon:
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
+    # Single instance via Win32 mutex
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "ClipRecorder_SingleInstance")
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        sys.exit(0)
+
+    # Clean orphan temp dirs from previous crashes
+    try:
+        tmp = tempfile.gettempdir()
+        for d in os.listdir(tmp):
+            if d.startswith("cliprec_"):
+                shutil.rmtree(os.path.join(tmp, d), ignore_errors=True)
+    except Exception:
+        pass
+
     # Check FFmpeg
     try:
         subprocess.run(
