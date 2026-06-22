@@ -69,7 +69,7 @@ FONT_S = ("Segoe UI", 9)
 # ─── Constantes capture ─────────────────────────────────────────────────────
 
 SEGMENT_DURATION = 5
-FPS_OPTIONS = [30, 60, 120]
+FPS_OPTIONS = [30, 60]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
 # ─── Moniteurs ───────────────────────────────────────────────────────────────
