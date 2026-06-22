@@ -388,6 +388,7 @@ class FFmpegCapture:
         cmd += [
             "-f", "gdigrab",
             "-framerate", str(fps),
+            "-draw_mouse", "0",
             "-offset_x", str(mon["x"]),
             "-offset_y", str(mon["y"]),
             "-video_size", f"{mon['w']}x{mon['h']}",
