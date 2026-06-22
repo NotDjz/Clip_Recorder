@@ -113,19 +113,25 @@ def get_monitors():
 # ─── WASAPI Audio Capture ────────────────────────────────────────────────────
 
 class AudioCapture:
-    """Captures system audio via WASAPI loopback into a circular buffer."""
+    """Captures system audio (WASAPI loopback) + microphone into circular buffers."""
 
     def __init__(self, max_seconds=120):
         self.max_seconds = max_seconds
         self._pa = None
-        self._stream = None
-        self._lock = threading.Lock()
-        self._buffer = bytearray()
+        self._loopback_stream = None
+        self._mic_stream = None
+        self._loopback_lock = threading.Lock()
+        self._mic_lock = threading.Lock()
+        self._loopback_buf = bytearray()
+        self._mic_buf = bytearray()
         self._channels = 2
         self._rate = 48000
-        self._sample_width = 2  # 16-bit
+        self._mic_channels = 2
+        self._mic_rate = 48000
+        self._sample_width = 2
         self._running = False
         self._loopback_device = None
+        self._mic_device = None
         self._detect()
 
     def _detect(self):
@@ -146,6 +152,14 @@ class AudioCapture:
                         self._loopback_device = dev
                         self._channels = dev["maxInputChannels"]
                         break
+
+            mic_idx = wasapi.get("defaultInputDevice", -1)
+            if mic_idx >= 0:
+                mic = self._pa.get_device_info_by_index(mic_idx)
+                if mic["maxInputChannels"] > 0 and not mic.get("isLoopbackDevice"):
+                    self._mic_device = mic
+                    self._mic_rate = int(mic["defaultSampleRate"])
+                    self._mic_channels = mic["maxInputChannels"]
         except Exception:
             self._loopback_device = None
 
@@ -154,66 +168,121 @@ class AudioCapture:
         return self._loopback_device is not None
 
     @property
+    def mic_available(self):
+        return self._mic_device is not None
+
+    @property
     def device_name(self):
         if self._loopback_device:
             return self._loopback_device["name"]
         return None
 
+    @property
+    def mic_name(self):
+        if self._mic_device:
+            return self._mic_device["name"]
+        return None
+
     def start(self):
-        if not self.available or self._running:
+        if self._running:
             return
-        self._buffer = bytearray()
+        self._loopback_buf = bytearray()
+        self._mic_buf = bytearray()
         self._running = True
-        try:
-            self._stream = self._pa.open(
-                format=pyaudio.paInt16,
-                channels=self._channels,
-                rate=self._rate,
-                input=True,
-                input_device_index=self._loopback_device["index"],
-                frames_per_buffer=1024,
-                stream_callback=self._callback,
-            )
-        except Exception:
+
+        if self._loopback_device:
+            try:
+                self._loopback_stream = self._pa.open(
+                    format=pyaudio.paInt16,
+                    channels=self._channels,
+                    rate=self._rate,
+                    input=True,
+                    input_device_index=self._loopback_device["index"],
+                    frames_per_buffer=1024,
+                    stream_callback=self._loopback_callback,
+                )
+            except Exception:
+                pass
+
+        if self._mic_device:
+            try:
+                self._mic_stream = self._pa.open(
+                    format=pyaudio.paInt16,
+                    channels=self._mic_channels,
+                    rate=self._mic_rate,
+                    input=True,
+                    input_device_index=self._mic_device["index"],
+                    frames_per_buffer=1024,
+                    stream_callback=self._mic_callback,
+                )
+            except Exception:
+                pass
+
+        if not self._loopback_stream and not self._mic_stream:
             self._running = False
 
     def stop(self):
         self._running = False
-        if self._stream:
-            try:
-                self._stream.stop_stream()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
+        for stream in (self._loopback_stream, self._mic_stream):
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+        self._loopback_stream = None
+        self._mic_stream = None
 
-    def _callback(self, in_data, frame_count, time_info, status):
+    def _loopback_callback(self, in_data, frame_count, time_info, status):
         if not self._running:
             return (None, pyaudio.paComplete)
         max_bytes = self.max_seconds * self._rate * self._channels * self._sample_width
-        with self._lock:
-            self._buffer.extend(in_data)
-            if len(self._buffer) > max_bytes:
-                self._buffer = self._buffer[-max_bytes:]
+        with self._loopback_lock:
+            self._loopback_buf.extend(in_data)
+            if len(self._loopback_buf) > max_bytes:
+                self._loopback_buf = self._loopback_buf[-max_bytes:]
         return (None, pyaudio.paContinue)
 
-    def get_last_seconds(self, seconds):
-        """Return raw PCM bytes for the last N seconds."""
-        bytes_needed = seconds * self._rate * self._channels * self._sample_width
-        with self._lock:
-            if len(self._buffer) >= bytes_needed:
-                return bytes(self._buffer[-bytes_needed:])
-            return bytes(self._buffer)
+    def _mic_callback(self, in_data, frame_count, time_info, status):
+        if not self._running:
+            return (None, pyaudio.paComplete)
+        max_bytes = self.max_seconds * self._mic_rate * self._mic_channels * self._sample_width
+        with self._mic_lock:
+            self._mic_buf.extend(in_data)
+            if len(self._mic_buf) > max_bytes:
+                self._mic_buf = self._mic_buf[-max_bytes:]
+        return (None, pyaudio.paContinue)
+
+    def _get_pcm(self, buf, lock, rate, channels, seconds):
+        bytes_needed = seconds * rate * channels * self._sample_width
+        with lock:
+            if len(buf) >= bytes_needed:
+                return bytes(buf[-bytes_needed:])
+            return bytes(buf) if buf else None
 
     def save_wav(self, path, seconds):
-        """Save the last N seconds to a WAV file. Returns True if audio was saved."""
-        pcm = self.get_last_seconds(seconds)
+        """Save loopback audio to WAV. Returns True if saved."""
+        pcm = self._get_pcm(self._loopback_buf, self._loopback_lock,
+                            self._rate, self._channels, seconds)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
             wf.setnchannels(self._channels)
             wf.setsampwidth(self._sample_width)
             wf.setframerate(self._rate)
+            wf.writeframes(pcm)
+        return True
+
+    def save_mic_wav(self, path, seconds):
+        """Save microphone audio to WAV. Returns True if saved."""
+        pcm = self._get_pcm(self._mic_buf, self._mic_lock,
+                            self._mic_rate, self._mic_channels, seconds)
+        if not pcm:
+            return False
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(self._mic_channels)
+            wf.setsampwidth(self._sample_width)
+            wf.setframerate(self._mic_rate)
             wf.writeframes(pcm)
         return True
 
@@ -435,13 +504,31 @@ class FFmpegCapture:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(output_folder, f"Clip_{timestamp}.mp4")
 
-        has_audio = self.audio and self.audio.available
-        wav_path = os.path.join(self.segment_dir, f"audio_{concat_id}.wav") if has_audio else None
+        has_loopback = self.audio and self.audio.available
+        has_mic = self.audio and self.audio.mic_available
+        has_any_audio = has_loopback or has_mic
 
-        if has_audio:
-            self.audio.save_wav(wav_path, replay_secs)
+        loopback_wav = os.path.join(self.segment_dir, f"loopback_{concat_id}.wav") if has_loopback else None
+        mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
+        mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
-        if has_audio and wav_path and os.path.exists(wav_path):
+        if has_loopback:
+            self.audio.save_wav(loopback_wav, replay_secs)
+        if has_mic:
+            self.audio.save_mic_wav(mic_wav, replay_secs)
+
+        audio_wav = None
+        if has_loopback and has_mic and os.path.exists(loopback_wav) and os.path.exists(mic_wav):
+            audio_wav = mixed_wav
+        elif has_loopback and loopback_wav and os.path.exists(loopback_wav):
+            audio_wav = loopback_wav
+        elif has_mic and mic_wav and os.path.exists(mic_wav):
+            audio_wav = mic_wav
+
+        if audio_wav and audio_wav != mixed_wav:
+            mixed_wav = None
+
+        if has_any_audio and audio_wav:
             video_only = os.path.join(self.segment_dir, f"video_{concat_id}.mp4")
             cmd_video = [
                 FFMPEG, "-y",
@@ -452,16 +539,6 @@ class FFmpegCapture:
                 "-c", "copy",
                 "-movflags", "+faststart",
                 video_only,
-            ]
-            cmd_mux = [
-                FFMPEG, "-y",
-                "-i", video_only,
-                "-i", wav_path,
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
-                "-shortest",
-                "-movflags", "+faststart",
-                output_path,
             ]
         else:
             video_only = None
@@ -475,7 +552,6 @@ class FFmpegCapture:
                 "-movflags", "+faststart",
                 output_path,
             ]
-            cmd_mux = None
 
         def _run():
             try:
@@ -483,11 +559,29 @@ class FFmpegCapture:
                     cmd_video, capture_output=True, timeout=30,
                     creationflags=0x08000000,
                 )
-                if cmd_mux:
-                    subprocess.run(
-                        cmd_mux, capture_output=True, timeout=30,
-                        creationflags=0x08000000,
-                    )
+
+                if mixed_wav and loopback_wav and mic_wav:
+                    subprocess.run([
+                        FFMPEG, "-y",
+                        "-i", loopback_wav, "-i", mic_wav,
+                        "-filter_complex", "amix=inputs=2:duration=longest",
+                        "-ac", "2", "-ar", "48000",
+                        mixed_wav,
+                    ], capture_output=True, timeout=30,
+                       creationflags=0x08000000)
+
+                if video_only and audio_wav and os.path.exists(audio_wav):
+                    subprocess.run([
+                        FFMPEG, "-y",
+                        "-i", video_only, "-i", audio_wav,
+                        "-c:v", "copy",
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-shortest",
+                        "-movflags", "+faststart",
+                        output_path,
+                    ], capture_output=True, timeout=30,
+                       creationflags=0x08000000)
+
                 winsound.PlaySound(
                     "SystemExclamation",
                     winsound.SND_ALIAS | winsound.SND_ASYNC,
@@ -495,7 +589,7 @@ class FFmpegCapture:
             except Exception:
                 pass
             finally:
-                for tmp in [concat_file, wav_path, video_only]:
+                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only]:
                     if tmp:
                         try:
                             os.remove(tmp)
@@ -638,7 +732,7 @@ class SettingsWindow:
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Paramètres")
-        self.win.geometry("420x420")
+        self.win.geometry("420x450")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
@@ -684,7 +778,7 @@ class SettingsWindow:
         # Audio (WASAPI loopback — read-only)
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(4, 2))
-        tk.Label(row, text="Audio :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Son système :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         audio_name = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else None
         if audio_name:
@@ -692,6 +786,19 @@ class SettingsWindow:
                      anchor="w").pack(side="left", fill="x", expand=True)
         else:
             tk.Label(row, text="Non disponible", bg=BG2, fg=FG2, font=FONT_S,
+                     anchor="w").pack(side="left", fill="x", expand=True)
+
+        # Microphone (read-only)
+        row = tk.Frame(cf, bg=BG2)
+        row.pack(fill="x", padx=10, pady=(2, 2))
+        tk.Label(row, text="Micro :", bg=BG2, fg=FG, font=FONT,
+                 width=12, anchor="w").pack(side="left")
+        mic_name = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else None
+        if mic_name:
+            tk.Label(row, text=mic_name, bg=BG2, fg="#22cc66", font=FONT_S,
+                     anchor="w").pack(side="left", fill="x", expand=True)
+        else:
+            tk.Label(row, text="Non détecté", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
         # Encoder
