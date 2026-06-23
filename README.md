@@ -57,6 +57,8 @@ The exe is generated in `dist/ClipRecorder.exe`.
 
 ## How it works
 
+![Architecture](architecture.svg)
+
 FFmpeg runs continuously, writing rolling MPEG-TS segments to a temp directory. When you press the hotkey, the app concatenates the most recent segments into an MP4, muxes in the audio from WASAPI circular buffers, and saves the result. The capture is never interrupted.
 
 ## Requirements
