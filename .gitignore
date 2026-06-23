@@ -7,3 +7,22 @@ ffmpeg.exe
 Clips/
 .claude/
 CLAUDE.md
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

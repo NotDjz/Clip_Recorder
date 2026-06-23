@@ -1,33 +1,70 @@
 # Clip Recorder
 
-Enregistreur d'écran "replay" — capture en continu, sauvegarde les dernières X secondes en MP4 avec le son. Léger, pas de bloatware.
+Lightweight replay screen recorder for Windows — captures the last X seconds of your screen + audio as MP4 via a single hotkey. No overlay, no bloatware.
 
-## Utilisation
+Think ShadowPlay / Medal, but open-source and minimal.
 
-Lancer `ClipRecorder.exe` — la capture démarre automatiquement en arrière-plan.
-Une icône rouge apparaît dans la barre des tâches (system tray).
+## Features
 
-**`Ctrl+Alt+R`** → Sauvegarde un clip des dernières X secondes.
+- **Instant replay** — continuously records in the background, `Ctrl+Alt+R` saves the last N seconds
+- **System audio + microphone** — captured automatically via WASAPI loopback (pyaudiowpatch), zero configuration
+- **GPU-accelerated** — uses NVENC (NVIDIA) when available, falls back to x264 CPU encoding
+- **High FPS capture** — up to 240 FPS via DXGI Desktop Duplication (ddagrab), with GDI fallback for compatibility
+- **Multi-monitor support** — select which screen to capture in settings
+- **Portable** — single exe, config stored next to it, no install required
+- **System tray** — runs silently in the background, right-click for options
 
-Clic droit sur l'icône pour : sauver le clip, paramètres, ouvrir le dossier, quitter.
+## Installation
 
-## Audio
+### Binary (recommended)
 
-L'audio système est capturé automatiquement via WASAPI loopback (pyaudiowpatch).
-Aucune configuration nécessaire — le son des haut-parleurs par défaut est enregistré.
+Download `ClipRecorder.exe` from [Releases](../../releases) and place it in any folder. FFmpeg is bundled — no external dependencies needed.
 
-L'encodeur GPU (NVENC) est utilisé automatiquement si disponible.
+### From source
 
-## Recompiler
+Requires Python 3.10+ and [FFmpeg](https://ffmpeg.org/download.html) (`ffmpeg.exe` in the same folder or in PATH).
 
-Nécessite Python 3 + `py -m pip install -r requirements.txt`
-
+```bash
+pip install -r requirements.txt
+python clip_recorder.pyw
 ```
+
+## Usage
+
+1. Launch `ClipRecorder.exe` — capture starts automatically
+2. A red dot appears in the system tray
+3. Press **`Ctrl+Alt+R`** to save a clip
+4. A "Clip enregistre" banner appears for 3 seconds
+5. Right-click the tray icon for settings, folder access, or to quit
+
+### Settings
+
+- **Screen** — which monitor to capture
+- **FPS** — 30, 60, 120, or 240 (120/240 require ddagrab support)
+- **Buffer duration** — 15, 30, 60, 90, or 120 seconds
+- **Output folder** — where clips are saved (default: `Clips/` next to the exe)
+
+## Build
+
+```bash
+pip install -r requirements.txt
+python download_ffmpeg.py
+python generate_icon.py
 build.bat
 ```
 
-L'exe sort dans `dist\ClipRecorder.exe`.
+The exe is generated in `dist/ClipRecorder.exe`.
 
-## Licence
+## How it works
+
+FFmpeg runs continuously, writing rolling MPEG-TS segments to a temp directory. When you press the hotkey, the app concatenates the most recent segments into an MP4, muxes in the audio from WASAPI circular buffers, and saves the result. The capture is never interrupted.
+
+## Requirements
+
+- Windows 10/11
+- FFmpeg 5+ (bundled in releases, or bring your own)
+- NVIDIA GPU recommended (for NVENC + ddagrab), but not required
+
+## License
 
 [MIT](LICENSE)

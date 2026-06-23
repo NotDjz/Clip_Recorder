@@ -69,7 +69,7 @@ FONT_S = ("Segoe UI", 9)
 # ─── Constantes capture ─────────────────────────────────────────────────────
 
 SEGMENT_DURATION = 5
-FPS_OPTIONS = [30, 60]
+FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
 # ─── Moniteurs ───────────────────────────────────────────────────────────────
@@ -344,7 +344,7 @@ def create_tray_icon_image(size=64):
     return img
 
 
-# ─── NVENC detection ─────────────────────────────────────────────────────────
+# ─── FFmpeg feature detection ────────────────────────────────────────────────
 
 def detect_nvenc():
     try:
@@ -354,6 +354,18 @@ def detect_nvenc():
             creationflags=0x08000000,
         )
         return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
+
+def detect_ddagrab():
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-filters"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000,
+        )
+        return "ddagrab" in result.stdout
     except Exception:
         return False
 
@@ -369,6 +381,7 @@ class FFmpegCapture:
         self.proc = None
         self.segment_dir = tempfile.mkdtemp(prefix="cliprec_")
         self.has_nvenc = detect_nvenc()
+        self.has_ddagrab = detect_ddagrab()
         self._poll_id = None
         atexit.register(self.cleanup)
 
@@ -386,19 +399,24 @@ class FFmpegCapture:
         keyframe_interval = fps * SEGMENT_DURATION
         seg_pattern = os.path.join(self.segment_dir, "seg_%03d.ts")
 
-        # Video input
         cmd = [FFMPEG, "-y"]
-        cmd += [
-            "-f", "gdigrab",
-            "-framerate", str(fps),
-            "-draw_mouse", "0",
-            "-offset_x", str(mon["x"]),
-            "-offset_y", str(mon["y"]),
-            "-video_size", f"{mon['w']}x{mon['h']}",
-            "-i", "desktop",
-        ]
 
-        # Video encoding
+        if self.has_ddagrab:
+            cmd += [
+                "-f", "lavfi",
+                "-i", f"ddagrab=framerate={fps}:output_idx={mon_idx}:draw_mouse=0",
+            ]
+        else:
+            cmd += [
+                "-f", "gdigrab",
+                "-framerate", str(fps),
+                "-draw_mouse", "0",
+                "-offset_x", str(mon["x"]),
+                "-offset_y", str(mon["y"]),
+                "-video_size", f"{mon['w']}x{mon['h']}",
+                "-i", "desktop",
+            ]
+
         if self.has_nvenc:
             cmd += [
                 "-c:v", "h264_nvenc",
@@ -414,7 +432,6 @@ class FFmpegCapture:
                 "-g", str(keyframe_interval),
             ]
 
-        # Segment output
         cmd += [
             "-f", "segment",
             "-segment_time", str(SEGMENT_DURATION),
@@ -743,7 +760,7 @@ class SettingsWindow:
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Paramètres")
-        self.win.geometry("420x450")
+        self.win.geometry("420x490")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
@@ -779,8 +796,12 @@ class SettingsWindow:
         row.pack(fill="x", padx=10, pady=4)
         tk.Label(row, text="FPS :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
-        self.fps_var = tk.StringVar(value=str(self.config.get("fps", 60)))
-        om2 = tk.OptionMenu(row, self.fps_var, *[str(f) for f in FPS_OPTIONS])
+        fps_choices = FPS_OPTIONS if self.capture.has_ddagrab else [f for f in FPS_OPTIONS if f <= 60]
+        current_fps = self.config.get("fps", 60)
+        if current_fps not in fps_choices:
+            current_fps = fps_choices[-1]
+        self.fps_var = tk.StringVar(value=str(current_fps))
+        om2 = tk.OptionMenu(row, self.fps_var, *[str(f) for f in fps_choices])
         om2.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
                    highlightthickness=0, font=FONT_S, relief="flat")
         om2["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
@@ -814,11 +835,19 @@ class SettingsWindow:
 
         # Encoder
         row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(0, 8))
+        row.pack(fill="x", padx=10, pady=2)
         tk.Label(row, text="Encodeur :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         enc = "NVENC (GPU)" if self.capture.has_nvenc else "x264 (CPU)"
         tk.Label(row, text=enc, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
+
+        # Capture method
+        row = tk.Frame(cf, bg=BG2)
+        row.pack(fill="x", padx=10, pady=(2, 8))
+        tk.Label(row, text="Capture :", bg=BG2, fg=FG, font=FONT,
+                 width=12, anchor="w").pack(side="left")
+        cap_method = "DXGI (ddagrab)" if self.capture.has_ddagrab else "GDI (gdigrab)"
+        tk.Label(row, text=cap_method, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
 
         # ── Replay ──
         self._section("Replay")
