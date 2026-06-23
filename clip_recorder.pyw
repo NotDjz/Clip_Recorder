@@ -253,17 +253,20 @@ class AudioCapture:
                 self._mic_buf = self._mic_buf[-max_bytes:]
         return (None, pyaudio.paContinue)
 
-    def _get_pcm(self, buf, lock, rate, channels, seconds):
-        bytes_needed = seconds * rate * channels * self._sample_width
+    def _get_pcm(self, buf, lock, rate, channels, seconds, end_offset=0):
+        bps = rate * channels * self._sample_width
+        end_trim = int(end_offset * bps)
+        bytes_needed = int(seconds * bps)
         with lock:
-            if len(buf) >= bytes_needed:
-                return bytes(buf[-bytes_needed:])
-            return bytes(buf) if buf else None
+            usable = buf[:-end_trim] if end_trim > 0 else buf
+            if len(usable) >= bytes_needed:
+                return bytes(usable[-bytes_needed:])
+            return bytes(usable) if usable else None
 
-    def save_wav(self, path, seconds):
-        """Save loopback audio to WAV. Returns True if saved."""
+    def save_wav(self, path, seconds, end_offset=0):
+        """Save loopback audio to WAV. end_offset trims N seconds from the end."""
         pcm = self._get_pcm(self._loopback_buf, self._loopback_lock,
-                            self._rate, self._channels, seconds)
+                            self._rate, self._channels, seconds, end_offset)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
@@ -273,10 +276,10 @@ class AudioCapture:
             wf.writeframes(pcm)
         return True
 
-    def save_mic_wav(self, path, seconds):
-        """Save microphone audio to WAV. Returns True if saved."""
+    def save_mic_wav(self, path, seconds, end_offset=0):
+        """Save microphone audio to WAV. end_offset trims N seconds from the end."""
         pcm = self._get_pcm(self._mic_buf, self._mic_lock,
-                            self._mic_rate, self._mic_channels, seconds)
+                            self._mic_rate, self._mic_channels, seconds, end_offset)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
@@ -517,10 +520,13 @@ class FFmpegCapture:
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
+        audio_offset = time.time() - selected[-1][1]
+        audio_offset = max(0, audio_offset)
+
         if has_loopback:
-            self.audio.save_wav(loopback_wav, replay_secs)
+            self.audio.save_wav(loopback_wav, replay_secs, end_offset=audio_offset)
         if has_mic:
-            self.audio.save_mic_wav(mic_wav, replay_secs)
+            self.audio.save_mic_wav(mic_wav, replay_secs, end_offset=audio_offset)
 
         audio_wav = None
         if has_loopback and has_mic and os.path.exists(loopback_wav) and os.path.exists(mic_wav):
