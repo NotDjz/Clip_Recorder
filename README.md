@@ -7,7 +7,7 @@ Think ShadowPlay / Medal, but open-source and minimal.
 ## Features
 
 - **Instant replay** — continuously records in the background, `Ctrl+Alt+R` saves the last N seconds
-- **System audio + microphone** — captured automatically via WASAPI loopback (pyaudiowpatch), zero configuration
+- **System audio + microphone** — captured via WASAPI loopback (pyaudiowpatch), with selectable input/output devices
 - **GPU-accelerated** — uses NVENC (NVIDIA) when available, falls back to x264 CPU encoding
 - **High FPS capture** — up to 240 FPS via DXGI Desktop Duplication (ddagrab), with GDI fallback for compatibility
 - **Multi-monitor support** — select which screen to capture in settings
@@ -41,6 +41,8 @@ python clip_recorder.pyw
 
 - **Screen** — which monitor to capture
 - **FPS** — 30, 60, 120, or 240 (120/240 require ddagrab support)
+- **System audio** — select which output device to capture (loopback), or auto-detect
+- **Microphone** — select which mic to record, or auto-detect
 - **Buffer duration** — 15, 30, 60, 90, or 120 seconds
 - **Output folder** — where clips are saved (default: `Clips/` next to the exe)
 

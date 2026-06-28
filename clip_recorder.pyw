@@ -115,7 +115,7 @@ def get_monitors():
 class AudioCapture:
     """Captures system audio (WASAPI loopback) + microphone into circular buffers."""
 
-    def __init__(self, max_seconds=120):
+    def __init__(self, max_seconds=120, loopback_name="", mic_name=""):
         self.max_seconds = max_seconds
         self._pa = None
         self._loopback_stream = None
@@ -132,36 +132,96 @@ class AudioCapture:
         self._running = False
         self._loopback_device = None
         self._mic_device = None
+        self._configured_loopback = loopback_name
+        self._configured_mic = mic_name
         self._detect()
 
     def _detect(self):
         try:
             self._pa = pyaudio.PyAudio()
             wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-            speakers = self._pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            self._rate = int(speakers["defaultSampleRate"])
-            self._channels = speakers["maxOutputChannels"]
 
-            if speakers.get("isLoopbackDevice"):
-                self._loopback_device = speakers
-            else:
+            # --- Loopback (system audio) ---
+            if self._configured_loopback:
                 for i in range(self._pa.get_device_count()):
                     dev = self._pa.get_device_info_by_index(i)
-                    if (dev.get("name", "").startswith(speakers["name"])
-                            and dev.get("isLoopbackDevice")):
+                    if (dev.get("isLoopbackDevice")
+                            and self._configured_loopback in dev.get("name", "")):
                         self._loopback_device = dev
+                        self._rate = int(dev["defaultSampleRate"])
                         self._channels = dev["maxInputChannels"]
                         break
 
-            mic_idx = wasapi.get("defaultInputDevice", -1)
-            if mic_idx >= 0:
-                mic = self._pa.get_device_info_by_index(mic_idx)
-                if mic["maxInputChannels"] > 0 and not mic.get("isLoopbackDevice"):
-                    self._mic_device = mic
-                    self._mic_rate = int(mic["defaultSampleRate"])
-                    self._mic_channels = mic["maxInputChannels"]
+            if not self._loopback_device:
+                speakers = self._pa.get_device_info_by_index(
+                    wasapi["defaultOutputDevice"])
+                self._rate = int(speakers["defaultSampleRate"])
+                self._channels = speakers["maxOutputChannels"]
+                if speakers.get("isLoopbackDevice"):
+                    self._loopback_device = speakers
+                else:
+                    for i in range(self._pa.get_device_count()):
+                        dev = self._pa.get_device_info_by_index(i)
+                        if (dev.get("name", "").startswith(speakers["name"])
+                                and dev.get("isLoopbackDevice")):
+                            self._loopback_device = dev
+                            self._channels = dev["maxInputChannels"]
+                            break
+
+            # --- Microphone ---
+            if self._configured_mic:
+                for i in range(self._pa.get_device_count()):
+                    dev = self._pa.get_device_info_by_index(i)
+                    if (dev["maxInputChannels"] > 0
+                            and not dev.get("isLoopbackDevice")
+                            and self._configured_mic in dev.get("name", "")):
+                        self._mic_device = dev
+                        self._mic_rate = int(dev["defaultSampleRate"])
+                        self._mic_channels = dev["maxInputChannels"]
+                        break
+
+            if not self._mic_device:
+                mic_idx = wasapi.get("defaultInputDevice", -1)
+                if mic_idx >= 0:
+                    mic = self._pa.get_device_info_by_index(mic_idx)
+                    if mic["maxInputChannels"] > 0 and not mic.get(
+                            "isLoopbackDevice"):
+                        self._mic_device = mic
+                        self._mic_rate = int(mic["defaultSampleRate"])
+                        self._mic_channels = mic["maxInputChannels"]
         except Exception:
             self._loopback_device = None
+
+    @staticmethod
+    def list_loopback_devices():
+        pa = pyaudio.PyAudio()
+        devices = []
+        try:
+            for i in range(pa.get_device_count()):
+                dev = pa.get_device_info_by_index(i)
+                if dev.get("isLoopbackDevice") and dev["maxInputChannels"] > 0:
+                    devices.append(dev["name"])
+        finally:
+            pa.terminate()
+        return devices
+
+    @staticmethod
+    def list_mic_devices():
+        pa = pyaudio.PyAudio()
+        devices = []
+        try:
+            wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
+            for i in range(pa.get_device_count()):
+                dev = pa.get_device_info_by_index(i)
+                if (dev["maxInputChannels"] > 0
+                        and not dev.get("isLoopbackDevice")
+                        and dev.get("hostApi") == wasapi["index"]):
+                    devices.append(dev["name"])
+        except Exception:
+            pass
+        finally:
+            pa.terminate()
+        return devices
 
     @property
     def available(self):
@@ -198,7 +258,7 @@ class AudioCapture:
                     rate=self._rate,
                     input=True,
                     input_device_index=self._loopback_device["index"],
-                    frames_per_buffer=1024,
+                    frames_per_buffer=4096,
                     stream_callback=self._loopback_callback,
                 )
             except Exception:
@@ -212,7 +272,7 @@ class AudioCapture:
                     rate=self._mic_rate,
                     input=True,
                     input_device_index=self._mic_device["index"],
-                    frames_per_buffer=1024,
+                    frames_per_buffer=4096,
                     stream_callback=self._mic_callback,
                 )
             except Exception:
@@ -254,11 +314,17 @@ class AudioCapture:
         return (None, pyaudio.paContinue)
 
     def _get_pcm(self, buf, lock, rate, channels, seconds, end_offset=0):
-        bps = rate * channels * self._sample_width
+        frame_size = channels * self._sample_width
+        bps = rate * frame_size
         end_trim = int(end_offset * bps)
+        end_trim -= end_trim % frame_size
         bytes_needed = int(seconds * bps)
+        bytes_needed -= bytes_needed % frame_size
         with lock:
             usable = buf[:-end_trim] if end_trim > 0 else buf
+            trail = len(usable) % frame_size
+            if trail:
+                usable = usable[:-trail]
             if len(usable) >= bytes_needed:
                 return bytes(usable[-bytes_needed:])
             return bytes(usable) if usable else None
@@ -305,6 +371,8 @@ DEFAULTS = {
     "fps": 60,
     "buffer_seconds": 30,
     "output_folder": "",
+    "loopback_device": "",
+    "mic_device": "",
 }
 
 
@@ -592,7 +660,10 @@ class FFmpegCapture:
                     subprocess.run([
                         FFMPEG, "-y",
                         "-i", loopback_wav, "-i", mic_wav,
-                        "-filter_complex", "amix=inputs=2:duration=longest",
+                        "-filter_complex",
+                        "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];"
+                        "[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
+                        "[a0][a1]amix=inputs=2:duration=longest:normalize=0",
                         "-ac", "2", "-ar", "48000",
                         mixed_wav,
                     ], capture_output=True, timeout=30,
@@ -760,7 +831,7 @@ class SettingsWindow:
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Paramètres")
-        self.win.geometry("420x490")
+        self.win.geometry("420x510")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
@@ -807,28 +878,40 @@ class SettingsWindow:
         om2["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
         om2.pack(side="left")
 
-        # Audio (WASAPI loopback — read-only)
+        # Audio (WASAPI loopback)
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(4, 2))
         tk.Label(row, text="Son système :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
-        audio_name = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else None
-        if audio_name:
-            tk.Label(row, text=audio_name, bg=BG2, fg="#22cc66", font=FONT_S,
-                     anchor="w").pack(side="left", fill="x", expand=True)
+        loopback_devices = AudioCapture.list_loopback_devices()
+        current_loopback = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else ""
+        loopback_choices = ["(Auto — défaut système)"] + loopback_devices
+        self.loopback_var = tk.StringVar(value=current_loopback or loopback_choices[0])
+        if loopback_devices:
+            om_lb = tk.OptionMenu(row, self.loopback_var, *loopback_choices)
+            om_lb.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
+                         highlightthickness=0, font=FONT_S, relief="flat")
+            om_lb["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
+            om_lb.pack(side="left", fill="x", expand=True)
         else:
             tk.Label(row, text="Non disponible", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Microphone (read-only)
+        # Microphone
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(2, 2))
         tk.Label(row, text="Micro :", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
-        mic_name = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else None
-        if mic_name:
-            tk.Label(row, text=mic_name, bg=BG2, fg="#22cc66", font=FONT_S,
-                     anchor="w").pack(side="left", fill="x", expand=True)
+        mic_devices = AudioCapture.list_mic_devices()
+        current_mic = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else ""
+        mic_choices = ["(Auto — défaut système)"] + mic_devices
+        self.mic_var = tk.StringVar(value=current_mic or mic_choices[0])
+        if mic_devices:
+            om_mic = tk.OptionMenu(row, self.mic_var, *mic_choices)
+            om_mic.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
+                          highlightthickness=0, font=FONT_S, relief="flat")
+            om_mic["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
+            om_mic.pack(side="left", fill="x", expand=True)
         else:
             tk.Label(row, text="Non détecté", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
@@ -923,19 +1006,40 @@ class SettingsWindow:
         except Exception:
             monitor = 0
 
+        loopback_sel = self.loopback_var.get()
+        mic_sel = self.mic_var.get()
+        loopback_name = "" if loopback_sel.startswith("(Auto") else loopback_sel
+        mic_name = "" if mic_sel.startswith("(Auto") else mic_sel
+
         new = {
             "monitor": monitor,
             "fps": int(self.fps_var.get()),
             "buffer_seconds": int(self.buffer_var.get()),
             "output_folder": self.folder_var.get(),
+            "loopback_device": loopback_name,
+            "mic_device": mic_name,
         }
 
+        audio_changed = (
+            new["loopback_device"] != self.config.get("loopback_device", "")
+            or new["mic_device"] != self.config.get("mic_device", "")
+        )
         capture_changed = (
             new["monitor"] != self.config["monitor"]
             or new["fps"] != self.config.get("fps")
             or new["buffer_seconds"] != self.config.get("buffer_seconds")
         )
         self.config.update(new)
+
+        if audio_changed:
+            self.capture.audio.stop()
+            self.capture.audio = AudioCapture(
+                max_seconds=max(BUFFER_OPTIONS),
+                loopback_name=loopback_name,
+                mic_name=mic_name,
+            )
+            self.capture.audio.start()
+
         if capture_changed:
             self.capture.restart()
 
@@ -1047,7 +1151,11 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
-    audio = AudioCapture(max_seconds=max(BUFFER_OPTIONS))
+    audio = AudioCapture(
+        max_seconds=max(BUFFER_OPTIONS),
+        loopback_name=config.get("loopback_device", ""),
+        mic_name=config.get("mic_device", ""),
+    )
     capture = FFmpegCapture(root, config, monitors, audio)
     banner = NotificationBanner(root, monitors, config)
     settings = SettingsWindow(root, config, monitors, capture)
