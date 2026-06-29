@@ -52,7 +52,21 @@ except Exception:
         pass
 
 WM_HOTKEY = 0x0312
-MOD_CTRL_ALT = 0x0002 | 0x0001 | 0x4000
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_NOREPEAT = 0x4000
+
+MODIFIER_MAP = {"Ctrl": MOD_CONTROL, "Alt": MOD_ALT, "Shift": MOD_SHIFT}
+
+VK_MAP = {**{chr(c): c for c in range(ord('A'), ord('Z') + 1)},
+          **{str(i): 0x30 + i for i in range(10)},
+          **{f"F{i}": 0x6F + i for i in range(1, 13)}}
+
+KEYSYM_TO_KEY = {**{chr(c): chr(c).upper() for c in range(ord('a'), ord('z') + 1)},
+                 **{chr(c): chr(c) for c in range(ord('A'), ord('Z') + 1)},
+                 **{str(i): str(i) for i in range(10)},
+                 **{f"F{i}": f"F{i}" for i in range(1, 13)}}
 
 # ─── Thème ───────────────────────────────────────────────────────────────────
 
@@ -373,6 +387,7 @@ DEFAULTS = {
     "output_folder": "",
     "loopback_device": "",
     "mic_device": "",
+    "hotkey": "Ctrl+Alt+R",
 }
 
 
@@ -501,6 +516,7 @@ class FFmpegCapture:
             ]
 
         cmd += [
+            "-flush_packets", "1",
             "-f", "segment",
             "-segment_time", str(SEGMENT_DURATION),
             "-segment_wrap", str(segment_wrap),
@@ -575,23 +591,51 @@ class FFmpegCapture:
 
         files_with_mtime.sort(key=lambda x: x[1])
 
-        if len(files_with_mtime) > 1:
-            files_with_mtime = files_with_mtime[:-1]
+        if not files_with_mtime:
+            return
+
+        concat_id = uuid.uuid4().hex[:8]
+
+        last_seg_name, last_seg_mtime = files_with_mtime[-1]
+        last_seg_path = os.path.join(self.segment_dir, last_seg_name)
+        snap_name = f"snap_{concat_id}.ts"
+        snap_path = os.path.join(self.segment_dir, snap_name)
+        try:
+            shutil.copy2(last_seg_path, snap_path)
+            files_with_mtime[-1] = (snap_name, last_seg_mtime)
+        except Exception:
+            if len(files_with_mtime) > 1:
+                files_with_mtime = files_with_mtime[:-1]
 
         segments_needed = math.ceil(replay_secs / SEGMENT_DURATION) + 1
         selected = files_with_mtime[-segments_needed:]
 
         if not selected:
             return
-
-        concat_id = uuid.uuid4().hex[:8]
         concat_file = os.path.join(self.segment_dir, f"concat_{concat_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as fh:
             for seg_name, _ in selected:
                 seg_path = os.path.join(self.segment_dir, seg_name).replace("\\", "/")
                 fh.write(f"file '{seg_path}'\n")
 
-        total_duration = len(selected) * SEGMENT_DURATION
+        snap_dur = SEGMENT_DURATION
+        if snap_path and os.path.exists(snap_path):
+            try:
+                probe = subprocess.run(
+                    [FFMPEG, "-i", snap_path, "-f", "null", "-"],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=0x08000000,
+                )
+                for line in probe.stderr.split('\n'):
+                    if 'Duration:' in line:
+                        ts = line.split('Duration:')[1].split(',')[0].strip()
+                        h, m, s = ts.split(':')
+                        snap_dur = int(h) * 3600 + int(m) * 60 + float(s)
+                        break
+            except Exception:
+                pass
+
+        total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
         ss = max(0, total_duration - replay_secs)
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -688,7 +732,7 @@ class FFmpegCapture:
             except Exception:
                 pass
             finally:
-                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only]:
+                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only, snap_path]:
                     if tmp:
                         try:
                             os.remove(tmp)
@@ -785,22 +829,38 @@ class NotificationBanner:
         self._hide_id = None
 
 
-# ─── Hotkey (Ctrl+Alt+R only) ───────────────────────────────────────────────
+# ─── Hotkey ──────────────────────────────────────────────────────────────────
 
 HOTKEY_SAVE = 1
 
 
+def parse_hotkey(hotkey_str):
+    parts = [p.strip() for p in hotkey_str.split("+")]
+    modifiers = MOD_NOREPEAT
+    vk = 0
+    for part in parts:
+        if part in MODIFIER_MAP:
+            modifiers |= MODIFIER_MAP[part]
+        elif part in VK_MAP:
+            vk = VK_MAP[part]
+    if not vk or modifiers == MOD_NOREPEAT:
+        return MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, 0x52
+    return modifiers, vk
+
+
 class HotkeyManager:
-    def __init__(self, root, on_save):
+    def __init__(self, root, on_save, modifiers=None, vk=None):
         self.root = root
         self.on_save = on_save
+        self.modifiers = modifiers if modifiers is not None else (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT)
+        self.vk = vk if vk is not None else 0x52
         self._thread_id = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        user32.RegisterHotKey(None, HOTKEY_SAVE, MOD_CTRL_ALT, 0x52)  # R
+        user32.RegisterHotKey(None, HOTKEY_SAVE, self.modifiers, self.vk)
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_SAVE:
@@ -820,6 +880,9 @@ class SettingsWindow:
         self.monitors = monitors
         self.capture = capture
         self.win = None
+        self.on_hotkey_change = None
+        self._capturing_hotkey = False
+        self._held_mods = set()
 
     def toggle(self):
         if self.win and self.win.winfo_exists():
@@ -970,9 +1033,16 @@ class SettingsWindow:
         kf.pack(fill="x", padx=15, pady=(0, 10))
         row = tk.Frame(kf, bg=BG2)
         row.pack(fill="x", padx=10, pady=6)
-        tk.Label(row, text="Ctrl+Alt+R", bg=BG2, fg=ACCENT, font=FONT_B,
-                 width=14, anchor="w").pack(side="left")
-        tk.Label(row, text="Sauver le clip", bg=BG2, fg=FG2, font=FONT_S).pack(side="left")
+        tk.Label(row, text="Raccourci :", bg=BG2, fg=FG, font=FONT,
+                 width=12, anchor="w").pack(side="left")
+        self.hotkey_var = tk.StringVar(value=self.config.get("hotkey", "Ctrl+Alt+R"))
+        self.hotkey_btn = tk.Button(
+            row, textvariable=self.hotkey_var, command=self._start_hotkey_capture,
+            bg=BG3, fg=ACCENT, font=FONT_B, relief="flat", padx=10, cursor="hand2",
+        )
+        self.hotkey_btn.pack(side="left")
+        tk.Label(row, text="  Cliquer pour changer", bg=BG2, fg=FG2,
+                 font=FONT_S).pack(side="left")
 
         # ── Boutons ──
         bf = tk.Frame(self.win, bg=BG)
@@ -999,6 +1069,58 @@ class SettingsWindow:
         if folder:
             self.folder_var.set(folder)
 
+    def _start_hotkey_capture(self):
+        self._capturing_hotkey = True
+        self._held_mods = set()
+        self.hotkey_btn.config(bg=ACCENT, fg="#ffffff")
+        self.hotkey_var.set("Appuyez...")
+        self.win.bind('<KeyPress>', self._on_hotkey_key)
+        self.win.bind('<KeyRelease>', self._on_hotkey_release)
+        self.win.focus_set()
+
+    def _stop_hotkey_capture(self):
+        self._capturing_hotkey = False
+        self._held_mods = set()
+        self.hotkey_btn.config(bg=BG3, fg=ACCENT)
+        if self.win:
+            self.win.unbind('<KeyPress>')
+            self.win.unbind('<KeyRelease>')
+
+    def _on_hotkey_key(self, event):
+        if not self._capturing_hotkey:
+            return 'break'
+        if event.keysym == 'Escape':
+            self.hotkey_var.set(self.config.get("hotkey", "Ctrl+Alt+R"))
+            self._stop_hotkey_capture()
+            return 'break'
+        if event.keysym in ('Control_L', 'Control_R'):
+            self._held_mods.add('Ctrl')
+            return 'break'
+        if event.keysym in ('Alt_L', 'Alt_R'):
+            self._held_mods.add('Alt')
+            return 'break'
+        if event.keysym in ('Shift_L', 'Shift_R'):
+            self._held_mods.add('Shift')
+            return 'break'
+        if event.keysym in ('Super_L', 'Super_R', 'Win_L', 'Win_R'):
+            return 'break'
+        key = KEYSYM_TO_KEY.get(event.keysym)
+        if not key or not self._held_mods:
+            return 'break'
+        mods = [m for m in ("Ctrl", "Alt", "Shift") if m in self._held_mods]
+        self.hotkey_var.set("+".join(mods + [key]))
+        self._stop_hotkey_capture()
+        return 'break'
+
+    def _on_hotkey_release(self, event):
+        if event.keysym in ('Control_L', 'Control_R'):
+            self._held_mods.discard('Ctrl')
+        elif event.keysym in ('Alt_L', 'Alt_R'):
+            self._held_mods.discard('Alt')
+        elif event.keysym in ('Shift_L', 'Shift_R'):
+            self._held_mods.discard('Shift')
+        return 'break'
+
     def _apply(self):
         mon_str = self.monitor_var.get()
         try:
@@ -1011,6 +1133,11 @@ class SettingsWindow:
         loopback_name = "" if loopback_sel.startswith("(Auto") else loopback_sel
         mic_name = "" if mic_sel.startswith("(Auto") else mic_sel
 
+        new_hotkey = self.hotkey_var.get()
+        if new_hotkey == "Appuyez...":
+            new_hotkey = self.config.get("hotkey", "Ctrl+Alt+R")
+            self.hotkey_var.set(new_hotkey)
+
         new = {
             "monitor": monitor,
             "fps": int(self.fps_var.get()),
@@ -1018,6 +1145,7 @@ class SettingsWindow:
             "output_folder": self.folder_var.get(),
             "loopback_device": loopback_name,
             "mic_device": mic_name,
+            "hotkey": new_hotkey,
         }
 
         audio_changed = (
@@ -1029,6 +1157,7 @@ class SettingsWindow:
             or new["fps"] != self.config.get("fps")
             or new["buffer_seconds"] != self.config.get("buffer_seconds")
         )
+        hotkey_changed = new["hotkey"] != self.config.get("hotkey", "Ctrl+Alt+R")
         self.config.update(new)
 
         if audio_changed:
@@ -1043,11 +1172,16 @@ class SettingsWindow:
         if capture_changed:
             self.capture.restart()
 
+        if hotkey_changed and self.on_hotkey_change:
+            self.on_hotkey_change()
+
     def _save(self):
         self._apply()
         save_config(self.config)
 
     def _close(self):
+        if self._capturing_hotkey:
+            self._stop_hotkey_capture()
         self.win.destroy()
         self.win = None
 
@@ -1069,7 +1203,7 @@ class TrayIcon:
         image = create_tray_icon_image()
         menu = pystray.Menu(
             pystray.MenuItem(
-                "Sauver le clip (Ctrl+Alt+R)",
+                lambda item: f"Sauver le clip ({self.config.get('hotkey', 'Ctrl+Alt+R')})",
                 lambda: self.root.after(0, self.save_fn),
             ),
             pystray.Menu.SEPARATOR,
@@ -1178,7 +1312,15 @@ def main():
         root.destroy()
         sys.exit(0)
 
-    hotkeys = HotkeyManager(root, do_save)
+    hotkeys = HotkeyManager(root, do_save, *parse_hotkey(config.get("hotkey", "Ctrl+Alt+R")))
+
+    def restart_hotkeys():
+        nonlocal hotkeys
+        if hotkeys:
+            hotkeys.stop()
+        hotkeys = HotkeyManager(root, do_save, *parse_hotkey(config.get("hotkey", "Ctrl+Alt+R")))
+
+    settings.on_hotkey_change = restart_hotkeys
     tray = TrayIcon(root, config, capture, settings, shutdown, do_save)
 
     capture.start()
