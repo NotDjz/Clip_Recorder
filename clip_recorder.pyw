@@ -565,7 +565,7 @@ class FFmpegCapture:
                 pass
         self.start()
 
-    def save_replay(self):
+    def save_replay(self, on_success=None):
         save_time = time.time()
         replay_secs = self.config.get("buffer_seconds", 30)
         output_folder = get_output_folder(self.config)
@@ -605,8 +605,11 @@ class FFmpegCapture:
             shutil.copy2(last_seg_path, snap_path)
             files_with_mtime[-1] = (snap_name, last_seg_mtime)
         except Exception:
+            snap_path = None
             if len(files_with_mtime) > 1:
                 files_with_mtime = files_with_mtime[:-1]
+            else:
+                return
 
         segments_needed = math.ceil(replay_secs / SEGMENT_DURATION) + 1
         selected = files_with_mtime[-segments_needed:]
@@ -701,7 +704,7 @@ class FFmpegCapture:
                     ], capture_output=True, timeout=30,
                        creationflags=0x08000000)
 
-                if video_only and audio_wav and os.path.exists(audio_wav):
+                if video_only and audio_wav and os.path.exists(audio_wav) and os.path.exists(video_only):
                     subprocess.run([
                         FFMPEG, "-y",
                         "-i", video_only, "-i", audio_wav,
@@ -713,10 +716,13 @@ class FFmpegCapture:
                     ], capture_output=True, timeout=30,
                        creationflags=0x08000000)
 
-                winsound.PlaySound(
-                    "SystemExclamation",
-                    winsound.SND_ALIAS | winsound.SND_ASYNC,
-                )
+                if os.path.exists(output_path):
+                    winsound.PlaySound(
+                        "SystemExclamation",
+                        winsound.SND_ALIAS | winsound.SND_ASYNC,
+                    )
+                    if on_success:
+                        on_success()
             except Exception:
                 pass
             finally:
@@ -843,20 +849,26 @@ class HotkeyManager:
         self.modifiers = modifiers if modifiers is not None else (MOD_CONTROL | MOD_ALT | MOD_NOREPEAT)
         self.vk = vk if vk is not None else 0x52
         self._thread_id = None
+        self._ready = threading.Event()
+        self.registered = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        user32.RegisterHotKey(None, HOTKEY_SAVE, self.modifiers, self.vk)
+        self.registered = bool(user32.RegisterHotKey(None, HOTKEY_SAVE, self.modifiers, self.vk))
+        self._ready.set()
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_SAVE:
                 self.root.after(0, self.on_save)
+        user32.UnregisterHotKey(None, HOTKEY_SAVE)
 
     def stop(self):
+        self._ready.wait(timeout=2)
         if self._thread_id:
             ctypes.windll.user32.PostThreadMessageW(self._thread_id, 0x0012, 0, 0)
+            self._thread.join(timeout=2)
 
 
 # ─── Settings ────────────────────────────────────────────────────────────────
@@ -1286,8 +1298,7 @@ def main():
     hotkeys = None
 
     def do_save():
-        capture.save_replay()
-        banner.show()
+        capture.save_replay(on_success=lambda: root.after(0, banner.show))
 
     def shutdown():
         nonlocal tray, hotkeys
@@ -1307,6 +1318,22 @@ def main():
         if hotkeys:
             hotkeys.stop()
         hotkeys = HotkeyManager(root, do_save, *parse_hotkey(config.get("hotkey", "Ctrl+Alt+R")))
+        hotkeys._ready.wait(timeout=2)
+        if not hotkeys.registered:
+            failed_key = config.get("hotkey", "")
+            hotkeys.stop()
+            config["hotkey"] = "Ctrl+Alt+R"
+            save_config(config)
+            hotkeys = HotkeyManager(root, do_save, *parse_hotkey("Ctrl+Alt+R"))
+            if settings.win:
+                settings.hotkey_var.set("Ctrl+Alt+R")
+            import tkinter.messagebox
+            root.after(100, lambda: tkinter.messagebox.showwarning(
+                "ClipRecorder",
+                f"Impossible d'enregistrer le raccourci {failed_key}.\n"
+                "Il est peut-être utilisé par une autre application.\n"
+                "Raccourci réinitialisé à Ctrl+Alt+R.",
+            ))
 
     settings.on_hotkey_change = restart_hotkeys
     tray = TrayIcon(root, config, capture, settings, shutdown, do_save)
