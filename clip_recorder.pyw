@@ -629,6 +629,8 @@ class FFmpegCapture:
 
         total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
         ss = max(0, total_duration - replay_secs)
+        # -c copy seeks to nearest keyframe before ss; keyframes are at segment boundaries
+        ss = (ss // SEGMENT_DURATION) * SEGMENT_DURATION
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(output_folder, f"Clip_{timestamp}.mp4")
@@ -641,12 +643,12 @@ class FFmpegCapture:
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
-        audio_offset = max(0, save_time - selected[-1][1])
+        audio_duration = total_duration - ss
 
         if has_loopback:
-            self.audio.save_wav(loopback_wav, replay_secs, end_offset=audio_offset)
+            self.audio.save_wav(loopback_wav, audio_duration, end_offset=0)
         if has_mic:
-            self.audio.save_mic_wav(mic_wav, replay_secs, end_offset=audio_offset)
+            self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=0)
 
         audio_wav = None
         if has_loopback and has_mic and os.path.exists(loopback_wav) and os.path.exists(mic_wav):
