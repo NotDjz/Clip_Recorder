@@ -566,6 +566,7 @@ class FFmpegCapture:
         self.start()
 
     def save_replay(self):
+        save_time = time.time()
         replay_secs = self.config.get("buffer_seconds", 30)
         output_folder = get_output_folder(self.config)
         os.makedirs(output_folder, exist_ok=True)
@@ -618,22 +619,10 @@ class FFmpegCapture:
                 seg_path = os.path.join(self.segment_dir, seg_name).replace("\\", "/")
                 fh.write(f"file '{seg_path}'\n")
 
-        snap_dur = SEGMENT_DURATION
-        if snap_path and os.path.exists(snap_path):
-            try:
-                probe = subprocess.run(
-                    [FFMPEG, "-i", snap_path, "-f", "null", "-"],
-                    capture_output=True, text=True, timeout=5,
-                    creationflags=0x08000000,
-                )
-                for line in probe.stderr.split('\n'):
-                    if 'Duration:' in line:
-                        ts = line.split('Duration:')[1].split(',')[0].strip()
-                        h, m, s = ts.split(':')
-                        snap_dur = int(h) * 3600 + int(m) * 60 + float(s)
-                        break
-            except Exception:
-                pass
+        if len(selected) >= 2:
+            snap_dur = max(0.1, min(save_time - selected[-2][1], SEGMENT_DURATION))
+        else:
+            snap_dur = SEGMENT_DURATION
 
         total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
         ss = max(0, total_duration - replay_secs)
@@ -649,8 +638,7 @@ class FFmpegCapture:
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
-        audio_offset = time.time() - selected[-1][1]
-        audio_offset = max(0, audio_offset)
+        audio_offset = max(0, save_time - selected[-1][1])
 
         if has_loopback:
             self.audio.save_wav(loopback_wav, replay_secs, end_offset=audio_offset)
