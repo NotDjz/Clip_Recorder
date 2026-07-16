@@ -4,6 +4,7 @@ __pycache__/
 *.spec
 config.json
 ffmpeg.exe
+icon.ico
 Clips/
 .claude/
 CLAUDE.md

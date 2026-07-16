@@ -14,3 +14,11 @@ Replay screen recorder pour Windows — capture continue en arrière-plan, `Ctrl
 Télécharger `ClipRecorder.exe` depuis [Releases](../../releases) ou `pip install -r requirements.txt && python clip_recorder.pyw`
 
 Requires Windows 10/11, FFmpeg bundlé dans les releases.
+
+## Build
+
+`build.bat` télécharge FFmpeg, génère l'icône puis lance PyInstaller (`--onefile --windowed`). L'exe est produit dans `dist/`.
+
+## License
+
+[MIT](LICENSE)

@@ -412,7 +412,7 @@ def save_config(cfg):
 def get_output_folder(cfg):
     folder = cfg.get("output_folder") or ""
     if not folder:
-        folder = os.path.join(SCRIPT_DIR, "Clips")
+        folder = os.path.join(os.path.expanduser("~"), "Videos", "ClipRecorder")
     return folder
 
 
