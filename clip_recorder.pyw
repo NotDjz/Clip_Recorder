@@ -409,10 +409,40 @@ def save_config(cfg):
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
+class _GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", wt.DWORD),
+        ("Data2", wt.WORD),
+        ("Data3", wt.WORD),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+FOLDERID_VIDEOS = _GUID(
+    0x18989B1D, 0x99B5, 0x455B,
+    (ctypes.c_ubyte * 8)(0x84, 0x1C, 0xAB, 0x7C, 0x74, 0xE4, 0xDD, 0xFC),
+)
+
+
+def _get_videos_folder():
+    try:
+        path_ptr = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(FOLDERID_VIDEOS), 0, None, ctypes.byref(path_ptr)
+        )
+        if hr == 0 and path_ptr.value:
+            path = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            return path
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "Videos")
+
+
 def get_output_folder(cfg):
     folder = cfg.get("output_folder") or ""
     if not folder:
-        folder = os.path.join(os.path.expanduser("~"), "Videos", "ClipRecorder")
+        folder = os.path.join(_get_videos_folder(), "ClipRecorder")
     return folder
 
 
