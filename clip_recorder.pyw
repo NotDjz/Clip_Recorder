@@ -644,11 +644,12 @@ class FFmpegCapture:
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
         audio_duration = total_duration - ss
+        audio_offset = max(0, time.time() - save_time)
 
         if has_loopback:
-            self.audio.save_wav(loopback_wav, audio_duration, end_offset=0)
+            self.audio.save_wav(loopback_wav, audio_duration, end_offset=audio_offset)
         if has_mic:
-            self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=0)
+            self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=audio_offset)
 
         audio_wav = None
         if has_loopback and has_mic and os.path.exists(loopback_wav) and os.path.exists(mic_wav):
@@ -765,6 +766,7 @@ class FFmpegCapture:
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
 
 
 class NotificationBanner:
@@ -785,6 +787,7 @@ class NotificationBanner:
         mon = self.monitors[mon_idx]
 
         self._win = tk.Toplevel(self.root)
+        self._win.withdraw()
         self._win.overrideredirect(True)
         self._win.attributes("-topmost", True)
         self._win.configure(bg="#1a1a2e")
@@ -799,10 +802,13 @@ class NotificationBanner:
             font=("Segoe UI", 11, "bold"), anchor="center",
         ).pack(fill="both", expand=True)
 
-        self._win.after(100, self._make_click_through)
+        self._win.update_idletasks()
+        self._apply_window_styles()
+        self._win.deiconify()
+        self._win.after_idle(self._apply_window_styles)
         self._hide_id = self.root.after(duration_ms, self._hide)
 
-    def _make_click_through(self):
+    def _apply_window_styles(self):
         if not self._win or not self._win.winfo_exists():
             return
         hwnd = user32.GetParent(self._win.winfo_id())
@@ -811,7 +817,7 @@ class NotificationBanner:
         ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         user32.SetWindowLongPtrW(
             hwnd, GWL_EXSTYLE,
-            ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+            ex | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         )
         try:
             ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
