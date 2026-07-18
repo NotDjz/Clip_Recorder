@@ -641,8 +641,28 @@ class FFmpegCapture:
             else:
                 return
 
-        segments_needed = math.ceil(replay_secs / SEGMENT_DURATION) + 1
-        selected = files_with_mtime[-segments_needed:]
+        # Select whole segments only, walking backward until their real (mtime-based)
+        # combined span covers replay_secs. Every segment boundary is already a real
+        # keyframe boundary, so no mid-segment seek is ever needed — this avoids the
+        # nominal-vs-real keyframe grid mismatch that a fractional -ss seek runs into
+        # once real per-segment duration drifts from the nominal SEGMENT_DURATION
+        # (plausible whenever delivered capture rate dips under load, worse at high
+        # FPS and over longer buffers since the drift compounds per segment).
+        n = len(files_with_mtime)
+        count = 1
+        total_duration = None
+        while count <= n - 1:
+            anchor_mtime = files_with_mtime[n - count - 1][1]
+            candidate_duration = save_time - anchor_mtime
+            if candidate_duration >= replay_secs:
+                total_duration = candidate_duration
+                break
+            count += 1
+        else:
+            count = n
+            total_duration = (save_time - files_with_mtime[0][1]) if n >= 2 else SEGMENT_DURATION
+
+        selected = files_with_mtime[-count:]
 
         if not selected:
             return
@@ -651,23 +671,6 @@ class FFmpegCapture:
             for seg_name, _ in selected:
                 seg_path = os.path.join(self.segment_dir, seg_name).replace("\\", "/")
                 fh.write(f"file '{seg_path}'\n")
-
-        anchor_pool = files_with_mtime[-(segments_needed + 1):]
-        if len(anchor_pool) > len(selected):
-            # Real mtime-based span from just before the selected window to now —
-            # avoids assuming every segment is exactly SEGMENT_DURATION long, which
-            # drifts (linearly with replay_secs) whenever real segment duration
-            # differs even slightly from the nominal value under capture load.
-            total_duration = save_time - anchor_pool[0][1]
-        elif len(selected) >= 2:
-            snap_dur = max(0.1, min(save_time - selected[-2][1], SEGMENT_DURATION))
-            total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
-        else:
-            total_duration = SEGMENT_DURATION
-
-        ss = max(0, total_duration - replay_secs)
-        # -c copy seeks to nearest keyframe before ss; keyframes are at segment boundaries
-        ss = (ss // SEGMENT_DURATION) * SEGMENT_DURATION
 
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(output_folder, f"Clip_{timestamp}.mp4")
@@ -680,7 +683,7 @@ class FFmpegCapture:
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
-        audio_duration = total_duration - ss
+        audio_duration = total_duration
         audio_offset = max(0, time.time() - save_time)
 
         if has_loopback:
@@ -705,8 +708,8 @@ class FFmpegCapture:
                 FFMPEG, "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_file,
-                "-ss", str(ss),
-                "-t", str(replay_secs),
+                "-ss", "0",
+                "-t", str(total_duration),
                 "-c", "copy",
                 "-movflags", "+faststart",
                 video_only,
@@ -717,8 +720,8 @@ class FFmpegCapture:
                 FFMPEG, "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", concat_file,
-                "-ss", str(ss),
-                "-t", str(replay_secs),
+                "-ss", "0",
+                "-t", str(total_duration),
                 "-c", "copy",
                 "-movflags", "+faststart",
                 output_path,
