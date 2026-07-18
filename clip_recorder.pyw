@@ -1085,12 +1085,9 @@ class SettingsWindow:
         # ── Buttons ──
         bf = tk.Frame(self.win, bg=BG)
         bf.pack(fill="x", padx=15, pady=(8, 10))
-        tk.Button(bf, text="Apply", command=self._apply,
-                  bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
-                  padx=15, cursor="hand2").pack(side="left", padx=(0, 8))
         tk.Button(bf, text="Save", command=self._save,
-                  bg=BG3, fg=FG, font=FONT, relief="flat",
-                  padx=10, cursor="hand2").pack(side="left")
+                  bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
+                  padx=15, cursor="hand2").pack(side="left")
 
         self.win.lift()
         self.win.focus_force()
