@@ -652,12 +652,19 @@ class FFmpegCapture:
                 seg_path = os.path.join(self.segment_dir, seg_name).replace("\\", "/")
                 fh.write(f"file '{seg_path}'\n")
 
-        if len(selected) >= 2:
+        anchor_pool = files_with_mtime[-(segments_needed + 1):]
+        if len(anchor_pool) > len(selected):
+            # Real mtime-based span from just before the selected window to now —
+            # avoids assuming every segment is exactly SEGMENT_DURATION long, which
+            # drifts (linearly with replay_secs) whenever real segment duration
+            # differs even slightly from the nominal value under capture load.
+            total_duration = save_time - anchor_pool[0][1]
+        elif len(selected) >= 2:
             snap_dur = max(0.1, min(save_time - selected[-2][1], SEGMENT_DURATION))
+            total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
         else:
-            snap_dur = SEGMENT_DURATION
+            total_duration = SEGMENT_DURATION
 
-        total_duration = (len(selected) - 1) * SEGMENT_DURATION + snap_dur
         ss = max(0, total_duration - replay_secs)
         # -c copy seeks to nearest keyframe before ss; keyframes are at segment boundaries
         ss = (ss // SEGMENT_DURATION) * SEGMENT_DURATION
@@ -889,12 +896,18 @@ class HotkeyManager:
         self._thread_id = None
         self._ready = threading.Event()
         self.registered = False
+        self.last_error = None
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         self.registered = bool(user32.RegisterHotKey(None, HOTKEY_SAVE, self.modifiers, self.vk))
+        if not self.registered:
+            time.sleep(0.15)
+            self.registered = bool(user32.RegisterHotKey(None, HOTKEY_SAVE, self.modifiers, self.vk))
+        if not self.registered:
+            self.last_error = ctypes.windll.kernel32.GetLastError()
         self._ready.set()
         msg = wt.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -1478,22 +1491,38 @@ def main():
         nonlocal hotkeys
         if hotkeys:
             hotkeys.stop()
-        hotkeys = HotkeyManager(root, do_save, *parse_hotkey(config.get("hotkey", "Ctrl+Alt+R")))
+        requested = config.get("hotkey", "Ctrl+Alt+R")
+        hotkeys = HotkeyManager(root, do_save, *parse_hotkey(requested))
         hotkeys._ready.wait(timeout=2)
         if not hotkeys.registered:
-            failed_key = config.get("hotkey", "")
+            err = hotkeys.last_error
             hotkeys.stop()
-            config["hotkey"] = "Ctrl+Alt+R"
-            save_config(config)
-            hotkeys = HotkeyManager(root, do_save, *parse_hotkey("Ctrl+Alt+R"))
-            if settings.win:
-                settings.hotkey_var.set("Ctrl+Alt+R")
             import tkinter.messagebox
+            if requested != "Ctrl+Alt+R":
+                fallback = HotkeyManager(root, do_save, *parse_hotkey("Ctrl+Alt+R"))
+                fallback._ready.wait(timeout=2)
+                hotkeys = fallback
+                if fallback.registered:
+                    config["hotkey"] = "Ctrl+Alt+R"
+                    save_config(config)
+                    if settings.win:
+                        settings.hotkey_var.set("Ctrl+Alt+R")
+                    root.after(100, lambda: tkinter.messagebox.showwarning(
+                        "ClipRecorder",
+                        f"Couldn't register hotkey {requested} (Win32 error {err}).\n"
+                        "It might already be in use by another application.\n"
+                        "Hotkey reset to Ctrl+Alt+R.",
+                    ))
+                    return
+            # requested was already Ctrl+Alt+R, or the fallback also failed —
+            # leave config["hotkey"] untouched so a future attempt to change it
+            # is correctly detected and retried, instead of being silently
+            # swallowed forever.
             root.after(100, lambda: tkinter.messagebox.showwarning(
                 "ClipRecorder",
-                f"Couldn't register hotkey {failed_key}.\n"
+                f"Couldn't register hotkey {requested} (Win32 error {err}).\n"
                 "It might already be in use by another application.\n"
-                "Hotkey reset to Ctrl+Alt+R.",
+                "No hotkey is currently active — try a different combination in Settings.",
             ))
 
     settings.on_hotkey_change = restart_hotkeys
