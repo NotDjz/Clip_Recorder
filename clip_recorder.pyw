@@ -1,8 +1,8 @@
 """
 Clip Recorder — Replay screen recorder.
 
-Capture continue de l'écran + son via FFmpeg.
-Ctrl+Alt+R sauvegarde les dernières X secondes en MP4.
+Continuous screen + audio capture via FFmpeg.
+Ctrl+Alt+R saves the last X seconds as MP4.
 """
 
 import atexit
@@ -26,7 +26,7 @@ import pystray
 from PIL import Image, ImageDraw, ImageTk
 import pyaudiowpatch as pyaudio
 
-# ─── Chemins ─────────────────────────────────────────────────────────────────
+# ─── Paths ───────────────────────────────────────────────────────────────────
 
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = os.path.dirname(sys.executable)
@@ -68,7 +68,7 @@ KEYSYM_TO_KEY = {**{chr(c): chr(c).upper() for c in range(ord('a'), ord('z') + 1
                  **{str(i): str(i) for i in range(10)},
                  **{f"F{i}": f"F{i}" for i in range(1, 13)}}
 
-# ─── Thème ───────────────────────────────────────────────────────────────────
+# ─── Theme ───────────────────────────────────────────────────────────────────
 
 BG = "#1e1e1e"
 BG2 = "#2d2d2d"
@@ -80,13 +80,13 @@ FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 FONT_S = ("Segoe UI", 9)
 
-# ─── Constantes capture ─────────────────────────────────────────────────────
+# ─── Capture constants ──────────────────────────────────────────────────────
 
 SEGMENT_DURATION = 5
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
-# ─── Moniteurs ───────────────────────────────────────────────────────────────
+# ─── Monitors ────────────────────────────────────────────────────────────────
 
 
 class MONITORINFOEXW(ctypes.Structure):
@@ -807,7 +807,7 @@ class NotificationBanner:
         self._win = None
         self._hide_id = None
 
-    def show(self, text="Clip enregistré", duration_ms=3000):
+    def show(self, text="Clip saved", duration_ms=3000):
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         if self._hide_id:
@@ -931,7 +931,7 @@ class SettingsWindow:
 
     def _build(self):
         self.win = tk.Toplevel(self.root)
-        self.win.title("Clip Recorder — Paramètres")
+        self.win.title("Clip Recorder — Settings")
         self.win.geometry("420x510")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
@@ -948,7 +948,7 @@ class SettingsWindow:
         # Monitor
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(row, text="Écran :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Monitor:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         mon_labels = []
         for i, m in enumerate(self.monitors):
@@ -966,7 +966,7 @@ class SettingsWindow:
         # FPS
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=4)
-        tk.Label(row, text="FPS :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="FPS:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         fps_choices = FPS_OPTIONS if self.capture.has_ddagrab else [f for f in FPS_OPTIONS if f <= 60]
         current_fps = self.config.get("fps", 60)
@@ -982,11 +982,11 @@ class SettingsWindow:
         # Audio (WASAPI loopback)
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(4, 2))
-        tk.Label(row, text="Son système :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="System audio:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         loopback_devices = AudioCapture.list_loopback_devices()
         current_loopback = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else ""
-        loopback_choices = ["(Auto — défaut système)"] + loopback_devices
+        loopback_choices = ["(Auto — system default)"] + loopback_devices
         self.loopback_var = tk.StringVar(value=current_loopback or loopback_choices[0])
         if loopback_devices:
             om_lb = tk.OptionMenu(row, self.loopback_var, *loopback_choices)
@@ -995,17 +995,17 @@ class SettingsWindow:
             om_lb["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
             om_lb.pack(side="left", fill="x", expand=True)
         else:
-            tk.Label(row, text="Non disponible", bg=BG2, fg=FG2, font=FONT_S,
+            tk.Label(row, text="Not available", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
         # Microphone
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(2, 2))
-        tk.Label(row, text="Micro :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Mic:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         mic_devices = AudioCapture.list_mic_devices()
         current_mic = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else ""
-        mic_choices = ["(Auto — défaut système)"] + mic_devices
+        mic_choices = ["(Auto — system default)"] + mic_devices
         self.mic_var = tk.StringVar(value=current_mic or mic_choices[0])
         if mic_devices:
             om_mic = tk.OptionMenu(row, self.mic_var, *mic_choices)
@@ -1014,13 +1014,13 @@ class SettingsWindow:
             om_mic["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
             om_mic.pack(side="left", fill="x", expand=True)
         else:
-            tk.Label(row, text="Non détecté", bg=BG2, fg=FG2, font=FONT_S,
+            tk.Label(row, text="Not detected", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
         # Encoder
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=2)
-        tk.Label(row, text="Encodeur :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Encoder:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         enc = "NVENC (GPU)" if self.capture.has_nvenc else "x264 (CPU)"
         tk.Label(row, text=enc, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
@@ -1028,7 +1028,7 @@ class SettingsWindow:
         # Capture method
         row = tk.Frame(cf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(2, 8))
-        tk.Label(row, text="Capture :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Capture:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         cap_method = "DXGI (ddagrab)" if self.capture.has_ddagrab else "GDI (gdigrab)"
         tk.Label(row, text=cap_method, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
@@ -1041,7 +1041,7 @@ class SettingsWindow:
         # Buffer
         row = tk.Frame(rf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(row, text="Durée (s) :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Duration (s):", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         self.buffer_var = tk.StringVar(
             value=str(self.config.get("buffer_seconds", 30))
@@ -1055,7 +1055,7 @@ class SettingsWindow:
         # Output folder
         row = tk.Frame(rf, bg=BG2)
         row.pack(fill="x", padx=10, pady=(4, 8))
-        tk.Label(row, text="Dossier :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Folder:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         self.folder_var = tk.StringVar(value=get_output_folder(self.config))
         tk.Entry(row, textvariable=self.folder_var, bg=BG3, fg=FG,
@@ -1065,13 +1065,13 @@ class SettingsWindow:
                   bg=BG3, fg=FG, relief="flat", font=FONT_S,
                   cursor="hand2", width=3).pack(side="left")
 
-        # ── Raccourci ──
-        self._section("Raccourci")
+        # ── Hotkey ──
+        self._section("Hotkey")
         kf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
         kf.pack(fill="x", padx=15, pady=(0, 10))
         row = tk.Frame(kf, bg=BG2)
         row.pack(fill="x", padx=10, pady=6)
-        tk.Label(row, text="Raccourci :", bg=BG2, fg=FG, font=FONT,
+        tk.Label(row, text="Hotkey:", bg=BG2, fg=FG, font=FONT,
                  width=12, anchor="w").pack(side="left")
         self.hotkey_var = tk.StringVar(value=self.config.get("hotkey", "Ctrl+Alt+R"))
         self.hotkey_btn = tk.Button(
@@ -1079,16 +1079,16 @@ class SettingsWindow:
             bg=BG3, fg=ACCENT, font=FONT_B, relief="flat", padx=10, cursor="hand2",
         )
         self.hotkey_btn.pack(side="left")
-        tk.Label(row, text="  Cliquer pour changer", bg=BG2, fg=FG2,
+        tk.Label(row, text="  Click to change", bg=BG2, fg=FG2,
                  font=FONT_S).pack(side="left")
 
-        # ── Boutons ──
+        # ── Buttons ──
         bf = tk.Frame(self.win, bg=BG)
         bf.pack(fill="x", padx=15, pady=(8, 10))
-        tk.Button(bf, text="Appliquer", command=self._apply,
+        tk.Button(bf, text="Apply", command=self._apply,
                   bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
                   padx=15, cursor="hand2").pack(side="left", padx=(0, 8))
-        tk.Button(bf, text="Sauvegarder", command=self._save,
+        tk.Button(bf, text="Save", command=self._save,
                   bg=BG3, fg=FG, font=FONT, relief="flat",
                   padx=10, cursor="hand2").pack(side="left")
 
@@ -1101,7 +1101,7 @@ class SettingsWindow:
 
     def _browse_folder(self):
         folder = filedialog.askdirectory(
-            title="Dossier de sortie",
+            title="Output folder",
             initialdir=self.folder_var.get(),
         )
         if folder:
@@ -1111,7 +1111,7 @@ class SettingsWindow:
         self._capturing_hotkey = True
         self._held_mods = set()
         self.hotkey_btn.config(bg=ACCENT, fg="#ffffff")
-        self.hotkey_var.set("Appuyez...")
+        self.hotkey_var.set("Press a key...")
         self.win.bind('<KeyPress>', self._on_hotkey_key)
         self.win.bind('<KeyRelease>', self._on_hotkey_release)
         self.win.focus_set()
@@ -1172,7 +1172,7 @@ class SettingsWindow:
         mic_name = "" if mic_sel.startswith("(Auto") else mic_sel
 
         new_hotkey = self.hotkey_var.get()
-        if new_hotkey == "Appuyez...":
+        if new_hotkey == "Press a key...":
             new_hotkey = self.config.get("hotkey", "Ctrl+Alt+R")
             self.hotkey_var.set(new_hotkey)
 
@@ -1241,21 +1241,21 @@ class TrayIcon:
         image = create_tray_icon_image()
         menu = pystray.Menu(
             pystray.MenuItem(
-                lambda item: f"Sauver le clip ({self.config.get('hotkey', 'Ctrl+Alt+R')})",
+                lambda item: f"Save clip ({self.config.get('hotkey', 'Ctrl+Alt+R')})",
                 lambda: self.root.after(0, self.save_fn),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
-                "Paramètres",
+                "Settings",
                 lambda: self.root.after(0, self.settings.toggle),
             ),
             pystray.MenuItem(
-                "Ouvrir le dossier",
+                "Open folder",
                 lambda: self.root.after(0, self._open_folder),
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
-                "Quitter",
+                "Quit",
                 lambda: self.root.after(0, self.shutdown_fn),
             ),
         )
@@ -1295,24 +1295,24 @@ def _create_desktop_shortcut(target_exe):
 
 
 def prompt_install_location(mutex_handle):
-    """Premier lancement uniquement (exe figé, pas encore de config.json à côté) :
-    demande où ranger l'app, copie l'exe + crée un raccourci si demandé."""
+    """First launch only (frozen exe, no config.json next to it yet):
+    asks where to keep the app, copies the exe + creates a shortcut if requested."""
     if not getattr(sys, "frozen", False) or os.path.exists(CONFIG_FILE):
         return
 
     result = {"path": SCRIPT_DIR, "shortcut": True}
 
     dlg = tk.Tk()
-    dlg.title("Clip Recorder — Installation")
+    dlg.title("Clip Recorder — Setup")
     dlg.configure(bg=BG)
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
 
     tk.Label(
-        dlg, text="Où veux-tu ranger Clip Recorder ?", bg=BG, fg=FG, font=FONT_B,
+        dlg, text="Where do you want to keep Clip Recorder?", bg=BG, fg=FG, font=FONT_B,
     ).pack(padx=20, pady=(20, 5), anchor="w")
     tk.Label(
-        dlg, text="L'exe et tes réglages resteront dans ce dossier.",
+        dlg, text="The exe and your settings will stay in this folder.",
         bg=BG, fg=FG2, font=FONT_S,
     ).pack(padx=20, pady=(0, 10), anchor="w")
 
@@ -1325,18 +1325,18 @@ def prompt_install_location(mutex_handle):
     entry.pack(side="left", fill="x", expand=True, ipady=4)
 
     def browse():
-        folder = filedialog.askdirectory(title="Dossier d'installation", initialdir=path_var.get())
+        folder = filedialog.askdirectory(title="Install folder", initialdir=path_var.get())
         if folder:
             path_var.set(folder)
 
     tk.Button(
-        row, text="Parcourir...", command=browse,
+        row, text="Browse...", command=browse,
         bg=BG3, fg=FG, activebackground=BG2, relief="flat",
     ).pack(side="left", padx=(6, 0))
 
     shortcut_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
-        dlg, text="Créer un raccourci sur le Bureau", variable=shortcut_var,
+        dlg, text="Create a desktop shortcut", variable=shortcut_var,
         bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
     ).pack(padx=20, pady=(10, 0), anchor="w")
 
@@ -1351,7 +1351,7 @@ def prompt_install_location(mutex_handle):
         dlg.destroy()
 
     tk.Button(
-        dlg, text="Installer", command=confirm,
+        dlg, text="Install", command=confirm,
         bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
     ).pack(padx=20, pady=20, fill="x", ipady=6)
 
@@ -1391,8 +1391,8 @@ def prompt_install_location(mutex_handle):
         r.withdraw()
         tkinter.messagebox.showerror(
             "Clip Recorder",
-            f"Impossible d'installer dans :\n{target_dir}\n\n"
-            "L'app va continuer depuis son dossier actuel.",
+            f"Couldn't install to:\n{target_dir}\n\n"
+            "The app will continue from its current folder.",
         )
         r.destroy()
         save_config(dict(DEFAULTS))
@@ -1428,9 +1428,9 @@ def main():
         r.withdraw()
         tkinter.messagebox.showerror(
             "Clip Recorder",
-            "ffmpeg.exe introuvable.\n\n"
-            "Placez ffmpeg.exe à côté de l'application\n"
-            "ou installez FFmpeg dans le PATH.",
+            "ffmpeg.exe not found.\n\n"
+            "Place ffmpeg.exe next to the application\n"
+            "or install FFmpeg in PATH.",
         )
         sys.exit(1)
 
@@ -1494,9 +1494,9 @@ def main():
             import tkinter.messagebox
             root.after(100, lambda: tkinter.messagebox.showwarning(
                 "ClipRecorder",
-                f"Impossible d'enregistrer le raccourci {failed_key}.\n"
-                "Il est peut-être utilisé par une autre application.\n"
-                "Raccourci réinitialisé à Ctrl+Alt+R.",
+                f"Couldn't register hotkey {failed_key}.\n"
+                "It might already be in use by another application.\n"
+                "Hotkey reset to Ctrl+Alt+R.",
             ))
 
     settings.on_hotkey_change = restart_hotkeys

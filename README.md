@@ -1,23 +1,23 @@
 # Clip Recorder
 
-Replay screen recorder pour Windows — capture continue en arrière-plan, `Ctrl+Alt+R` sauvegarde les dernières secondes en MP4.
+Replay screen recorder for Windows — continuous background capture, `Ctrl+Alt+R` saves the last few seconds as MP4.
 
 ## Features
 
-- Replay instantané (15-120s) avec audio système + micro
-- GPU-accelerated (NVENC) + capture DXGI jusqu'à 240fps
-- Sélection des devices audio dans les paramètres
-- Portable — single exe, pas d'installation
+- Instant replay (15-120s) with system audio + mic
+- GPU-accelerated (NVENC) + DXGI capture up to 240fps
+- Audio device selection in settings
+- Portable — single exe, no installation
 
 ## Install
 
-Télécharger `ClipRecorder.exe` depuis [Releases](../../releases) ou `pip install -r requirements.txt && python clip_recorder.pyw`
+Download `ClipRecorder.exe` from [Releases](../../releases) or `pip install -r requirements.txt && python clip_recorder.pyw`
 
-Requires Windows 10/11, FFmpeg bundlé dans les releases.
+Requires Windows 10/11, FFmpeg bundled in releases.
 
 ## Build
 
-`build.bat` télécharge FFmpeg, génère l'icône puis lance PyInstaller (`--onefile --windowed`). L'exe est produit dans `dist/`.
+`build.bat` downloads FFmpeg, generates the icon, then runs PyInstaller (`--onefile --windowed`). The exe is produced in `dist/`.
 
 ## License
 
