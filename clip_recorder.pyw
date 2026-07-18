@@ -1281,7 +1281,6 @@ class SettingsWindow:
         x = self.win.winfo_x() + (self.win.winfo_width() - w) // 2
         y = self.win.winfo_y() + (self.win.winfo_height() - h) // 2
         dlg.geometry(f"+{x}+{y}")
-        self.win = None
 
 
 # ─── System Tray ─────────────────────────────────────────────────────────────
