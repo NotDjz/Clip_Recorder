@@ -932,6 +932,7 @@ class SettingsWindow:
         self.capture = capture
         self.win = None
         self.on_hotkey_change = None
+        self.on_uninstall = None
         self._capturing_hotkey = False
         self._held_mods = set()
 
@@ -1101,6 +1102,9 @@ class SettingsWindow:
         tk.Button(bf, text="Save", command=self._save,
                   bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
                   padx=15, cursor="hand2").pack(side="left")
+        tk.Button(bf, text="Uninstall...", command=self._confirm_uninstall,
+                  bg=BG3, fg=FG2, font=FONT, relief="flat",
+                  padx=10, cursor="hand2").pack(side="right")
 
         self.win.lift()
         self.win.focus_force()
@@ -1231,6 +1235,56 @@ class SettingsWindow:
         if self._capturing_hotkey:
             self._stop_hotkey_capture()
         self.win.destroy()
+        self.win = None
+
+    def _confirm_uninstall(self):
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Uninstall Clip Recorder")
+        dlg.configure(bg=BG)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.transient(self.win)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg, text="This will remove Clip Recorder from this computer.",
+            bg=BG, fg=FG, font=FONT_B,
+        ).pack(padx=20, pady=(20, 10), anchor="w")
+
+        delete_clips_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            dlg, text="Also delete my recorded clips (cannot be undone)",
+            variable=delete_clips_var,
+            bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
+        ).pack(padx=20, pady=(0, 15), anchor="w")
+
+        bf = tk.Frame(dlg, bg=BG)
+        bf.pack(padx=20, pady=(0, 20), fill="x")
+
+        def cancel():
+            dlg.destroy()
+
+        def confirm():
+            delete_clips = delete_clips_var.get()
+            dlg.destroy()
+            on_uninstall = self.on_uninstall
+            self._close()
+            if on_uninstall:
+                on_uninstall(delete_clips)
+
+        tk.Button(bf, text="Cancel", command=cancel,
+                  bg=BG3, fg=FG, font=FONT, relief="flat",
+                  padx=10, cursor="hand2").pack(side="left")
+        tk.Button(bf, text="Uninstall", command=confirm,
+                  bg="#cc3333", fg="#ffffff", font=FONT_B, relief="flat",
+                  padx=15, cursor="hand2").pack(side="right")
+
+        dlg.protocol("WM_DELETE_WINDOW", cancel)
+        dlg.update_idletasks()
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        x = self.win.winfo_x() + (self.win.winfo_width() - w) // 2
+        y = self.win.winfo_y() + (self.win.winfo_height() - h) // 2
+        dlg.geometry(f"+{x}+{y}")
         self.win = None
 
 
@@ -1485,6 +1539,39 @@ def main():
         root.destroy()
         sys.exit(0)
 
+    def uninstall(delete_clips):
+        nonlocal tray, hotkeys
+        clips_folder = get_output_folder(config)
+        capture.cleanup()
+        audio.cleanup()
+        if hotkeys:
+            hotkeys.stop()
+        if tray:
+            tray.stop()
+        if delete_clips:
+            shutil.rmtree(clips_folder, ignore_errors=True)
+        if getattr(sys, "frozen", False):
+            exe_path = sys.executable
+            desktop_lnk = os.path.join(os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk")
+            pid = os.getpid()
+
+            def ps_quote(path):
+                return path.replace("'", "''")
+
+            ps_script = (
+                f"Wait-Process -Id {pid} -Timeout 10 -ErrorAction SilentlyContinue;"
+                "Start-Sleep -Milliseconds 500;"
+                f"Remove-Item -LiteralPath '{ps_quote(exe_path)}' -Force -ErrorAction SilentlyContinue;"
+                f"Remove-Item -LiteralPath '{ps_quote(CONFIG_FILE)}' -Force -ErrorAction SilentlyContinue;"
+                f"Remove-Item -LiteralPath '{ps_quote(desktop_lnk)}' -Force -ErrorAction SilentlyContinue;"
+            )
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
+                creationflags=0x08000000,
+            )
+        root.destroy()
+        sys.exit(0)
+
     hotkeys = HotkeyManager(root, do_save, *parse_hotkey(config.get("hotkey", "Ctrl+Alt+R")))
 
     def restart_hotkeys():
@@ -1526,6 +1613,7 @@ def main():
             ))
 
     settings.on_hotkey_change = restart_hotkeys
+    settings.on_uninstall = uninstall
     tray = TrayIcon(root, config, capture, settings, shutdown, do_save)
 
     capture.start()
