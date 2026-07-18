@@ -1249,13 +1249,10 @@ class SettingsWindow:
         tk.Label(
             dlg, text="This will remove Clip Recorder from this computer.",
             bg=BG, fg=FG, font=FONT_B,
-        ).pack(padx=20, pady=(20, 10), anchor="w")
-
-        delete_clips_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            dlg, text="Also delete my recorded clips (cannot be undone)",
-            variable=delete_clips_var,
-            bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
+        ).pack(padx=20, pady=(20, 5), anchor="w")
+        tk.Label(
+            dlg, text="Your recorded clips are not touched, wherever they are saved.",
+            bg=BG, fg=FG2, font=FONT_S,
         ).pack(padx=20, pady=(0, 15), anchor="w")
 
         bf = tk.Frame(dlg, bg=BG)
@@ -1265,12 +1262,11 @@ class SettingsWindow:
             dlg.destroy()
 
         def confirm():
-            delete_clips = delete_clips_var.get()
             dlg.destroy()
             on_uninstall = self.on_uninstall
             self._close()
             if on_uninstall:
-                on_uninstall(delete_clips)
+                on_uninstall()
 
         tk.Button(bf, text="Cancel", command=cancel,
                   bg=BG3, fg=FG, font=FONT, relief="flat",
@@ -1338,137 +1334,11 @@ class TrayIcon:
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
-def _create_desktop_shortcut(target_exe):
-    try:
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        lnk_path = os.path.join(desktop, "ClipRecorder.lnk")
-        ps_script = (
-            "$s = New-Object -ComObject WScript.Shell;"
-            f"$sc = $s.CreateShortcut('{lnk_path}');"
-            f"$sc.TargetPath = '{target_exe}';"
-            f"$sc.WorkingDirectory = '{os.path.dirname(target_exe)}';"
-            f"$sc.IconLocation = '{target_exe}';"
-            "$sc.Save()"
-        )
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
-            capture_output=True, timeout=10, creationflags=0x08000000,
-        )
-    except Exception:
-        pass
-
-
-def prompt_install_location(mutex_handle):
-    """First launch only (frozen exe, no config.json next to it yet):
-    asks where to keep the app, copies the exe + creates a shortcut if requested."""
-    if not getattr(sys, "frozen", False) or os.path.exists(CONFIG_FILE):
-        return
-
-    result = {"path": SCRIPT_DIR, "shortcut": True}
-
-    dlg = tk.Tk()
-    dlg.title("Clip Recorder — Setup")
-    dlg.configure(bg=BG)
-    dlg.resizable(False, False)
-    dlg.attributes("-topmost", True)
-
-    tk.Label(
-        dlg, text="Where do you want to keep Clip Recorder?", bg=BG, fg=FG, font=FONT_B,
-    ).pack(padx=20, pady=(20, 5), anchor="w")
-    tk.Label(
-        dlg, text="The exe and your settings will stay in this folder.",
-        bg=BG, fg=FG2, font=FONT_S,
-    ).pack(padx=20, pady=(0, 10), anchor="w")
-
-    default_path = os.path.join(os.path.expandvars("%LOCALAPPDATA%"), "Programs", "ClipRecorder")
-    path_var = tk.StringVar(value=default_path)
-    row = tk.Frame(dlg, bg=BG)
-    row.pack(padx=20, fill="x")
-    entry = tk.Entry(row, textvariable=path_var, width=45, bg=BG3, fg=FG,
-                      insertbackground=FG, relief="flat")
-    entry.pack(side="left", fill="x", expand=True, ipady=4)
-
-    def browse():
-        folder = filedialog.askdirectory(title="Install folder", initialdir=path_var.get())
-        if folder:
-            path_var.set(folder)
-
-    tk.Button(
-        row, text="Browse...", command=browse,
-        bg=BG3, fg=FG, activebackground=BG2, relief="flat",
-    ).pack(side="left", padx=(6, 0))
-
-    shortcut_var = tk.BooleanVar(value=True)
-    tk.Checkbutton(
-        dlg, text="Create a desktop shortcut", variable=shortcut_var,
-        bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
-    ).pack(padx=20, pady=(10, 0), anchor="w")
-
-    def confirm():
-        result["path"] = path_var.get().strip() or SCRIPT_DIR
-        result["shortcut"] = shortcut_var.get()
-        dlg.destroy()
-
-    def cancel():
-        result["path"] = SCRIPT_DIR
-        result["shortcut"] = shortcut_var.get()
-        dlg.destroy()
-
-    tk.Button(
-        dlg, text="Install", command=confirm,
-        bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
-    ).pack(padx=20, pady=20, fill="x", ipady=6)
-
-    dlg.protocol("WM_DELETE_WINDOW", cancel)
-    dlg.update_idletasks()
-    w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
-    x = (dlg.winfo_screenwidth() - w) // 2
-    y = (dlg.winfo_screenheight() - h) // 2
-    dlg.geometry(f"+{x}+{y}")
-    dlg.mainloop()
-
-    target_dir = os.path.normpath(result["path"])
-    current_dir = os.path.normpath(SCRIPT_DIR)
-
-    if target_dir == current_dir:
-        save_config(dict(DEFAULTS))
-        if result["shortcut"]:
-            _create_desktop_shortcut(sys.executable)
-        return
-
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        exe_name = os.path.basename(sys.executable)
-        new_exe = os.path.join(target_dir, exe_name)
-        shutil.copy2(sys.executable, new_exe)
-        with open(os.path.join(target_dir, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(DEFAULTS, f, indent=2, ensure_ascii=False)
-        if result["shortcut"]:
-            _create_desktop_shortcut(new_exe)
-        if mutex_handle:
-            ctypes.windll.kernel32.CloseHandle(mutex_handle)
-        subprocess.Popen([new_exe])
-        sys.exit(0)
-    except Exception:
-        import tkinter.messagebox
-        r = tk.Tk()
-        r.withdraw()
-        tkinter.messagebox.showerror(
-            "Clip Recorder",
-            f"Couldn't install to:\n{target_dir}\n\n"
-            "The app will continue from its current folder.",
-        )
-        r.destroy()
-        save_config(dict(DEFAULTS))
-
-
 def main():
     # Single instance via Win32 mutex
-    _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "ClipRecorder_SingleInstance")
+    ctypes.windll.kernel32.CreateMutexW(None, True, "ClipRecorder_SingleInstance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         sys.exit(0)
-
-    prompt_install_location(_mutex)
 
     # Clean orphan temp dirs from previous crashes
     try:
@@ -1539,17 +1409,14 @@ def main():
         root.destroy()
         sys.exit(0)
 
-    def uninstall(delete_clips):
+    def uninstall():
         nonlocal tray, hotkeys
-        clips_folder = get_output_folder(config)
         capture.cleanup()
         audio.cleanup()
         if hotkeys:
             hotkeys.stop()
         if tray:
             tray.stop()
-        if delete_clips:
-            shutil.rmtree(clips_folder, ignore_errors=True)
         if getattr(sys, "frozen", False):
             exe_path = sys.executable
             desktop_lnk = os.path.join(os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk")
