@@ -295,8 +295,10 @@ class AudioCapture:
                     frames_per_buffer=4096,
                     stream_callback=self._loopback_callback,
                 )
-            except Exception:
-                pass
+                log(f"loopback stream opened: device={self._loopback_device.get('name')!r} "
+                    f"rate={self._rate} channels={self._channels}")
+            except Exception as e:
+                log(f"loopback stream OPEN FAILED: device={self._loopback_device.get('name')!r}: {e}")
 
         if self._mic_device:
             try:
@@ -311,8 +313,10 @@ class AudioCapture:
                     frames_per_buffer=4096,
                     stream_callback=self._mic_callback,
                 )
-            except Exception:
-                pass
+                log(f"mic stream opened: device={self._mic_device.get('name')!r} "
+                    f"rate={self._mic_rate} channels={self._mic_channels}")
+            except Exception as e:
+                log(f"mic stream OPEN FAILED: device={self._mic_device.get('name')!r}: {e}")
 
         if not self._loopback_stream and not self._mic_stream:
             self._running = False
@@ -769,7 +773,10 @@ class FFmpegCapture:
             eff_rate = self.audio._effective_rate(
                 self.audio._rate, self.audio._loopback_start_time, self.audio._loopback_frames)
             log(f"[{concat_id}] loopback: nominal_rate={self.audio._rate} effective_rate={eff_rate:.2f} "
-                f"(delta={eff_rate - self.audio._rate:+.2f})")
+                f"(delta={eff_rate - self.audio._rate:+.2f}) "
+                f"stream_alive={self.audio._loopback_stream is not None} "
+                f"frames_received={self.audio._loopback_frames} "
+                f"buf_bytes={len(self.audio._loopback_buf)}")
             ok = self.audio.save_wav(loopback_wav, audio_duration, end_offset=audio_offset)
             log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s "
                 f"end_offset={audio_offset:.3f}s")
@@ -777,7 +784,10 @@ class FFmpegCapture:
             eff_rate_mic = self.audio._effective_rate(
                 self.audio._mic_rate, self.audio._mic_start_time, self.audio._mic_frames)
             log(f"[{concat_id}] mic: nominal_rate={self.audio._mic_rate} effective_rate={eff_rate_mic:.2f} "
-                f"(delta={eff_rate_mic - self.audio._mic_rate:+.2f})")
+                f"(delta={eff_rate_mic - self.audio._mic_rate:+.2f}) "
+                f"stream_alive={self.audio._mic_stream is not None} "
+                f"frames_received={self.audio._mic_frames} "
+                f"buf_bytes={len(self.audio._mic_buf)}")
             ok = self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=audio_offset)
             log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s "
                 f"end_offset={audio_offset:.3f}s")
