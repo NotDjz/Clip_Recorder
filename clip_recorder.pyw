@@ -138,6 +138,10 @@ class AudioCapture:
         self._mic_lock = threading.Lock()
         self._loopback_buf = bytearray()
         self._mic_buf = bytearray()
+        self._loopback_start_time = None
+        self._loopback_frames = 0
+        self._mic_start_time = None
+        self._mic_frames = 0
         self._channels = 2
         self._rate = 48000
         self._mic_channels = 2
@@ -266,6 +270,8 @@ class AudioCapture:
 
         if self._loopback_device:
             try:
+                self._loopback_frames = 0
+                self._loopback_start_time = time.time()
                 self._loopback_stream = self._pa.open(
                     format=pyaudio.paInt16,
                     channels=self._channels,
@@ -280,6 +286,8 @@ class AudioCapture:
 
         if self._mic_device:
             try:
+                self._mic_frames = 0
+                self._mic_start_time = time.time()
                 self._mic_stream = self._pa.open(
                     format=pyaudio.paInt16,
                     channels=self._mic_channels,
@@ -315,6 +323,7 @@ class AudioCapture:
             self._loopback_buf.extend(in_data)
             if len(self._loopback_buf) > max_bytes:
                 self._loopback_buf = self._loopback_buf[-max_bytes:]
+            self._loopback_frames += frame_count
         return (None, pyaudio.paContinue)
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
@@ -325,7 +334,26 @@ class AudioCapture:
             self._mic_buf.extend(in_data)
             if len(self._mic_buf) > max_bytes:
                 self._mic_buf = self._mic_buf[-max_bytes:]
+            self._mic_frames += frame_count
         return (None, pyaudio.paContinue)
+
+    @staticmethod
+    def _effective_rate(nominal_rate, start_time, frames):
+        """Real audio hardware clocks commonly run tens of ppm off their
+        reported nominal rate. Using the nominal rate alone to convert a
+        buffer's byte count into a duration silently mis-sizes the extracted
+        audio window by that drift (proportional to how much audio is being
+        pulled) — this measures the ACTUAL delivered rate from real
+        per-callback frame counts against wall-clock time instead."""
+        if start_time is None or frames <= 0:
+            return nominal_rate
+        elapsed = time.time() - start_time
+        if elapsed < 3.0:
+            return nominal_rate
+        measured = frames / elapsed
+        if measured <= 0 or abs(measured - nominal_rate) / nominal_rate > 0.05:
+            return nominal_rate
+        return measured
 
     def _get_pcm(self, buf, lock, rate, channels, seconds, end_offset=0):
         frame_size = channels * self._sample_width
@@ -345,27 +373,29 @@ class AudioCapture:
 
     def save_wav(self, path, seconds, end_offset=0):
         """Save loopback audio to WAV. end_offset trims N seconds from the end."""
+        rate = self._effective_rate(self._rate, self._loopback_start_time, self._loopback_frames)
         pcm = self._get_pcm(self._loopback_buf, self._loopback_lock,
-                            self._rate, self._channels, seconds, end_offset)
+                            rate, self._channels, seconds, end_offset)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
             wf.setnchannels(self._channels)
             wf.setsampwidth(self._sample_width)
-            wf.setframerate(self._rate)
+            wf.setframerate(int(round(rate)))
             wf.writeframes(pcm)
         return True
 
     def save_mic_wav(self, path, seconds, end_offset=0):
         """Save microphone audio to WAV. end_offset trims N seconds from the end."""
+        rate = self._effective_rate(self._mic_rate, self._mic_start_time, self._mic_frames)
         pcm = self._get_pcm(self._mic_buf, self._mic_lock,
-                            self._mic_rate, self._mic_channels, seconds, end_offset)
+                            rate, self._mic_channels, seconds, end_offset)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
             wf.setnchannels(self._mic_channels)
             wf.setsampwidth(self._sample_width)
-            wf.setframerate(self._mic_rate)
+            wf.setframerate(int(round(rate)))
             wf.writeframes(pcm)
         return True
 
@@ -627,20 +657,6 @@ class FFmpegCapture:
 
         concat_id = uuid.uuid4().hex[:8]
 
-        last_seg_name, last_seg_mtime = files_with_mtime[-1]
-        last_seg_path = os.path.join(self.segment_dir, last_seg_name)
-        snap_name = f"snap_{concat_id}.ts"
-        snap_path = os.path.join(self.segment_dir, snap_name)
-        try:
-            shutil.copy2(last_seg_path, snap_path)
-            files_with_mtime[-1] = (snap_name, last_seg_mtime)
-        except Exception:
-            snap_path = None
-            if len(files_with_mtime) > 1:
-                files_with_mtime = files_with_mtime[:-1]
-            else:
-                return
-
         # Select whole segments only, walking backward until their real (mtime-based)
         # combined span covers replay_secs. Every segment boundary is already a real
         # keyframe boundary, so no mid-segment seek is ever needed — this avoids the
@@ -666,9 +682,40 @@ class FFmpegCapture:
 
         if not selected:
             return
+
+        # Snapshot every selected segment to a uniquely-named copy immediately —
+        # the live capture FFmpeg process keeps running and, per -segment_wrap,
+        # cyclically overwrites old numbered segment files. The actual concat
+        # read only happens later, in the background thread below, after the
+        # synchronous audio processing that follows — referencing the original
+        # filenames directly would risk one of them being rewritten with fresh
+        # content in that gap (a real race, worse with more segments/longer
+        # sessions, whose damage when it hits is bounded at exactly one
+        # segment's duration). Copying everything up front — the same
+        # technique previously used only for the last, in-progress segment —
+        # eliminates the race entirely: a live process can never touch a file
+        # under a name it never wrote.
+        snap_paths = []
+        concat_names = []
+        for i, (seg_name, _) in enumerate(selected):
+            src = os.path.join(self.segment_dir, seg_name)
+            dst_name = f"snap_{concat_id}_{i:03d}.ts"
+            dst = os.path.join(self.segment_dir, dst_name)
+            try:
+                shutil.copy2(src, dst)
+            except Exception:
+                for p in snap_paths:
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                return
+            snap_paths.append(dst)
+            concat_names.append(dst_name)
+
         concat_file = os.path.join(self.segment_dir, f"concat_{concat_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as fh:
-            for seg_name, _ in selected:
+            for seg_name in concat_names:
                 seg_path = os.path.join(self.segment_dir, seg_name).replace("\\", "/")
                 fh.write(f"file '{seg_path}'\n")
 
@@ -769,7 +816,7 @@ class FFmpegCapture:
             except Exception:
                 pass
             finally:
-                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only, snap_path]:
+                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only] + snap_paths:
                     if tmp:
                         try:
                             os.remove(tmp)

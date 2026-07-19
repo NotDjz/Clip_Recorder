@@ -206,21 +206,26 @@ def run_generate(args):
             n += 1
 
     capture.start()
-    print(f"Capturing at {args.fps} FPS, buffer_seconds={args.buffer}, monitor={mon_idx}...")
+    print(f"Capturing at {args.fps} FPS, buffer_seconds={args.buffer}, monitor={mon_idx}, "
+          f"repeats={args.repeats}...")
     threading.Thread(target=flip_loop, daemon=True).start()
 
-    result = {"path": None}
+    results = []
 
     def do_save():
         def on_success():
             folder = cr.get_output_folder(config)
             files = [os.path.join(folder, f) for f in os.listdir(folder) if f.startswith("Clip_")]
-            if files:
-                result["path"] = max(files, key=os.path.getmtime)
-            stop_flag.set()
-            root.after(500, root.quit)
+            path = max(files, key=os.path.getmtime) if files else None
+            results.append(path)
+            print(f"  save {len(results)}/{args.repeats} done: {path}")
+            if len(results) >= args.repeats:
+                stop_flag.set()
+                root.after(500, root.quit)
+            else:
+                root.after(5000, do_save)
 
-        print("Warm-up complete, triggering save_replay()...")
+        print(f"Triggering save_replay() ({len(results) + 1}/{args.repeats})...")
         capture.save_replay(on_success=lambda: root.after(0, on_success))
 
     wait_ms = int((args.buffer + 10) * 1000)
@@ -241,12 +246,16 @@ def run_generate(args):
     capture.cleanup()
     audio.cleanup()
 
-    if not result["path"]:
-        print("ERROR: no clip was saved (save_replay never succeeded).")
+    if not results or not all(results):
+        print("ERROR: not all saves succeeded (save_replay never called on_success).")
         return 1
 
-    print(f"Saved: {result['path']}")
-    return run_analyze(result["path"])
+    exit_code = 0
+    for i, path in enumerate(results, 1):
+        print(f"\n=== Save {i}/{len(results)}: {path} ===")
+        rc = run_analyze(path)
+        exit_code = exit_code or rc
+    return exit_code
 
 
 def main():
@@ -257,6 +266,8 @@ def main():
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--buffer", type=int, default=30, help="buffer_seconds to test")
     parser.add_argument("--monitor", type=int, default=0)
+    parser.add_argument("--repeats", type=int, default=1,
+                         help="Number of successive save_replay() calls within one session")
     args = parser.parse_args()
 
     if args.analyze:
