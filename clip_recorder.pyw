@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import tkinter as tk
 from tkinter import filedialog
 import uuid
@@ -36,9 +37,22 @@ else:
     BUNDLE_DIR = SCRIPT_DIR
 
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
+LOG_FILE = os.path.join(SCRIPT_DIR, "clip_recorder.log")
 
 _ffmpeg_bundle = os.path.join(BUNDLE_DIR, "ffmpeg.exe")
 FFMPEG = _ffmpeg_bundle if os.path.exists(_ffmpeg_bundle) else "ffmpeg"
+
+_log_lock = threading.Lock()
+
+
+def log(msg):
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
 # ─── Win32 ───────────────────────────────────────────────────────────────────
 
@@ -628,18 +642,25 @@ class FFmpegCapture:
     def save_replay(self, on_success=None):
         save_time = time.time()
         replay_secs = self.config.get("buffer_seconds", 30)
+        fps = self.config.get("fps", 60)
         output_folder = get_output_folder(self.config)
         os.makedirs(output_folder, exist_ok=True)
+
+        concat_id = uuid.uuid4().hex[:8]
+        log(f"[{concat_id}] save_replay start: fps={fps} buffer_seconds={replay_secs} "
+            f"monitor={self.config.get('monitor')}")
 
         try:
             files = [
                 f for f in os.listdir(self.segment_dir)
                 if f.startswith("seg_") and f.endswith(".ts")
             ]
-        except Exception:
+        except Exception as e:
+            log(f"[{concat_id}] ABORT: listdir failed: {e}")
             return
 
         if not files:
+            log(f"[{concat_id}] ABORT: no segment files found")
             return
 
         files_with_mtime = []
@@ -653,9 +674,12 @@ class FFmpegCapture:
         files_with_mtime.sort(key=lambda x: x[1])
 
         if not files_with_mtime:
+            log(f"[{concat_id}] ABORT: no segment mtimes readable")
             return
 
-        concat_id = uuid.uuid4().hex[:8]
+        log(f"[{concat_id}] found {len(files_with_mtime)} segments, "
+            f"oldest_mtime_age={save_time - files_with_mtime[0][1]:.3f}s "
+            f"newest_mtime_age={save_time - files_with_mtime[-1][1]:.3f}s")
 
         # Select whole segments only, walking backward until their real (mtime-based)
         # combined span covers replay_secs. Every segment boundary is already a real
@@ -681,7 +705,12 @@ class FFmpegCapture:
         selected = files_with_mtime[-count:]
 
         if not selected:
+            log(f"[{concat_id}] ABORT: selection produced empty list")
             return
+
+        log(f"[{concat_id}] selected {len(selected)}/{n} segments, total_duration={total_duration:.3f}s "
+            f"(requested {replay_secs}s), avg_seg_duration={total_duration / max(len(selected), 1):.3f}s "
+            f"(nominal {SEGMENT_DURATION}s)")
 
         # Snapshot every selected segment to a uniquely-named copy immediately —
         # the live capture FFmpeg process keeps running and, per -segment_wrap,
@@ -697,13 +726,15 @@ class FFmpegCapture:
         # under a name it never wrote.
         snap_paths = []
         concat_names = []
+        snapshot_start = time.time()
         for i, (seg_name, _) in enumerate(selected):
             src = os.path.join(self.segment_dir, seg_name)
             dst_name = f"snap_{concat_id}_{i:03d}.ts"
             dst = os.path.join(self.segment_dir, dst_name)
             try:
                 shutil.copy2(src, dst)
-            except Exception:
+            except Exception as e:
+                log(f"[{concat_id}] ABORT: snapshot copy failed on segment {i} ({seg_name}): {e}")
                 for p in snap_paths:
                     try:
                         os.remove(p)
@@ -712,6 +743,7 @@ class FFmpegCapture:
                 return
             snap_paths.append(dst)
             concat_names.append(dst_name)
+        log(f"[{concat_id}] snapshotted {len(snap_paths)} segments in {time.time() - snapshot_start:.3f}s")
 
         concat_file = os.path.join(self.segment_dir, f"concat_{concat_id}.txt")
         with open(concat_file, "w", encoding="utf-8") as fh:
@@ -734,9 +766,24 @@ class FFmpegCapture:
         audio_offset = max(0, time.time() - save_time)
 
         if has_loopback:
-            self.audio.save_wav(loopback_wav, audio_duration, end_offset=audio_offset)
+            eff_rate = self.audio._effective_rate(
+                self.audio._rate, self.audio._loopback_start_time, self.audio._loopback_frames)
+            log(f"[{concat_id}] loopback: nominal_rate={self.audio._rate} effective_rate={eff_rate:.2f} "
+                f"(delta={eff_rate - self.audio._rate:+.2f})")
+            ok = self.audio.save_wav(loopback_wav, audio_duration, end_offset=audio_offset)
+            log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s "
+                f"end_offset={audio_offset:.3f}s")
         if has_mic:
-            self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=audio_offset)
+            eff_rate_mic = self.audio._effective_rate(
+                self.audio._mic_rate, self.audio._mic_start_time, self.audio._mic_frames)
+            log(f"[{concat_id}] mic: nominal_rate={self.audio._mic_rate} effective_rate={eff_rate_mic:.2f} "
+                f"(delta={eff_rate_mic - self.audio._mic_rate:+.2f})")
+            ok = self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=audio_offset)
+            log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s "
+                f"end_offset={audio_offset:.3f}s")
+
+        log(f"[{concat_id}] audio_offset={audio_offset:.3f}s audio_duration={audio_duration:.3f}s "
+            f"has_loopback={has_loopback} has_mic={has_mic}")
 
         audio_wav = None
         if has_loopback and has_mic and os.path.exists(loopback_wav) and os.path.exists(mic_wav):
@@ -774,15 +821,23 @@ class FFmpegCapture:
                 output_path,
             ]
 
+        def _log_result(label, result):
+            err = result.stderr.decode("utf-8", errors="replace")[-2000:] if result.stderr else ""
+            log(f"[{concat_id}] {label}: returncode={result.returncode}"
+                + (f" stderr_tail={err!r}" if result.returncode != 0 else ""))
+
         def _run():
+            run_start = time.time()
+            success = False
             try:
-                subprocess.run(
+                r = subprocess.run(
                     cmd_video, capture_output=True, timeout=30,
                     creationflags=0x08000000,
                 )
+                _log_result("video_concat", r)
 
                 if mixed_wav and loopback_wav and mic_wav:
-                    subprocess.run([
+                    r = subprocess.run([
                         FFMPEG, "-y",
                         "-i", loopback_wav, "-i", mic_wav,
                         "-filter_complex",
@@ -793,9 +848,10 @@ class FFmpegCapture:
                         mixed_wav,
                     ], capture_output=True, timeout=30,
                        creationflags=0x08000000)
+                    _log_result("audio_mix", r)
 
                 if video_only and audio_wav and os.path.exists(audio_wav) and os.path.exists(video_only):
-                    subprocess.run([
+                    r = subprocess.run([
                         FFMPEG, "-y",
                         "-i", video_only, "-i", audio_wav,
                         "-c:v", "copy",
@@ -805,8 +861,10 @@ class FFmpegCapture:
                         output_path,
                     ], capture_output=True, timeout=30,
                        creationflags=0x08000000)
+                    _log_result("final_mux", r)
 
                 if os.path.exists(output_path):
+                    success = True
                     winsound.PlaySound(
                         "SystemExclamation",
                         winsound.SND_ALIAS | winsound.SND_ASYNC,
@@ -814,8 +872,11 @@ class FFmpegCapture:
                     if on_success:
                         on_success()
             except Exception:
-                pass
+                log(f"[{concat_id}] EXCEPTION in _run:\n{traceback.format_exc()}")
             finally:
+                log(f"[{concat_id}] done: output_exists={os.path.exists(output_path)} "
+                    f"on_success_called={success} mux_time={time.time() - run_start:.3f}s "
+                    f"total_save_replay_time={time.time() - save_time:.3f}s")
                 for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only] + snap_paths:
                     if tmp:
                         try:
