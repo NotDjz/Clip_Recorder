@@ -275,6 +275,78 @@ class AudioCapture:
             return self._mic_device["name"]
         return None
 
+    def _open_loopback_stream(self):
+        if not self._loopback_device:
+            return
+        try:
+            self._loopback_frames = 0
+            self._loopback_start_time = time.time()
+            self._loopback_stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=self._channels,
+                rate=self._rate,
+                input=True,
+                input_device_index=self._loopback_device["index"],
+                frames_per_buffer=4096,
+                stream_callback=self._loopback_callback,
+            )
+            log(f"loopback stream opened: device={self._loopback_device.get('name')!r} "
+                f"rate={self._rate} channels={self._channels}")
+        except Exception as e:
+            self._loopback_stream = None
+            log(f"loopback stream OPEN FAILED: device={self._loopback_device.get('name')!r}: {e}")
+
+    def _open_mic_stream(self):
+        if not self._mic_device:
+            return
+        try:
+            self._mic_frames = 0
+            self._mic_start_time = time.time()
+            self._mic_stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=self._mic_channels,
+                rate=self._mic_rate,
+                input=True,
+                input_device_index=self._mic_device["index"],
+                frames_per_buffer=4096,
+                stream_callback=self._mic_callback,
+            )
+            log(f"mic stream opened: device={self._mic_device.get('name')!r} "
+                f"rate={self._mic_rate} channels={self._mic_channels}")
+        except Exception as e:
+            self._mic_stream = None
+            log(f"mic stream OPEN FAILED: device={self._mic_device.get('name')!r}: {e}")
+
+    def _heal_dead_streams(self, loopback_stream, mic_stream):
+        """WASAPI loopback capture can silently open with zero frames ever
+        delivered if the audio render engine has no active session yet
+        (confirmed: happened on a real first-launch capture, fixed itself
+        after any later stop/start cycle). Give it a moment, then if a
+        stream that opened successfully never produced a single frame,
+        close and reopen it once — without this, a bad first open would
+        silently stay dead for the whole session."""
+        time.sleep(1.5)
+        if not self._running:
+            return
+        if self._loopback_stream is loopback_stream and loopback_stream is not None and self._loopback_frames <= 0:
+            log("loopback stream produced no frames after 1.5s, reopening once")
+            try:
+                loopback_stream.stop_stream()
+                loopback_stream.close()
+            except Exception:
+                pass
+            self._loopback_stream = None
+            self._open_loopback_stream()
+        if self._mic_stream is mic_stream and mic_stream is not None and self._mic_frames <= 0:
+            log("mic stream produced no frames after 1.5s, reopening once")
+            try:
+                mic_stream.stop_stream()
+                mic_stream.close()
+            except Exception:
+                pass
+            self._mic_stream = None
+            self._open_mic_stream()
+
     def start(self):
         if self._running:
             return
@@ -282,44 +354,18 @@ class AudioCapture:
         self._mic_buf = bytearray()
         self._running = True
 
-        if self._loopback_device:
-            try:
-                self._loopback_frames = 0
-                self._loopback_start_time = time.time()
-                self._loopback_stream = self._pa.open(
-                    format=pyaudio.paInt16,
-                    channels=self._channels,
-                    rate=self._rate,
-                    input=True,
-                    input_device_index=self._loopback_device["index"],
-                    frames_per_buffer=4096,
-                    stream_callback=self._loopback_callback,
-                )
-                log(f"loopback stream opened: device={self._loopback_device.get('name')!r} "
-                    f"rate={self._rate} channels={self._channels}")
-            except Exception as e:
-                log(f"loopback stream OPEN FAILED: device={self._loopback_device.get('name')!r}: {e}")
-
-        if self._mic_device:
-            try:
-                self._mic_frames = 0
-                self._mic_start_time = time.time()
-                self._mic_stream = self._pa.open(
-                    format=pyaudio.paInt16,
-                    channels=self._mic_channels,
-                    rate=self._mic_rate,
-                    input=True,
-                    input_device_index=self._mic_device["index"],
-                    frames_per_buffer=4096,
-                    stream_callback=self._mic_callback,
-                )
-                log(f"mic stream opened: device={self._mic_device.get('name')!r} "
-                    f"rate={self._mic_rate} channels={self._mic_channels}")
-            except Exception as e:
-                log(f"mic stream OPEN FAILED: device={self._mic_device.get('name')!r}: {e}")
+        self._open_loopback_stream()
+        self._open_mic_stream()
 
         if not self._loopback_stream and not self._mic_stream:
             self._running = False
+            return
+
+        threading.Thread(
+            target=self._heal_dead_streams,
+            args=(self._loopback_stream, self._mic_stream),
+            daemon=True,
+        ).start()
 
     def stop(self):
         self._running = False
