@@ -731,6 +731,21 @@ class FFmpegCapture:
             f"oldest_mtime_age={save_time - files_with_mtime[0][1]:.3f}s "
             f"newest_mtime_age={save_time - files_with_mtime[-1][1]:.3f}s")
 
+        # The newest segment file is still being actively appended to by the
+        # live capture process — snapshotting it mid-write can catch a torn,
+        # incomplete frame (confirmed via ffmpeg decode: "corrupt decoded
+        # frame" / "error while decoding MB"). That shows up as a video
+        # glitch/freeze while the audio track — plain PCM, unaffected — keeps
+        # playing cleanly, which reads exactly like an A/V desync even though
+        # it's actually video corruption. Only ever select from segments that
+        # have already been rotated out (fully closed) and are therefore safe
+        # to copy.
+        complete = files_with_mtime[:-1]
+        if not complete:
+            log(f"[{concat_id}] ABORT: only the in-progress segment exists yet "
+                f"(capture just started/restarted) — nothing complete to save")
+            return
+
         # Select whole segments only, walking backward until their real (mtime-based)
         # combined span covers replay_secs. Every segment boundary is already a real
         # keyframe boundary, so no mid-segment seek is ever needed — this avoids the
@@ -738,11 +753,11 @@ class FFmpegCapture:
         # once real per-segment duration drifts from the nominal SEGMENT_DURATION
         # (plausible whenever delivered capture rate dips under load, worse at high
         # FPS and over longer buffers since the drift compounds per segment).
-        n = len(files_with_mtime)
+        n = len(complete)
         count = 1
         total_duration = None
         while count <= n - 1:
-            anchor_mtime = files_with_mtime[n - count - 1][1]
+            anchor_mtime = complete[n - count - 1][1]
             candidate_duration = save_time - anchor_mtime
             if candidate_duration >= replay_secs:
                 total_duration = candidate_duration
@@ -750,9 +765,9 @@ class FFmpegCapture:
             count += 1
         else:
             count = n
-            total_duration = (save_time - files_with_mtime[0][1]) if n >= 2 else SEGMENT_DURATION
+            total_duration = (save_time - complete[0][1]) if n >= 2 else SEGMENT_DURATION
 
-        selected = files_with_mtime[-count:]
+        selected = complete[-count:]
 
         if not selected:
             log(f"[{concat_id}] ABORT: selection produced empty list")
