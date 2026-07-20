@@ -157,14 +157,17 @@ def run_analyze(mp4_path):
     #    symptom (audio timeline shorter/longer than the video it's muxed to).
     vdur = _stream_duration(mp4_path, "0:v:0")
     adur = _stream_duration(mp4_path, "0:a:0")
-    if vdur and adur:
+    if vdur is not None and adur is not None:
         diff = abs(vdur - adur)
         print(f"  video duration: {vdur:.3f}s  audio duration: {adur:.3f}s  diff: {diff * 1000:+.0f}ms")
         if diff > 0.25:
             print("  DURATION MISMATCH (audio vs video) — overlap/desync risk")
             rc = 1
     else:
-        print("  WARN: could not measure per-stream durations")
+        # A stream we can't measure (parse failed / 0-length) is itself a problem,
+        # not something to pass silently.
+        print(f"  DURATION UNMEASURABLE (video={vdur} audio={adur}) — treating as failure")
+        rc = 1
 
     # 3) Event-based A/V offset (existing measurement).
     video_ts = extract_video_transitions(mp4_path)

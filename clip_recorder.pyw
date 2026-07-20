@@ -160,12 +160,12 @@ class AudioCapture:
         self._mic_chunks = collections.deque()
         self._loopback_bytes = 0
         self._mic_bytes = 0
-        self._loopback_start_time = None
         self._loopback_frames = 0
-        self._mic_start_time = None
         self._mic_frames = 0
-        self._loopback_last_status = 0
-        self._mic_last_status = 0
+        # PortAudio status flags OR-accumulated in the callback (overflow/etc).
+        # Cheap bitwise-or, no I/O — surfaced in save_replay's log line.
+        self._loopback_status_flags = 0
+        self._mic_status_flags = 0
         self._heal_gen = 0
         self._channels = 2
         self._rate = 48000
@@ -291,7 +291,7 @@ class AudioCapture:
             return
         try:
             self._loopback_frames = 0
-            self._loopback_start_time = time.time()
+            self._loopback_status_flags = 0
             self._loopback_stream = self._pa.open(
                 format=pyaudio.paInt16,
                 channels=self._channels,
@@ -312,7 +312,7 @@ class AudioCapture:
             return
         try:
             self._mic_frames = 0
-            self._mic_start_time = time.time()
+            self._mic_status_flags = 0
             self._mic_stream = self._pa.open(
                 format=pyaudio.paInt16,
                 channels=self._mic_channels,
@@ -422,9 +422,7 @@ class AudioCapture:
         if not self._running:
             return (None, pyaudio.paComplete)
         t = time.time()
-        if status and status != self._loopback_last_status:
-            log(f"loopback callback status flags changed: {status}")
-        self._loopback_last_status = status
+        self._loopback_status_flags |= status  # cheap; no I/O in the realtime callback
         max_bytes = self.max_seconds * self._rate * self._channels * self._sample_width
         with self._loopback_lock:
             self._loopback_chunks.append((t, in_data))
@@ -439,9 +437,7 @@ class AudioCapture:
         if not self._running:
             return (None, pyaudio.paComplete)
         t = time.time()
-        if status and status != self._mic_last_status:
-            log(f"mic callback status flags changed: {status}")
-        self._mic_last_status = status
+        self._mic_status_flags |= status  # cheap; no I/O in the realtime callback
         max_bytes = self.max_seconds * self._mic_rate * self._mic_channels * self._sample_width
         with self._mic_lock:
             self._mic_chunks.append((t, in_data))
@@ -750,7 +746,13 @@ class FFmpegCapture:
         self.proc = None
 
     def _wipe_segments(self):
+        # Only the live capture segments (seg_*.ts). Never the transient files a
+        # concurrent save_replay._run() owns — snap_*.ts / concat_*.txt / *.wav /
+        # video_*.mp4 — which it is actively concatenating/muxing and cleans up
+        # itself; deleting those mid-flight would corrupt or fail that save.
         for f in os.listdir(self.segment_dir):
+            if not (f.startswith("seg_") and f.endswith(".ts")):
+                continue
             try:
                 os.remove(os.path.join(self.segment_dir, f))
             except Exception:
@@ -769,11 +771,6 @@ class FFmpegCapture:
         if self.audio:
             self.audio.stop()
         self._stop_ffmpeg()
-
-    def restart(self):
-        self.stop()
-        self._wipe_segments()
-        self.start()
 
     def restart_video(self):
         """Re-init ONLY the FFmpeg video process (monitor/fps/buffer_seconds
@@ -937,9 +934,10 @@ class FFmpegCapture:
                 lb_chunks, lb_bytes = len(a._loopback_chunks), a._loopback_bytes
             buf_span = lb_bytes / (a._rate * a._channels * a._sample_width)
             log(f"[{concat_id}] loopback: rate={a._rate} "
-                f"stream_alive={a._loopback_stream is not None} "
+                f"stream_alive={a._stream_alive(a._loopback_stream)} "
                 f"frames_received={a._loopback_frames} chunks={lb_chunks} "
-                f"buf_bytes={lb_bytes} buf_span={buf_span:.3f}s")
+                f"buf_bytes={lb_bytes} buf_span={buf_span:.3f}s "
+                f"status_flags={a._loopback_status_flags}")
             ok = self.audio.save_wav(loopback_wav, t_end, audio_duration)
             log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s")
         if has_mic:
@@ -948,9 +946,10 @@ class FFmpegCapture:
                 mic_chunks, mic_bytes = len(a._mic_chunks), a._mic_bytes
             buf_span = mic_bytes / (a._mic_rate * a._mic_channels * a._sample_width)
             log(f"[{concat_id}] mic: rate={a._mic_rate} "
-                f"stream_alive={a._mic_stream is not None} "
+                f"stream_alive={a._stream_alive(a._mic_stream)} "
                 f"frames_received={a._mic_frames} chunks={mic_chunks} "
-                f"buf_bytes={mic_bytes} buf_span={buf_span:.3f}s")
+                f"buf_bytes={mic_bytes} buf_span={buf_span:.3f}s "
+                f"status_flags={a._mic_status_flags}")
             ok = self.audio.save_mic_wav(mic_wav, t_end, audio_duration)
             log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s")
 
