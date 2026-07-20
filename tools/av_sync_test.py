@@ -15,6 +15,7 @@ import argparse
 import importlib.util
 import math
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -36,6 +37,31 @@ FLIP_INTERVAL = 1.0
 def _ffmpeg_path():
     bundled = os.path.join(REPO_DIR, "ffmpeg.exe")
     return bundled if os.path.exists(bundled) else "ffmpeg"
+
+
+def _decode_errors(mp4_path):
+    """Return decoder error text ('' = clean). Catches the 'corrupt decoded
+    frame' class from muxing a still-being-written segment."""
+    proc = subprocess.run(
+        [_ffmpeg_path(), "-v", "error", "-i", mp4_path, "-f", "null", "-"],
+        capture_output=True, timeout=120, creationflags=0x08000000,
+    )
+    return proc.stderr.decode("utf-8", "replace").strip()
+
+
+def _stream_duration(mp4_path, selector):
+    """Decode one stream (e.g. '0:v:0' / '0:a:0') to null and return its
+    duration in seconds, from ffmpeg's final 'time=' progress token."""
+    proc = subprocess.run(
+        [_ffmpeg_path(), "-i", mp4_path, "-map", selector, "-f", "null", "-"],
+        capture_output=True, timeout=120, creationflags=0x08000000,
+    )
+    err = proc.stderr.decode("utf-8", "replace")
+    last = None
+    for m in re.finditer(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)", err):
+        h, mm, ss = m.groups()
+        last = int(h) * 3600 + int(mm) * 60 + float(ss)
+    return last
 
 
 def load_app_module():
@@ -116,6 +142,31 @@ def extract_video_transitions(mp4_path, sample_fps=20):
 
 def run_analyze(mp4_path):
     print(f"Analyzing {mp4_path} ...")
+    rc = 0
+
+    # 1) Decode-corruption check — any decoder error means the muxed video is
+    #    damaged (e.g. a still-being-written segment got included).
+    errs = _decode_errors(mp4_path)
+    if errs:
+        print(f"  DECODE ERRORS (video corruption):\n    {errs[:400]}")
+        rc = 1
+    else:
+        print("  decode: clean (no errors)")
+
+    # 2) Audio-vs-video duration — a mismatch is exactly the overlap/desync
+    #    symptom (audio timeline shorter/longer than the video it's muxed to).
+    vdur = _stream_duration(mp4_path, "0:v:0")
+    adur = _stream_duration(mp4_path, "0:a:0")
+    if vdur and adur:
+        diff = abs(vdur - adur)
+        print(f"  video duration: {vdur:.3f}s  audio duration: {adur:.3f}s  diff: {diff * 1000:+.0f}ms")
+        if diff > 0.25:
+            print("  DURATION MISMATCH (audio vs video) — overlap/desync risk")
+            rc = 1
+    else:
+        print("  WARN: could not measure per-stream durations")
+
+    # 3) Event-based A/V offset (existing measurement).
     video_ts = extract_video_transitions(mp4_path)
     audio_ts = extract_audio_onsets(mp4_path)
     print(f"  video transitions detected: {len(video_ts)}")
@@ -142,7 +193,7 @@ def run_analyze(mp4_path):
     print(f"  median offset: {median_off:+.1f} ms")
     print("  (positive = audio plays AFTER the video transition (audio behind/late);")
     print("   negative = audio plays BEFORE the video transition (audio ahead/early))")
-    return 0
+    return rc
 
 
 def run_generate(args):
@@ -211,6 +262,7 @@ def run_generate(args):
     threading.Thread(target=flip_loop, daemon=True).start()
 
     results = []
+    changed = [False]
 
     def do_save():
         def on_success():
@@ -222,6 +274,16 @@ def run_generate(args):
             if len(results) >= args.repeats:
                 stop_flag.set()
                 root.after(500, root.quit)
+            elif getattr(args, "change_buffer", None) and not changed[0]:
+                # Exercise the actual failing path: change the clip duration
+                # mid-session (as Settings Save does) and keep capturing/saving.
+                changed[0] = True
+                old = config["buffer_seconds"]
+                config["buffer_seconds"] = args.change_buffer
+                print(f"  >>> changing buffer_seconds {old} -> {args.change_buffer} "
+                      f"via restart_video() (audio must stay untouched)")
+                capture.restart_video()
+                root.after(int((min(args.change_buffer, 20) + 8) * 1000), do_save)
             else:
                 root.after(5000, do_save)
 
@@ -268,7 +330,14 @@ def main():
     parser.add_argument("--monitor", type=int, default=0)
     parser.add_argument("--repeats", type=int, default=1,
                          help="Number of successive save_replay() calls within one session")
+    parser.add_argument("--change-buffer", type=int, default=None, metavar="N",
+                         help="After the first save, change buffer_seconds to N via "
+                              "restart_video() and keep saving — tests the duration-change "
+                              "path (audio must stay in sync). Implies --repeats>=2.")
     args = parser.parse_args()
+
+    if args.change_buffer and args.repeats < 2:
+        args.repeats = 2
 
     if args.analyze:
         sys.exit(run_analyze(args.analyze))

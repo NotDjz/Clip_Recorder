@@ -6,6 +6,7 @@ Ctrl+Alt+R saves the last X seconds as MP4.
 """
 
 import atexit
+import collections
 import json
 import math
 import os
@@ -150,12 +151,22 @@ class AudioCapture:
         self._mic_stream = None
         self._loopback_lock = threading.Lock()
         self._mic_lock = threading.Lock()
-        self._loopback_buf = bytearray()
-        self._mic_buf = bytearray()
+        # Timestamped chunks: deque of (t_arrival_wallclock, pcm_bytes). We
+        # reconstruct the real-time audio window on save from these, padding
+        # silence for any gap — WASAPI loopback does NOT deliver continuously
+        # (it drops/under-delivers during silence), so a flat byte buffer's
+        # timeline diverges from real time and desyncs against mic + video.
+        self._loopback_chunks = collections.deque()
+        self._mic_chunks = collections.deque()
+        self._loopback_bytes = 0
+        self._mic_bytes = 0
         self._loopback_start_time = None
         self._loopback_frames = 0
         self._mic_start_time = None
         self._mic_frames = 0
+        self._loopback_last_status = 0
+        self._mic_last_status = 0
+        self._heal_gen = 0
         self._channels = 2
         self._rate = 48000
         self._mic_channels = 2
@@ -317,41 +328,68 @@ class AudioCapture:
             self._mic_stream = None
             log(f"mic stream OPEN FAILED: device={self._mic_device.get('name')!r}: {e}")
 
-    def _heal_dead_streams(self, loopback_stream, mic_stream):
-        """WASAPI loopback capture can silently open with zero frames ever
-        delivered if the audio render engine has no active session yet
-        (confirmed: happened on a real first-launch capture, fixed itself
-        after any later stop/start cycle). Give it a moment, then if a
-        stream that opened successfully never produced a single frame,
-        close and reopen it once — without this, a bad first open would
-        silently stay dead for the whole session."""
-        time.sleep(1.5)
-        if not self._running:
-            return
-        if self._loopback_stream is loopback_stream and loopback_stream is not None and self._loopback_frames <= 0:
-            log("loopback stream produced no frames after 1.5s, reopening once")
-            try:
-                loopback_stream.stop_stream()
-                loopback_stream.close()
-            except Exception:
-                pass
-            self._loopback_stream = None
-            self._open_loopback_stream()
-        if self._mic_stream is mic_stream and mic_stream is not None and self._mic_frames <= 0:
-            log("mic stream produced no frames after 1.5s, reopening once")
-            try:
-                mic_stream.stop_stream()
-                mic_stream.close()
-            except Exception:
-                pass
-            self._mic_stream = None
-            self._open_mic_stream()
+    @staticmethod
+    def _stream_alive(stream):
+        if stream is None:
+            return False
+        try:
+            return bool(stream.is_active())
+        except Exception:
+            return False
+
+    def _heal_dead_streams(self, gen):
+        """Rescue a capture stream that FAILED to open or has STOPPED. Retries
+        a failed (re)open on later ticks — WASAPI can throw a transient host
+        error (-9999) right after a close, so one retry usually succeeds.
+
+        It deliberately does NOT close a stream that is open and active merely
+        because frames==0: WASAPI loopback legitimately delivers nothing during
+        silence, and save-time reconstruction pads those gaps — closing a
+        healthy-but-silent stream can hit that host error and leave it dead
+        (observed). Health is judged by `is_active()`, not frame count. `gen`
+        makes a stale heal thread from a superseded start() cycle exit cleanly."""
+        max_attempts = 6
+        for _ in range(max_attempts):
+            time.sleep(1.5)
+            if not self._running or gen != self._heal_gen:
+                return
+
+            if self._loopback_device is not None and not self._stream_alive(self._loopback_stream):
+                log(f"loopback stream not alive (frames={self._loopback_frames}), reopening")
+                if self._loopback_stream is not None:
+                    try:
+                        self._loopback_stream.stop_stream()
+                        self._loopback_stream.close()
+                    except Exception:
+                        pass
+                    self._loopback_stream = None
+                self._open_loopback_stream()
+
+            if self._mic_device is not None and not self._stream_alive(self._mic_stream):
+                log(f"mic stream not alive (frames={self._mic_frames}), reopening")
+                if self._mic_stream is not None:
+                    try:
+                        self._mic_stream.stop_stream()
+                        self._mic_stream.close()
+                    except Exception:
+                        pass
+                    self._mic_stream = None
+                self._open_mic_stream()
+
+            lb_done = self._loopback_device is None or self._stream_alive(self._loopback_stream)
+            mic_done = self._mic_device is None or self._stream_alive(self._mic_stream)
+            if lb_done and mic_done:
+                return
 
     def start(self):
         if self._running:
             return
-        self._loopback_buf = bytearray()
-        self._mic_buf = bytearray()
+        with self._loopback_lock:
+            self._loopback_chunks.clear()
+            self._loopback_bytes = 0
+        with self._mic_lock:
+            self._mic_chunks.clear()
+            self._mic_bytes = 0
         self._running = True
 
         self._open_loopback_stream()
@@ -361,9 +399,10 @@ class AudioCapture:
             self._running = False
             return
 
+        self._heal_gen += 1
         threading.Thread(
             target=self._heal_dead_streams,
-            args=(self._loopback_stream, self._mic_stream),
+            args=(self._heal_gen,),
             daemon=True,
         ).start()
 
@@ -382,84 +421,120 @@ class AudioCapture:
     def _loopback_callback(self, in_data, frame_count, time_info, status):
         if not self._running:
             return (None, pyaudio.paComplete)
+        t = time.time()
+        if status and status != self._loopback_last_status:
+            log(f"loopback callback status flags changed: {status}")
+        self._loopback_last_status = status
         max_bytes = self.max_seconds * self._rate * self._channels * self._sample_width
         with self._loopback_lock:
-            self._loopback_buf.extend(in_data)
-            if len(self._loopback_buf) > max_bytes:
-                self._loopback_buf = self._loopback_buf[-max_bytes:]
+            self._loopback_chunks.append((t, in_data))
+            self._loopback_bytes += len(in_data)
+            while self._loopback_bytes > max_bytes and len(self._loopback_chunks) > 1:
+                _, old = self._loopback_chunks.popleft()
+                self._loopback_bytes -= len(old)
             self._loopback_frames += frame_count
         return (None, pyaudio.paContinue)
 
     def _mic_callback(self, in_data, frame_count, time_info, status):
         if not self._running:
             return (None, pyaudio.paComplete)
+        t = time.time()
+        if status and status != self._mic_last_status:
+            log(f"mic callback status flags changed: {status}")
+        self._mic_last_status = status
         max_bytes = self.max_seconds * self._mic_rate * self._mic_channels * self._sample_width
         with self._mic_lock:
-            self._mic_buf.extend(in_data)
-            if len(self._mic_buf) > max_bytes:
-                self._mic_buf = self._mic_buf[-max_bytes:]
+            self._mic_chunks.append((t, in_data))
+            self._mic_bytes += len(in_data)
+            while self._mic_bytes > max_bytes and len(self._mic_chunks) > 1:
+                _, old = self._mic_chunks.popleft()
+                self._mic_bytes -= len(old)
             self._mic_frames += frame_count
         return (None, pyaudio.paContinue)
 
     @staticmethod
-    def _effective_rate(nominal_rate, start_time, frames):
-        """Real audio hardware clocks commonly run tens of ppm off their
-        reported nominal rate. Using the nominal rate alone to convert a
-        buffer's byte count into a duration silently mis-sizes the extracted
-        audio window by that drift (proportional to how much audio is being
-        pulled) — this measures the ACTUAL delivered rate from real
-        per-callback frame counts against wall-clock time instead."""
-        if start_time is None or frames <= 0:
-            return nominal_rate
-        elapsed = time.time() - start_time
-        if elapsed < 3.0:
-            return nominal_rate
-        measured = frames / elapsed
-        if measured <= 0 or abs(measured - nominal_rate) / nominal_rate > 0.05:
-            return nominal_rate
-        return measured
+    def _render_window(chunks, rate, channels, sample_width, t_end, duration):
+        """Reconstruct exactly `duration` seconds of audio ending at wall-clock
+        `t_end`, placing each stored chunk at its real arrival time and leaving
+        silence in any gap. This anchors the audio to real time regardless of
+        how irregularly the source delivered (WASAPI loopback drops silence),
+        so loopback, mic and video all share one timeline. `chunks` is a list
+        of (t_arrival, pcm_bytes); each chunk's samples are treated as ending
+        at t_arrival and spanning n_frames/rate before it.
 
-    def _get_pcm(self, buf, lock, rate, channels, seconds, end_offset=0):
-        frame_size = channels * self._sample_width
-        bps = rate * frame_size
-        end_trim = int(end_offset * bps)
-        end_trim -= end_trim % frame_size
-        bytes_needed = int(seconds * bps)
-        bytes_needed -= bytes_needed % frame_size
-        with lock:
-            usable = buf[:-end_trim] if end_trim > 0 else buf
-            trail = len(usable) % frame_size
-            if trail:
-                usable = usable[:-trail]
-            if len(usable) >= bytes_needed:
-                return bytes(usable[-bytes_needed:])
-            return bytes(usable) if usable else None
+        Returns raw PCM bytes of exactly round(duration*rate) frames, or None
+        if nothing overlaps the window at all (fully dead stream).
+        """
+        frame_size = channels * sample_width
+        total_frames = int(round(duration * rate))
+        if total_frames <= 0:
+            return None
+        out = bytearray(total_frames * frame_size)  # zero-filled = silence
+        t_start = t_end - duration
+        wrote_any = False
+        for t_arrival, data in chunks:
+            n_frames = len(data) // frame_size
+            if n_frames <= 0:
+                continue
+            chunk_start = t_arrival - n_frames / rate
+            # Overlap of [chunk_start, t_arrival] with [t_start, t_end]
+            ov_start = max(chunk_start, t_start)
+            ov_end = min(t_arrival, t_end)
+            if ov_end <= ov_start:
+                continue
+            # Which frames of this chunk fall in the overlap...
+            src_from = int(round((ov_start - chunk_start) * rate))
+            src_to = int(round((ov_end - chunk_start) * rate))
+            src_from = max(0, min(src_from, n_frames))
+            src_to = max(0, min(src_to, n_frames))
+            if src_to <= src_from:
+                continue
+            # ...and where they land in the output grid.
+            dst_from = int(round((ov_start - t_start) * rate))
+            n = src_to - src_from
+            if dst_from < 0:
+                src_from -= dst_from
+                n += dst_from
+                dst_from = 0
+            if dst_from + n > total_frames:
+                n = total_frames - dst_from
+            if n <= 0:
+                continue
+            src_b = src_from * frame_size
+            dst_b = dst_from * frame_size
+            out[dst_b:dst_b + n * frame_size] = data[src_b:src_b + n * frame_size]
+            wrote_any = True
+        return bytes(out) if wrote_any else None
 
-    def save_wav(self, path, seconds, end_offset=0):
-        """Save loopback audio to WAV. end_offset trims N seconds from the end."""
-        rate = self._effective_rate(self._rate, self._loopback_start_time, self._loopback_frames)
-        pcm = self._get_pcm(self._loopback_buf, self._loopback_lock,
-                            rate, self._channels, seconds, end_offset)
+    def save_wav(self, path, t_end, duration):
+        """Save `duration` seconds of loopback audio ending at wall-clock
+        `t_end`, reconstructed on the real timeline (see _render_window)."""
+        with self._loopback_lock:
+            chunks = list(self._loopback_chunks)
+        pcm = self._render_window(chunks, self._rate, self._channels,
+                                  self._sample_width, t_end, duration)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
             wf.setnchannels(self._channels)
             wf.setsampwidth(self._sample_width)
-            wf.setframerate(int(round(rate)))
+            wf.setframerate(self._rate)
             wf.writeframes(pcm)
         return True
 
-    def save_mic_wav(self, path, seconds, end_offset=0):
-        """Save microphone audio to WAV. end_offset trims N seconds from the end."""
-        rate = self._effective_rate(self._mic_rate, self._mic_start_time, self._mic_frames)
-        pcm = self._get_pcm(self._mic_buf, self._mic_lock,
-                            rate, self._mic_channels, seconds, end_offset)
+    def save_mic_wav(self, path, t_end, duration):
+        """Save `duration` seconds of microphone audio ending at wall-clock
+        `t_end`, reconstructed on the real timeline (see _render_window)."""
+        with self._mic_lock:
+            chunks = list(self._mic_chunks)
+        pcm = self._render_window(chunks, self._mic_rate, self._mic_channels,
+                                  self._sample_width, t_end, duration)
         if not pcm:
             return False
         with wave.open(path, "wb") as wf:
             wf.setnchannels(self._mic_channels)
             wf.setsampwidth(self._sample_width)
-            wf.setframerate(int(round(rate)))
+            wf.setframerate(self._mic_rate)
             wf.writeframes(pcm)
         return True
 
@@ -592,7 +667,7 @@ class FFmpegCapture:
         self._poll_id = None
         atexit.register(self.cleanup)
 
-    def start(self):
+    def _start_ffmpeg(self):
         if self.proc and self.proc.poll() is None:
             return
 
@@ -656,14 +731,8 @@ class FFmpegCapture:
             stderr=subprocess.DEVNULL,
             creationflags=0x08000000,
         )
-        if self.audio:
-            self.audio.start()
-        self._start_poll()
 
-    def stop(self):
-        self._stop_poll()
-        if self.audio:
-            self.audio.stop()
+    def _stop_ffmpeg(self):
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.stdin.write(b"q")
@@ -680,14 +749,42 @@ class FFmpegCapture:
                     self.proc.kill()
         self.proc = None
 
-    def restart(self):
-        self.stop()
+    def _wipe_segments(self):
         for f in os.listdir(self.segment_dir):
             try:
                 os.remove(os.path.join(self.segment_dir, f))
             except Exception:
                 pass
+
+    def start(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        self._start_ffmpeg()
+        if self.audio:
+            self.audio.start()
+        self._start_poll()
+
+    def stop(self):
+        self._stop_poll()
+        if self.audio:
+            self.audio.stop()
+        self._stop_ffmpeg()
+
+    def restart(self):
+        self.stop()
+        self._wipe_segments()
         self.start()
+
+    def restart_video(self):
+        """Re-init ONLY the FFmpeg video process (monitor/fps/buffer_seconds
+        change) without touching audio. Audio depends on none of those, and
+        restarting it needlessly re-exposes the flaky WASAPI loopback (re)open
+        that is the direct trigger of duration-change audio desync. The audio
+        circular buffer (max 120s) already spans any buffer_seconds, so it
+        just keeps running across the change."""
+        self._stop_ffmpeg()
+        self._wipe_segments()
+        self._start_ffmpeg()
 
     def save_replay(self, on_success=None):
         save_time = time.time()
@@ -827,33 +924,37 @@ class FFmpegCapture:
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
         mixed_wav = os.path.join(self.segment_dir, f"mixed_{concat_id}.wav") if (has_loopback and has_mic) else None
 
+        # Audio is reconstructed on the real timeline ending at save_time, for
+        # the same real span the video settled on — no processing-delay trim is
+        # needed (samples that arrived after save_time are excluded by their
+        # timestamp, not by "last N bytes").
         audio_duration = total_duration
-        audio_offset = max(0, time.time() - save_time)
+        t_end = save_time
 
         if has_loopback:
-            eff_rate = self.audio._effective_rate(
-                self.audio._rate, self.audio._loopback_start_time, self.audio._loopback_frames)
-            log(f"[{concat_id}] loopback: nominal_rate={self.audio._rate} effective_rate={eff_rate:.2f} "
-                f"(delta={eff_rate - self.audio._rate:+.2f}) "
-                f"stream_alive={self.audio._loopback_stream is not None} "
-                f"frames_received={self.audio._loopback_frames} "
-                f"buf_bytes={len(self.audio._loopback_buf)}")
-            ok = self.audio.save_wav(loopback_wav, audio_duration, end_offset=audio_offset)
-            log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s "
-                f"end_offset={audio_offset:.3f}s")
+            a = self.audio
+            with a._loopback_lock:
+                lb_chunks, lb_bytes = len(a._loopback_chunks), a._loopback_bytes
+            buf_span = lb_bytes / (a._rate * a._channels * a._sample_width)
+            log(f"[{concat_id}] loopback: rate={a._rate} "
+                f"stream_alive={a._loopback_stream is not None} "
+                f"frames_received={a._loopback_frames} chunks={lb_chunks} "
+                f"buf_bytes={lb_bytes} buf_span={buf_span:.3f}s")
+            ok = self.audio.save_wav(loopback_wav, t_end, audio_duration)
+            log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s")
         if has_mic:
-            eff_rate_mic = self.audio._effective_rate(
-                self.audio._mic_rate, self.audio._mic_start_time, self.audio._mic_frames)
-            log(f"[{concat_id}] mic: nominal_rate={self.audio._mic_rate} effective_rate={eff_rate_mic:.2f} "
-                f"(delta={eff_rate_mic - self.audio._mic_rate:+.2f}) "
-                f"stream_alive={self.audio._mic_stream is not None} "
-                f"frames_received={self.audio._mic_frames} "
-                f"buf_bytes={len(self.audio._mic_buf)}")
-            ok = self.audio.save_mic_wav(mic_wav, audio_duration, end_offset=audio_offset)
-            log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s "
-                f"end_offset={audio_offset:.3f}s")
+            a = self.audio
+            with a._mic_lock:
+                mic_chunks, mic_bytes = len(a._mic_chunks), a._mic_bytes
+            buf_span = mic_bytes / (a._mic_rate * a._mic_channels * a._sample_width)
+            log(f"[{concat_id}] mic: rate={a._mic_rate} "
+                f"stream_alive={a._mic_stream is not None} "
+                f"frames_received={a._mic_frames} chunks={mic_chunks} "
+                f"buf_bytes={mic_bytes} buf_span={buf_span:.3f}s")
+            ok = self.audio.save_mic_wav(mic_wav, t_end, audio_duration)
+            log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s")
 
-        log(f"[{concat_id}] audio_offset={audio_offset:.3f}s audio_duration={audio_duration:.3f}s "
+        log(f"[{concat_id}] audio_duration={audio_duration:.3f}s "
             f"has_loopback={has_loopback} has_mic={has_mic}")
 
         audio_wav = None
@@ -1382,11 +1483,15 @@ class SettingsWindow:
             "hotkey": new_hotkey,
         }
 
+        # Audio is rebuilt ONLY when a device changes. monitor/fps/buffer_seconds
+        # affect only the video process — restarting audio for them needlessly
+        # re-exposes the flaky WASAPI loopback (re)open that caused the reported
+        # duration-change audio desync. So they take the video-only path.
         audio_changed = (
             new["loopback_device"] != self.config.get("loopback_device", "")
             or new["mic_device"] != self.config.get("mic_device", "")
         )
-        capture_changed = (
+        video_changed = (
             new["monitor"] != self.config["monitor"]
             or new["fps"] != self.config.get("fps")
             or new["buffer_seconds"] != self.config.get("buffer_seconds")
@@ -1403,8 +1508,8 @@ class SettingsWindow:
             )
             self.capture.audio.start()
 
-        if capture_changed:
-            self.capture.restart()
+        if video_changed:
+            self.capture.restart_video()
 
         if hotkey_changed and self.on_hotkey_change:
             self.on_hotkey_change()
