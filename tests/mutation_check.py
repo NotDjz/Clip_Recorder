@@ -49,6 +49,18 @@ MUTATIONS = [
      "        self._loopback_status_flags |= status",
      "        log('cb')\n        self._loopback_status_flags |= status",
      "test_audio_callbacks_do_no_blocking_io"),
+    ("stop recording the ffmpeg PID (orphans become unfindable)",
+     'with open(os.path.join(self.segment_dir, FFMPEG_PID_FILE), "w") as f:\n                f.write(str(self.proc.pid))',
+     "pass",
+     "test_capture_records_its_ffmpeg_pid"),
+    ("kill the recorded PID without checking it is still ffmpeg",
+     'if os.path.basename(buf.value).lower() != "ffmpeg.exe":\n            return                  # PID was recycled by something else',
+     "pass",
+     "test_orphan_cleanup_never_kills_a_foreign_process"),
+    ("wipe the PID file along with the segments",
+     'if not (f.startswith("seg_") and f.endswith(".ts")):\n                continue',
+     'if f == FFMPEG_PID_FILE:\n                os.remove(os.path.join(self.segment_dir, f))\n                continue\n            if not (f.startswith("seg_") and f.endswith(".ts")):\n                continue',
+     "test_wipe_segments_keeps_the_pid_file"),
 ]
 
 

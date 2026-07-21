@@ -14,6 +14,7 @@ import importlib.util
 import inspect
 import os
 import shutil
+import sys
 import tempfile
 import time
 
@@ -39,6 +40,7 @@ class FakeProc:
     def __init__(self):
         self.stdin = self
         self.returncode = 0
+        self.pid = 424242
 
     def poll(self):
         return None            # "still running"
@@ -424,6 +426,69 @@ def test_wipe_segments_spares_an_in_flight_save():
 
 
 # ─── Source-level guarantees ─────────────────────────────────────────────────
+
+def test_capture_records_its_ffmpeg_pid():
+    """Without the PID on disk, a crashed instance's ffmpeg can never be found
+    again — it keeps an NVENC session and every later launch records nothing."""
+    cap = make_capture()
+    rec = Recorder(); rec.install()
+    try:
+        cap._start_ffmpeg()
+    finally:
+        rec.restore()
+    pid_path = os.path.join(cap.segment_dir, cr.FFMPEG_PID_FILE)
+    exists = os.path.exists(pid_path)
+    content = open(pid_path).read().strip() if exists else ""
+    shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    assert exists, "the capture did not record its ffmpeg PID"
+    assert content == "424242", f"wrong PID recorded: {content!r}"
+
+
+def test_orphan_cleanup_never_kills_a_foreign_process():
+    """PIDs are reused. Killing whatever now holds a recorded PID would be far
+    worse than leaving an orphan, so the image name is checked first."""
+    import subprocess as sp
+    victim = sp.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                      creationflags=0x08000000)
+    d = tempfile.mkdtemp(prefix="inv_test_")
+    try:
+        with open(os.path.join(d, cr.FFMPEG_PID_FILE), "w") as f:
+            f.write(str(victim.pid))          # a python.exe, not our ffmpeg
+        cr._kill_orphan_ffmpeg(d)
+        time.sleep(0.4)
+        survived = victim.poll() is None
+    finally:
+        victim.kill()
+        shutil.rmtree(d, ignore_errors=True)
+    assert survived, "orphan cleanup killed a process that was not our ffmpeg"
+
+
+def test_orphan_cleanup_tolerates_a_missing_or_bogus_pid_file():
+    d = tempfile.mkdtemp(prefix="inv_test_")
+    try:
+        cr._kill_orphan_ffmpeg(d)                       # no pid file at all
+        with open(os.path.join(d, cr.FFMPEG_PID_FILE), "w") as f:
+            f.write("not-a-number")
+        cr._kill_orphan_ffmpeg(d)                       # garbage
+        with open(os.path.join(d, cr.FFMPEG_PID_FILE), "w") as f:
+            f.write("999999999")
+        cr._kill_orphan_ffmpeg(d)                       # long-dead PID
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_wipe_segments_keeps_the_pid_file():
+    """restart_video() wipes segments; losing the PID there would strand the
+    ffmpeg it just replaced."""
+    cap = make_capture()
+    open(os.path.join(cap.segment_dir, "seg_000.ts"), "wb").close()
+    with open(os.path.join(cap.segment_dir, cr.FFMPEG_PID_FILE), "w") as f:
+        f.write("1234")
+    cap._wipe_segments()
+    left = set(os.listdir(cap.segment_dir))
+    shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    assert cr.FFMPEG_PID_FILE in left, "the ffmpeg PID file was wiped"
+
 
 def test_audio_callbacks_do_no_blocking_io():
     """PortAudio callbacks are realtime: file I/O there causes dropouts."""

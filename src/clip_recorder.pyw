@@ -143,6 +143,9 @@ FONT_S = ("Segoe UI", 9)
 # replay recorder must not lose. Short segments keep that loss under a second
 # (average ~0.5s) at the cost of more, smaller files and a 1s keyframe interval.
 SEGMENT_DURATION = 1
+# Each capture records its ffmpeg's PID beside its segments so the next launch
+# can clean up after a crash — see _kill_orphan_ffmpeg().
+FFMPEG_PID_FILE = "ffmpeg.pid"
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
@@ -774,6 +777,13 @@ class FFmpegCapture:
             stderr=subprocess.DEVNULL,
             creationflags=0x08000000,
         )
+        # Record the PID so a later launch can clean this up if we are killed
+        # before stop() runs (see _kill_orphan_ffmpeg).
+        try:
+            with open(os.path.join(self.segment_dir, FFMPEG_PID_FILE), "w") as f:
+                f.write(str(self.proc.pid))
+        except Exception:
+            pass
 
     def _stop_ffmpeg(self):
         if self.proc and self.proc.poll() is None:
@@ -1676,18 +1686,68 @@ class TrayIcon:
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
+def _kill_orphan_ffmpeg(seg_dir):
+    """Terminate the ffmpeg left behind by a force-killed / crashed instance.
+
+    A capture child does not die with its parent: it keeps writing to temp AND
+    keeps an NVENC session open. Consumer GPUs allow only a handful of those, so
+    a few orphans make every later launch fail to encode — no segments, no clips,
+    and nothing on screen to explain it (observed: four orphans, capture silently
+    producing nothing).
+
+    Only PIDs this app recorded itself are considered, and only after confirming
+    the PID still belongs to an ffmpeg.exe — PIDs get reused, and killing a
+    stranger's process would be far worse than leaving an orphan."""
+    try:
+        with open(os.path.join(seg_dir, FFMPEG_PID_FILE)) as f:
+            pid = int(f.read().strip())
+    except Exception:
+        return
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    PROCESS_TERMINATE = 0x0001
+    SYNCHRONIZE = 0x00100000        # required by WaitForSingleObject below
+    k32 = ctypes.windll.kernel32
+    handle = k32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE,
+        False, pid)
+    if not handle:
+        return                      # already gone
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wt.DWORD(len(buf))
+        if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return
+        if os.path.basename(buf.value).lower() != "ffmpeg.exe":
+            return                  # PID was recycled by something else
+        k32.TerminateProcess(handle, 1)
+        # TerminateProcess is asynchronous: without waiting for the process to
+        # actually exit, the caller's rmtree races its still-open segment file
+        # and leaves the directory behind.
+        k32.WaitForSingleObject(handle, 3000)
+        log(f"killed orphan ffmpeg pid={pid} from {os.path.basename(seg_dir)}")
+    except Exception:
+        pass
+    finally:
+        k32.CloseHandle(handle)
+
+
 def main():
     # Single instance via Win32 mutex
     ctypes.windll.kernel32.CreateMutexW(None, True, "ClipRecorder_SingleInstance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         sys.exit(0)
 
-    # Clean orphan temp dirs from previous crashes
+    # Clean up after a previous crash: kill the orphaned ffmpeg FIRST, then drop
+    # its temp dir. Removing the directory alone is not enough — the process is
+    # what holds an NVENC session.
     try:
         tmp = tempfile.gettempdir()
         for d in os.listdir(tmp):
             if d.startswith("cliprec_"):
-                shutil.rmtree(os.path.join(tmp, d), ignore_errors=True)
+                path = os.path.join(tmp, d)
+                _kill_orphan_ffmpeg(path)
+                shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
 
