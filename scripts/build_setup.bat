@@ -1,14 +1,16 @@
 @echo off
+REM Must run AFTER build.bat — it embeds the app exe it produced.
+cd /d %~dp0..
 if not exist dist\ClipRecorder.exe (
     echo dist\ClipRecorder.exe introuvable - lancez build.bat d'abord.
     pause
     exit /b 1
 )
-if not exist icon.ico py generate_icon.py
+if not exist assets\icon.ico py scripts\generate_icon.py
 py -m PyInstaller --noconfirm --onefile --windowed --name ClipRecorderSetup ^
-    --icon=icon.ico ^
+    --icon=assets\icon.ico ^
     --add-data "dist\ClipRecorder.exe;." ^
-    setup.pyw
+    src\setup.pyw
 echo.
 echo Build termine : dist\ClipRecorderSetup.exe
 pause

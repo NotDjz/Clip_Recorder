@@ -40,8 +40,20 @@ else:
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "clip_recorder.log")
 
-_ffmpeg_bundle = os.path.join(BUNDLE_DIR, "ffmpeg.exe")
-FFMPEG = _ffmpeg_bundle if os.path.exists(_ffmpeg_bundle) else "ffmpeg"
+def _find_ffmpeg():
+    """Frozen: ffmpeg.exe is unpacked into BUNDLE_DIR. From source: this file
+    lives in src/, while ffmpeg.exe sits at the repo root — so check the parent
+    too before falling back to whatever is on PATH."""
+    candidates = [os.path.join(BUNDLE_DIR, "ffmpeg.exe")]
+    if not getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(BUNDLE_DIR), "ffmpeg.exe"))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return "ffmpeg"
+
+
+FFMPEG = _find_ffmpeg()
 
 _log_lock = threading.Lock()
 

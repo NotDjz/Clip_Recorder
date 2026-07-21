@@ -1,11 +1,13 @@
 @echo off
-py download_ffmpeg.py
-py generate_icon.py
+REM Always build from the repo root: ffmpeg.exe, build\ and dist\ live there.
+cd /d %~dp0..
+py scripts\download_ffmpeg.py
+py scripts\generate_icon.py
 py -m PyInstaller --noconfirm --onefile --windowed --name ClipRecorder ^
-    --icon=icon.ico ^
+    --icon=assets\icon.ico ^
     --add-data "ffmpeg.exe;." ^
     --hidden-import pystray._win32 ^
-    clip_recorder.pyw
+    src\clip_recorder.pyw
 echo.
 echo Build termine : dist\ClipRecorder.exe
 pause

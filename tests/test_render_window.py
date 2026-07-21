@@ -4,14 +4,14 @@ reconstruction that anchors loopback + mic to wall-clock time (padding silence
 for gaps that WASAPI loopback leaves when the source goes quiet).
 
 No capture, no devices, no ffmpeg — pure logic. Run:
-    py tools\\test_render_window.py
+    py tests\\test_render_window.py
 """
 import array
 import importlib.util
 import os
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-APP_PATH = os.path.join(REPO_DIR, "clip_recorder.pyw")
+APP_PATH = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
 
 spec = importlib.util.spec_from_file_location("clip_recorder", APP_PATH)
 cr = importlib.util.module_from_spec(spec)

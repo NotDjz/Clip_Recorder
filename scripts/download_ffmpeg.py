@@ -6,7 +6,10 @@ import zipfile
 import urllib.request
 
 URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-DEST = os.path.dirname(os.path.abspath(__file__))
+# ffmpeg.exe lives at the REPO ROOT (this script sits in scripts/): that is where
+# build.bat's --add-data expects it, and where the app looks for it when run
+# from source.
+DEST = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NEEDED = {"ffmpeg.exe"}
 
 

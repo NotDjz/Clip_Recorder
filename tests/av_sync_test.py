@@ -8,8 +8,8 @@ via FFmpegCapture.save_replay(), then measures the actual offset between
 video color transitions and audio tone onsets in the output clip.
 
 Usage:
-    py tools\\av_sync_test.py --generate [--fps 240] [--buffer 120] [--monitor 0]
-    py tools\\av_sync_test.py --analyze "C:\\path\\to\\Clip_20260101_000000.mp4"
+    py tests\\av_sync_test.py --generate [--fps 240] [--buffer 120] [--monitor 0]
+    py tests\\av_sync_test.py --analyze "C:\\path\\to\\Clip_20260101_000000.mp4"
 """
 import argparse
 import importlib.util
@@ -24,9 +24,9 @@ import threading
 import time
 import wave
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.dirname(TOOLS_DIR)
-APP_PATH = os.path.join(REPO_DIR, "clip_recorder.pyw")
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(TESTS_DIR)
+APP_PATH = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
 
 TONE_FREQ = 1000
 TONE_MS = 100

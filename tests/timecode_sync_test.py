@@ -15,8 +15,8 @@ stretches really are silent (the WASAPI-loopback-drops-silence case) and flags
 sample-level discontinuities (crackling).
 
 Usage:
-    py tools\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 0]
-    py tools\\timecode_sync_test.py --analyze "C:\\path\\to\\Clip_....mp4"
+    py tests\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 0]
+    py tests\\timecode_sync_test.py --analyze "C:\\path\\to\\Clip_....mp4"
 """
 import argparse
 import array
@@ -31,9 +31,9 @@ import threading
 import time
 import wave
 
-TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.dirname(TOOLS_DIR)
-APP_PATH = os.path.join(REPO_DIR, "clip_recorder.pyw")
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(TESTS_DIR)
+APP_PATH = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
 
 TONE_FREQ = 1000
 TONE_RATE = 48000
