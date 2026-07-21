@@ -1772,6 +1772,7 @@ def main():
                 "Start-Sleep -Milliseconds 500;"
                 f"Remove-Item -LiteralPath '{ps_quote(exe_path)}' -Force -ErrorAction SilentlyContinue;"
                 f"Remove-Item -LiteralPath '{ps_quote(CONFIG_FILE)}' -Force -ErrorAction SilentlyContinue;"
+                f"Remove-Item -LiteralPath '{ps_quote(LOG_FILE)}' -Force -ErrorAction SilentlyContinue;"
                 f"Remove-Item -LiteralPath '{ps_quote(desktop_lnk)}' -Force -ErrorAction SilentlyContinue;"
             )
             subprocess.Popen(
