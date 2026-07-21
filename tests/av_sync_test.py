@@ -8,7 +8,7 @@ via FFmpegCapture.save_replay(), then measures the actual offset between
 video color transitions and audio tone onsets in the output clip.
 
 Usage:
-    py tests\\av_sync_test.py --generate [--fps 240] [--buffer 120] [--monitor 0]
+    py tests\\av_sync_test.py --generate [--fps 240] [--buffer 120] [--monitor 1]
     py tests\\av_sync_test.py --analyze "C:\\path\\to\\Clip_20260101_000000.mp4"
 """
 import argparse
@@ -330,7 +330,9 @@ def main():
     mode.add_argument("--analyze", metavar="MP4_PATH", help="Analyze an existing clip")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--buffer", type=int, default=30, help="buffer_seconds to test")
-    parser.add_argument("--monitor", type=int, default=0)
+    parser.add_argument("--monitor", type=int, default=1,
+                        help="Capture monitor. Defaults to the SECOND monitor (clamped "
+                             "if only one exists) so the signal never covers the primary.")
     parser.add_argument("--repeats", type=int, default=1,
                          help="Number of successive save_replay() calls within one session")
     parser.add_argument("--change-buffer", type=int, default=None, metavar="N",

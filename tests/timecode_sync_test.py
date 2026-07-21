@@ -15,7 +15,7 @@ stretches really are silent (the WASAPI-loopback-drops-silence case) and flags
 sample-level discontinuities (crackling).
 
 Usage:
-    py tests\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 0]
+    py tests\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 1]
     py tests\\timecode_sync_test.py --analyze "C:\\path\\to\\Clip_....mp4"
 """
 import argparse
@@ -415,7 +415,10 @@ def main():
     m.add_argument("--analyze", metavar="MP4_PATH")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--buffer", type=int, default=15)
-    p.add_argument("--monitor", type=int, default=0)
+    p.add_argument("--monitor", type=int, default=1,
+                   help="Capture/display monitor. Defaults to the SECOND monitor: a "
+                        "full-screen signal on the primary would take over the "
+                        "user's main display (clamped if only one exists).")
     p.add_argument("--save-after", type=float, default=None, metavar="SEC",
                    help="Save at this timecode instead of waiting for the buffer to "
                         "fill — exercises the not-enough-history path taken right "
