@@ -868,6 +868,10 @@ class FFmpegCapture:
         # once real per-segment duration drifts from the nominal SEGMENT_DURATION
         # (plausible whenever delivered capture rate dips under load, worse at high
         # FPS and over longer buffers since the drift compounds per segment).
+        # The window must start where the OLDEST SELECTED segment *opens*, since
+        # that segment's content is included. A segment opens when the previous
+        # one closes, so in the normal path the anchor is the mtime of the
+        # segment just before the selection (`complete[n - count - 1]`).
         n = len(complete)
         count = 1
         total_duration = None
@@ -879,8 +883,14 @@ class FFmpegCapture:
                 break
             count += 1
         else:
+            # Not enough history yet (just after a start/restart): everything is
+            # selected, so there is no earlier segment to anchor on. Estimate the
+            # oldest segment's OPEN time as its mtime minus one segment. Using its
+            # mtime directly — as this did — anchors the audio one whole segment
+            # late, i.e. exactly SEGMENT_DURATION of A/V offset on any save made
+            # before the buffer has refilled (1s now; it was 5s with 5s segments).
             count = n
-            total_duration = (save_time - complete[0][1]) if n >= 2 else SEGMENT_DURATION
+            total_duration = save_time - (complete[0][1] - SEGMENT_DURATION)
 
         selected = complete[-count:]
 

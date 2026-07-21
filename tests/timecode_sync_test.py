@@ -381,8 +381,12 @@ def run_generate(args):
         print(f"Triggering save_replay() at timecode {result['save_tc']:.1f}s ...")
         capture.save_replay(on_success=lambda: root.after(0, on_success))
 
-    root.after(int((args.buffer + 12) * 1000), do_save)
-    root.after(int((args.buffer + 60) * 1000), root.quit)   # hard safety stop
+    # --save-after forces a save BEFORE the buffer has refilled, which is what
+    # happens right after a settings change: the selection falls back to "take
+    # everything", a different anchoring path.
+    save_at = args.save_after if args.save_after else args.buffer + 12
+    root.after(int(save_at * 1000), do_save)
+    root.after(int((save_at + 45) * 1000), root.quit)   # hard safety stop
     root.mainloop()
 
     stop_flag.set()
@@ -412,6 +416,10 @@ def main():
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--buffer", type=int, default=15)
     p.add_argument("--monitor", type=int, default=0)
+    p.add_argument("--save-after", type=float, default=None, metavar="SEC",
+                   help="Save at this timecode instead of waiting for the buffer to "
+                        "fill — exercises the not-enough-history path taken right "
+                        "after a settings change.")
     args = p.parse_args()
     sys.exit(run_analyze(args.analyze) if args.analyze else run_generate(args))
 
