@@ -97,7 +97,14 @@ FONT_S = ("Segoe UI", 9)
 
 # ─── Capture constants ──────────────────────────────────────────────────────
 
-SEGMENT_DURATION = 5
+# The clip can only end at the last COMPLETE segment — the in-progress one is
+# excluded because snapshotting a file mid-write yields a torn frame (confirmed:
+# even remuxing it with -fflags +discardcorrupt recovers only ~0.01s and still
+# decodes with errors). So whatever is still being written is lost, i.e. up to
+# SEGMENT_DURATION of the moment right before the hotkey — exactly the part a
+# replay recorder must not lose. Short segments keep that loss under a second
+# (average ~0.5s) at the cost of more, smaller files and a 1s keyframe interval.
+SEGMENT_DURATION = 1
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
@@ -467,38 +474,40 @@ class AudioCapture:
             return None
         out = bytearray(total_frames * frame_size)  # zero-filled = silence
         t_start = t_end - duration
+        # Callback arrival times jitter by a few ms. Placing EVERY chunk at its
+        # own rounded timestamp therefore punched a 1-5 ms hole (or overwrote
+        # samples) at each chunk boundary — ~12 discontinuities/second, i.e.
+        # audible crackle. So a run of chunks that arrived roughly on schedule is
+        # kept strictly sample-contiguous, and we only jump to the real timestamp
+        # when the divergence exceeds the tolerance — a genuine delivery gap
+        # (WASAPI loopback going silent), which must stay silent. Comparing
+        # against the ABSOLUTE real position each time means the contiguous run
+        # can never drift further than the tolerance.
+        tol = int(rate * 0.030)  # 30 ms
         wrote_any = False
+        cursor = None            # where a continuing run would land next
         for t_arrival, data in chunks:
             n_frames = len(data) // frame_size
             if n_frames <= 0:
                 continue
-            chunk_start = t_arrival - n_frames / rate
-            # Overlap of [chunk_start, t_arrival] with [t_start, t_end]
-            ov_start = max(chunk_start, t_start)
-            ov_end = min(t_arrival, t_end)
-            if ov_end <= ov_start:
-                continue
-            # Which frames of this chunk fall in the overlap...
-            src_from = int(round((ov_start - chunk_start) * rate))
-            src_to = int(round((ov_end - chunk_start) * rate))
-            src_from = max(0, min(src_from, n_frames))
-            src_to = max(0, min(src_to, n_frames))
-            if src_to <= src_from:
-                continue
-            # ...and where they land in the output grid.
-            dst_from = int(round((ov_start - t_start) * rate))
-            n = src_to - src_from
-            if dst_from < 0:
-                src_from -= dst_from
-                n += dst_from
-                dst_from = 0
-            if dst_from + n > total_frames:
-                n = total_frames - dst_from
+            real_pos = int(round((t_arrival - t_start) * rate)) - n_frames
+            if cursor is None or abs(real_pos - cursor) > tol:
+                place = real_pos       # first chunk, or a real gap → re-anchor
+            else:
+                place = cursor         # continuous run → no hole, no overwrite
+            cursor = place + n_frames  # logical continuation, before clipping
+
+            src_from, n, dst = 0, n_frames, place
+            if dst < 0:                # partially (or fully) before the window
+                src_from = -dst
+                n -= src_from
+                dst = 0
+            if dst + n > total_frames:  # partially (or fully) after it
+                n = total_frames - dst
             if n <= 0:
                 continue
-            src_b = src_from * frame_size
-            dst_b = dst_from * frame_size
-            out[dst_b:dst_b + n * frame_size] = data[src_b:src_b + n * frame_size]
+            out[dst * frame_size:(dst + n) * frame_size] = \
+                data[src_from * frame_size:(src_from + n) * frame_size]
             wrote_any = True
         return bytes(out) if wrote_any else None
 

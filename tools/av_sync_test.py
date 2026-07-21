@@ -77,7 +77,7 @@ def make_tone_pcm(rate=TONE_RATE, freq=TONE_FREQ, ms=TONE_MS, channels=2):
     samples = []
     for i in range(n):
         env = min(i, n - i, fade) / fade
-        val = int(32767 * 0.8 * env * math.sin(2 * math.pi * freq * i / rate))
+        val = int(32767 * 0.25 * env * math.sin(2 * math.pi * freq * i / rate))
         samples.extend([val] * channels)
     return struct.pack("<" + "h" * len(samples), *samples)
 

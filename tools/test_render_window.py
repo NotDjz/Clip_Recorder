@@ -56,6 +56,21 @@ def test_out_of_window_excluded():
     assert RW([(0.5, chunk(100, RATE // 2))], RATE, CH, SW, 5.0, 1.0) is None
 
 
+def test_jittered_arrivals_stay_contiguous():
+    """Regression test for the crackling: real callback arrival times jitter by
+    a few ms. A continuous run must be stitched sample-contiguously — no silence
+    holes punched at the chunk boundaries (that was ~12 clicks/second)."""
+    n = RATE // 10                      # 0.1 s chunks
+    jitter = [0.0, +0.004, -0.003, +0.005, -0.002, +0.003, -0.004, +0.002, 0.0, -0.001]
+    chunks = [((k + 1) / 10.0 + jitter[k], chunk(7, n)) for k in range(10)]
+    out = RW(chunks, RATE, CH, SW, 1.0 + jitter[-1], 1.0)
+    assert len(out) // 2 == RATE
+    vals = array.array("h", out)
+    # Interior must be solid: not a single zero sample punched into the run.
+    holes = sum(1 for v in vals[n // 2: RATE - n // 2] if v == 0)
+    assert holes == 0, f"{holes} silence samples punched into a continuous run"
+
+
 def test_contiguous_reconstruct():
     ce = [(t / 10.0, chunk(t, RATE // 10)) for t in range(1, 11)]  # 10 x 0.1s, vals 1..10
     out = RW(ce, RATE, CH, SW, 1.0, 1.0)
