@@ -57,6 +57,26 @@ FFMPEG = _find_ffmpeg()
 
 _log_lock = threading.Lock()
 
+# The log ships to every user and is append-only, so cap it: past LOG_MAX_BYTES
+# keep only the most recent half. Recent entries are what diagnosing a report
+# needs, and this bounds the file instead of letting it grow forever.
+LOG_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _trim_log_locked():
+    """Caller must hold _log_lock."""
+    try:
+        if os.path.getsize(LOG_FILE) <= LOG_MAX_BYTES:
+            return
+        with open(LOG_FILE, "rb") as f:
+            f.seek(-LOG_MAX_BYTES // 2, os.SEEK_END)
+            f.readline()          # drop the partial line we landed in
+            tail = f.read()
+        with open(LOG_FILE, "wb") as f:
+            f.write(b"[log truncated]\n" + tail)
+    except Exception:
+        pass
+
 
 def log(msg):
     line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
@@ -64,6 +84,12 @@ def log(msg):
         with _log_lock:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+                if f.tell() > LOG_MAX_BYTES:
+                    trim = True
+                else:
+                    trim = False
+            if trim:
+                _trim_log_locked()
     except Exception:
         pass
 
