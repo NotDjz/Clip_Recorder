@@ -8,8 +8,6 @@ ffmpeg.exe
 icon.ico
 Clips/
 .claude/
-CLAUDE.md
-CONTEXT.md
 
 # Secrets
 .env
