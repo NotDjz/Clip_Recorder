@@ -498,6 +498,46 @@ def test_audio_callbacks_do_no_blocking_io():
         assert "open(" not in src, f"{fn.__name__} opens a file"
 
 
+def test_job_object_is_kill_on_close_with_explicit_breakaway():
+    """These are the documented Win32 values. A typo in any of them is a silent
+    no-op — the job is created, reports success, and simply does not do what its
+    name says, which is the exact failure mode the job exists to prevent."""
+    assert cr.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x00002000
+    assert cr.JOB_OBJECT_LIMIT_BREAKAWAY_OK == 0x00000800
+    assert cr.CREATE_BREAKAWAY_FROM_JOB == 0x01000000
+    assert cr.JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS == 9
+    src = inspect.getsource(cr._ensure_kill_on_close_job)
+    assert "JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE" in src, "the job must kill on close"
+    assert "JOB_OBJECT_LIMIT_BREAKAWAY_OK" in src, "uninstall needs an escape hatch"
+    assert "SILENT_BREAKAWAY" not in src, \
+        "silent breakaway would let the ffmpegs escape too, defeating the job"
+
+
+def test_capture_joins_the_job_before_spawning_ffmpeg():
+    """Establishing the job after a child is spawned would leave that child
+    outside it — including the two probes in __init__."""
+    src = inspect.getsource(cr.FFmpegCapture.__init__)
+    assert "_ensure_kill_on_close_job()" in src, \
+        "capture must join the kill-on-close job"
+    assert src.index("_ensure_kill_on_close_job()") < src.index("detect_nvenc()"), \
+        "the job must be established before any ffmpeg is spawned"
+
+
+def test_uninstall_helper_breaks_away_from_the_job():
+    """The helper waits for THIS process to exit before deleting the exe, so in
+    a KILL_ON_JOB_CLOSE job it dies with us and uninstall silently does nothing
+    at all — no error, no deletion."""
+    src = inspect.getsource(cr)
+    spawn = src[src.index("Wait-Process"):src.index("Wait-Process") + 1500]
+    # Assert on the creationflags expression itself, not on the name appearing
+    # somewhere nearby: the comment above the call names the flag too, and
+    # matching that would make this test unable to fail (mutation_check caught
+    # exactly that when this test was first written).
+    flags = next(l for l in spawn.splitlines() if "creationflags=" in l)
+    assert "CREATE_BREAKAWAY_FROM_JOB" in flags, \
+        "the uninstall helper must break away or the job kills it with us"
+
+
 def test_uninstall_removes_known_files_and_never_recurses():
     src = inspect.getsource(cr)
     assert "-Recurse" not in src, "uninstall must never recurse over a folder"

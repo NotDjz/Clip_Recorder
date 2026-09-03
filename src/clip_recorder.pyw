@@ -146,6 +146,15 @@ SEGMENT_DURATION = 1
 # Each capture records its ffmpeg's PID beside its segments so the next launch
 # can clean up after a crash — see _kill_orphan_ffmpeg().
 FFMPEG_PID_FILE = "ffmpeg.pid"
+# Temp-dir prefix for a capture's segments. The writer (mkdtemp) and the crash
+# scanner in main() are the two halves of one contract, ~1000 lines apart:
+# change it in only one and orphan cleanup silently stops working.
+SEGMENT_DIR_PREFIX = "cliprec_"
+# Budget for waiting on orphaned ffmpegs to exit, shared across the whole
+# startup sweep. Per-directory it would be paid once per orphan, serialized
+# before the tray icon appears — and a genuinely stuck one never self-clears,
+# so it would be a permanent per-launch tax.
+ORPHAN_KILL_WAIT_MS = 3000
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
@@ -698,6 +707,113 @@ def detect_ddagrab():
         return False
 
 
+# ─── Kill-on-close job object ────────────────────────────────────────────────
+
+# Prevention for the orphan problem _kill_orphan_ffmpeg() cleans up after: a
+# force-killed or crashed parent does not take its children with it. A job with
+# KILL_ON_JOB_CLOSE makes the OS do it — when this process dies by ANY means
+# (taskkill /F, Task Manager, an access violation in a C extension), our handle
+# to the job closes and every process in it goes too. Children inherit job
+# membership, so this covers the capture ffmpeg AND save_replay()'s three, which
+# are recorded in no PID file and were previously unrecoverable.
+#
+# BREAKAWAY_OK exists solely so uninstall()'s PowerShell helper can escape with
+# CREATE_BREAKAWAY_FROM_JOB: it waits for THIS process to exit before deleting
+# the exe, so being killed with us would silently break uninstall entirely. It
+# must be an explicit opt-in per child — SILENT_BREAKAWAY_OK would let the
+# ffmpegs escape too and defeat the whole mechanism.
+JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+_job_handle = None      # never closed on purpose: closing it kills the job
+
+
+class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("PerProcessUserTimeLimit", wt.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wt.LARGE_INTEGER),
+                ("LimitFlags", wt.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wt.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wt.DWORD),
+                ("SchedulingClass", wt.DWORD)]
+
+
+class _IO_COUNTERS(ctypes.Structure):
+    _fields_ = [("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong)]
+
+
+class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [("BasicLimitInformation", _JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", _IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+
+def _ensure_kill_on_close_job():
+    """Put this process in a job whose children die with it. Idempotent.
+
+    Called from FFmpegCapture.__init__ rather than main() so the test harnesses
+    — which construct FFmpegCapture directly and never reach main() — get the
+    same protection; a killed harness used to leak an ffmpeg that only a later
+    launch of the real app would reap.
+
+    Best-effort by design: assignment fails if we are already inside a
+    non-nestable job, so _kill_orphan_ffmpeg() stays as the backstop."""
+    global _job_handle
+    if _job_handle is not None:
+        return
+    try:
+        k32 = ctypes.windll.kernel32
+        # These signatures are load-bearing, not decoration. HANDLE is
+        # pointer-sized, and GetCurrentProcess returns the pseudo-handle
+        # (HANDLE)-1 == 0xFFFFFFFFFFFFFFFF: with ctypes' default int marshalling
+        # that argument raises OverflowError, which the except below would
+        # swallow — leaving a job that exists but contains nothing. Declared
+        # here rather than globally because no other call site uses them.
+        k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+        k32.CreateJobObjectW.restype = wt.HANDLE
+        k32.GetCurrentProcess.restype = wt.HANDLE
+        k32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int,
+                                                ctypes.c_void_p, wt.DWORD]
+        k32.SetInformationJobObject.restype = wt.BOOL
+        k32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+        k32.AssignProcessToJobObject.restype = wt.BOOL
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = (
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK)
+        if not k32.SetInformationJobObject(
+                job, JOBOBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                ctypes.byref(info), ctypes.sizeof(info)):
+            k32.CloseHandle(job)
+            return
+        if not k32.AssignProcessToJobObject(job, k32.GetCurrentProcess()):
+            log(f"job object not assigned (err={k32.GetLastError()}) — "
+                "falling back to PID-file orphan cleanup")
+            k32.CloseHandle(job)
+            return
+        _job_handle = job
+        log("job object active: ffmpeg children will die with this process")
+    except Exception as e:
+        # Never block capture over this — but never fail silently either: a
+        # swallowed OverflowError here is exactly how this shipped inert the
+        # first time, with the job created and the process never in it.
+        log(f"job object setup failed: {type(e).__name__}: {e}")
+
+
 # ─── FFmpeg Capture ──────────────────────────────────────────────────────────
 
 class FFmpegCapture:
@@ -707,7 +823,9 @@ class FFmpegCapture:
         self.monitors = monitors
         self.audio = audio_capture
         self.proc = None
-        self.segment_dir = tempfile.mkdtemp(prefix="cliprec_")
+        # Before any ffmpeg is spawned — including the probes just below.
+        _ensure_kill_on_close_job()
+        self.segment_dir = tempfile.mkdtemp(prefix=SEGMENT_DIR_PREFIX)
         self.has_nvenc = detect_nvenc()
         self.has_ddagrab = detect_ddagrab()
         self._poll_id = None
@@ -1686,7 +1804,7 @@ class TrayIcon:
 
 # ─── Main ────────────────────────────────────────────────────────────────────
 
-def _kill_orphan_ffmpeg(seg_dir):
+def _kill_orphan_ffmpeg(seg_dir, deadline=None):
     """Terminate the ffmpeg left behind by a force-killed / crashed instance.
 
     A capture child does not die with its parent: it keeps writing to temp AND
@@ -1697,7 +1815,10 @@ def _kill_orphan_ffmpeg(seg_dir):
 
     Only PIDs this app recorded itself are considered, and only after confirming
     the PID still belongs to an ffmpeg.exe — PIDs get reused, and killing a
-    stranger's process would be far worse than leaving an orphan."""
+    stranger's process would be far worse than leaving an orphan.
+
+    `deadline` is a time.monotonic() instant shared by the whole cleanup sweep,
+    so N orphans cost one ORPHAN_KILL_WAIT_MS between them rather than N."""
     try:
         with open(os.path.join(seg_dir, FFMPEG_PID_FILE)) as f:
             pid = int(f.read().strip())
@@ -1716,18 +1837,18 @@ def _kill_orphan_ffmpeg(seg_dir):
     try:
         buf = ctypes.create_unicode_buffer(32768)
         size = wt.DWORD(len(buf))
-        if not k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return
-        if os.path.basename(buf.value).lower() != "ffmpeg.exe":
-            return                  # PID was recycled by something else
-        k32.TerminateProcess(handle, 1)
-        # TerminateProcess is asynchronous: without waiting for the process to
-        # actually exit, the caller's rmtree races its still-open segment file
-        # and leaves the directory behind.
-        k32.WaitForSingleObject(handle, 3000)
-        log(f"killed orphan ffmpeg pid={pid} from {os.path.basename(seg_dir)}")
-    except Exception:
-        pass
+        # PIDs get reused, so only kill it while it is still an ffmpeg.exe.
+        if (k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size))
+                and os.path.basename(buf.value).lower() == "ffmpeg.exe"):
+            k32.TerminateProcess(handle, 1)
+            # TerminateProcess is asynchronous: without waiting for the process
+            # to actually exit, the caller's rmtree races its still-open segment
+            # file and leaves the directory behind.
+            wait_ms = ORPHAN_KILL_WAIT_MS
+            if deadline is not None:
+                wait_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            k32.WaitForSingleObject(handle, wait_ms)
+            log(f"killed orphan ffmpeg pid={pid} from {os.path.basename(seg_dir)}")
     finally:
         k32.CloseHandle(handle)
 
@@ -1743,10 +1864,11 @@ def main():
     # what holds an NVENC session.
     try:
         tmp = tempfile.gettempdir()
+        deadline = time.monotonic() + ORPHAN_KILL_WAIT_MS / 1000.0
         for d in os.listdir(tmp):
-            if d.startswith("cliprec_"):
+            if d.startswith(SEGMENT_DIR_PREFIX):
                 path = os.path.join(tmp, d)
-                _kill_orphan_ffmpeg(path)
+                _kill_orphan_ffmpeg(path, deadline)
                 shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
@@ -1837,7 +1959,11 @@ def main():
             )
             subprocess.Popen(
                 ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
-                creationflags=0x08000000,
+                # CREATE_BREAKAWAY_FROM_JOB is load-bearing: this helper waits
+                # for us to exit before deleting the exe, so without it the
+                # kill-on-close job takes it down with us and uninstall does
+                # nothing at all — silently.
+                creationflags=0x08000000 | CREATE_BREAKAWAY_FROM_JOB,
             )
         root.destroy()
         sys.exit(0)
