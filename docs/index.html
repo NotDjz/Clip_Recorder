@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Clip Recorder keeps the last two minutes of your Windows screen on a rolling buffer. One hotkey writes it to an MP4. Free and open source.">
+<meta property="og:title" content="Clip Recorder">
+<meta property="og:description" content="Press the key after it happens. A replay recorder for Windows that saves the moment you already watched go by.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='%23D9261C'/%3E%3C/svg%3E">
+<style>
+  /* The artifact host supplies these; a plain page has to bring its own. */
+  html { color-scheme: light dark; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+</style>
+<title>Clip Recorder</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=DM+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --paper:  #DFE3E1;
+    --panel:  #F2F4F3;
+    --ink:    #1C2622;
+    --mute:   #78847E;
+    --record: #D9261C;
+    --line:   rgba(28, 38, 34, .16);
+    --tick:   rgba(28, 38, 34, .30);
+    --sel:    rgba(217, 38, 28, .10);
+    --focus:  #1C2622;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:  #171B19;
+      --panel:  #212724;
+      --ink:    #E4E8E5;
+      --mute:   #8A968F;
+      --record: #FF4A3D;
+      --line:   rgba(228, 232, 229, .16);
+      --tick:   rgba(228, 232, 229, .28);
+      --sel:    rgba(255, 74, 61, .14);
+      --focus:  #E4E8E5;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:  #171B19;
+    --panel:  #212724;
+    --ink:    #E4E8E5;
+    --mute:   #8A968F;
+    --record: #FF4A3D;
+    --line:   rgba(228, 232, 229, .16);
+    --tick:   rgba(228, 232, 229, .28);
+    --sel:    rgba(255, 74, 61, .14);
+    --focus:  #E4E8E5;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    font-variation-settings: "wdth" 100, "wght" 400;
+    font-size: 17px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
+
+  /* ---- masthead ---- */
+  .masthead {
+    display: flex; align-items: baseline; gap: 16px;
+    padding: 26px 0 0;
+  }
+  .mark {
+    font-variation-settings: "wdth" 118, "wght" 800;
+    font-size: 1.05rem; letter-spacing: -.02em; margin: 0;
+  }
+  .rec-dot {
+    display: inline-block; width: .5em; height: .5em; border-radius: 50%;
+    background: var(--record); margin-right: .5em; vertical-align: .06em;
+  }
+  .masthead .ver { font-family: "DM Mono", ui-monospace, Menlo, monospace; font-size: .8rem; color: var(--mute); }
+  .masthead .spacer { flex: 1; }
+  a { color: inherit; }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+  /* ---- hero ---- */
+  .hero { padding: clamp(48px, 9vw, 104px) 0 clamp(28px, 4vw, 44px); }
+  h1 {
+    font-variation-settings: "wdth" 112, "wght" 800;
+    font-size: clamp(2.7rem, 7.4vw, 5.4rem);
+    line-height: .93; letter-spacing: -.035em;
+    margin: 0 0 26px; max-width: 15ch; text-wrap: balance;
+  }
+  .lede { max-width: 60ch; margin: 0; color: var(--ink); font-size: 1.0625rem; }
+  .lede + .lede { margin-top: 14px; color: var(--mute); }
+
+  /* ---- buffer instrument ---- */
+  .instrument { padding: 8px 0 clamp(56px, 8vw, 96px); }
+  .inst-head {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 20px;
+    padding-bottom: 12px;
+  }
+  .inst-title { font-variation-settings: "wdth" 100, "wght" 600; font-size: .95rem; margin: 0; }
+  .inst-head .spacer { flex: 1; }
+  .lenset { display: flex; gap: 0; border: 1px solid var(--line); }
+  .lenset button {
+    font: inherit; font-family: "DM Mono", ui-monospace, Menlo, monospace;
+    font-size: .8rem; background: none; border: 0;
+    border-right: 1px solid var(--line);
+    color: var(--mute); padding: 6px 11px; cursor: pointer;
+  }
+  .lenset button:last-child { border-right: 0; }
+  .lenset button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+  .strip {
+    display: block; width: 100%; height: 176px;
+    background: var(--panel); border: 1px solid var(--line);
+  }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; padding-top: 20px; }
+  .keycap {
+    font: inherit; font-family: "DM Mono", ui-monospace, Menlo, monospace;
+    font-size: .95rem; letter-spacing: .01em;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--ink); border-bottom-width: 3px;
+    padding: 11px 20px; cursor: pointer;
+  }
+  .keycap:active { border-bottom-width: 1px; transform: translateY(2px); }
+  .hint { color: var(--mute); font-size: .875rem; margin: 0; }
+
+  /* ---- saved clips ---- */
+  .clips { margin: 22px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 1px; }
+  .clips li {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 16px; align-items: baseline;
+    background: var(--panel); padding: 10px 14px;
+    font-family: "DM Mono", ui-monospace, Menlo, monospace; font-size: .8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .clips .name { color: var(--ink); }
+  .clips .span { color: var(--mute); }
+  .clips .dur { color: var(--record); }
+  .clips .eg { color: var(--mute); font-style: italic; }
+
+  /* ---- prose sections ---- */
+  section h2 {
+    font-variation-settings: "wdth" 106, "wght" 700;
+    font-size: clamp(1.5rem, 3.2vw, 2.1rem); line-height: 1.1;
+    letter-spacing: -.02em; margin: 0 0 28px; max-width: 20ch; text-wrap: balance;
+  }
+  .facts { margin: 0; display: grid; gap: 30px; }
+  @media (min-width: 720px) { .facts { grid-template-columns: repeat(3, 1fr); gap: 36px; } }
+  .facts dt { font-variation-settings: "wdth" 100, "wght" 650; margin-bottom: 6px; }
+  .facts dd { margin: 0; color: var(--mute); font-size: .95rem; max-width: 42ch; }
+
+  .band { border-top: 1px solid var(--line); padding: clamp(48px, 7vw, 84px) 0; }
+
+  /* ---- spec sheet ---- */
+  .sheet { width: 100%; border-collapse: collapse; font-size: .9rem; }
+  .sheet th, .sheet td { text-align: left; padding: 13px 0; border-bottom: 1px solid var(--line); vertical-align: baseline; }
+  .sheet th { font-variation-settings: "wdth" 100, "wght" 600; width: 34%; padding-right: 24px; }
+  .sheet td { color: var(--mute); font-family: "DM Mono", ui-monospace, Menlo, monospace; font-size: .82rem; }
+  .sheet tr:last-child th, .sheet tr:last-child td { border-bottom: 0; }
+  .sheet-scroll { overflow-x: auto; }
+
+  /* ---- download ---- */
+  .get { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; }
+  .btn {
+    display: inline-block; background: var(--record); color: #fff;
+    font-variation-settings: "wdth" 104, "wght" 700; font-size: 1rem;
+    padding: 15px 28px; text-decoration: none;
+  }
+  .btn:hover { background: var(--ink); }
+  .get .meta { color: var(--mute); font-size: .85rem; }
+  footer { border-top: 1px solid var(--line); padding: 26px 0 60px; color: var(--mute); font-size: .82rem; }
+  footer a { text-decoration-color: var(--line); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .keycap:active { transform: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <p class="mark"><span class="rec-dot"></span>Clip Recorder</p>
+    <span class="spacer"></span>
+    <span class="ver">v1.0</span>
+    <a class="ver" href="https://github.com/NotDjz/Clip_Recorder">Source</a>
+  </header>
+
+  <div class="hero">
+    <h1>Press the key after it happens.</h1>
+    <p class="lede">Clip Recorder runs in the background with no overlay and no capture button. It keeps the last two minutes of your screen and sound on a rolling buffer, and one hotkey writes that buffer to an MP4.</p>
+    <p class="lede">You never have to decide to record. You only have to decide to keep.</p>
+  </div>
+</div>
+
+<div class="wrap instrument">
+  <div class="inst-head">
+    <h2 class="inst-title">The buffer, running</h2>
+    <span class="spacer"></span>
+    <div class="lenset" role="group" aria-label="Buffer length in seconds">
+      <button type="button" data-len="15">15s</button>
+      <button type="button" data-len="30">30s</button>
+      <button type="button" data-len="60" aria-pressed="true">60s</button>
+      <button type="button" data-len="90">90s</button>
+      <button type="button" data-len="120">120s</button>
+    </div>
+  </div>
+
+  <canvas class="strip" id="strip" role="img"
+          aria-label="A 120-second rolling buffer. The most recent 60 seconds are marked as the region the hotkey would save."></canvas>
+
+  <div class="controls">
+    <button type="button" class="keycap" id="capture">Ctrl + Alt + R</button>
+    <p class="hint">Press it, or use the real keys — this page listens too.</p>
+  </div>
+
+  <ul class="clips" id="clips" aria-live="polite">
+    <li><span class="name">Clip_20260903_1140_22.mp4</span><span class="span eg">example clip, already saved</span><span class="dur">1:00</span></li>
+  </ul>
+</div>
+
+<div class="wrap">
+  <section class="band">
+    <h2>What it does to your machine</h2>
+    <dl class="facts">
+      <div>
+        <dt>Nothing is drawn over your game</dt>
+        <dd>No overlay, no watermark, no capture indicator composited into the frame. The only thing you see is a tray icon.</dd>
+      </div>
+      <div>
+        <dt>The GPU does the encoding</dt>
+        <dd>Frames come off the desktop through DXGI Desktop Duplication and go straight into NVENC, up to 240 frames per second.</dd>
+      </div>
+      <div>
+        <dt>Windows never learns it is there</dt>
+        <dd>No installer service, no registry keys, no administrator rights. Settings sit in a config.json next to the executable.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section class="band">
+    <h2>Specifications</h2>
+    <div class="sheet-scroll">
+      <table class="sheet">
+        <tbody>
+          <tr><th scope="row">Buffer length</th><td>15, 30, 60, 90 or 120 seconds</td></tr>
+          <tr><th scope="row">Frame rate</th><td>30, 60, 120 or 240 fps</td></tr>
+          <tr><th scope="row">Screen capture</th><td>DXGI Desktop Duplication at 120 and 240 fps; GDI at 30 and 60</td></tr>
+          <tr><th scope="row">Encoder</th><td>NVENC, hardware H.264</td></tr>
+          <tr><th scope="row">Audio</th><td>System output and microphone, mixed to one track</td></tr>
+          <tr><th scope="row">Output</th><td>MP4 written to Videos\ClipRecorder</td></tr>
+          <tr><th scope="row">Hotkey</th><td>Ctrl+Alt+R, reassignable</td></tr>
+          <tr><th scope="row">Requires</th><td>Windows 10 or 11</td></tr>
+          <tr><th scope="row">Licence</th><td>MIT</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="band">
+    <h2>Get it</h2>
+    <div class="get">
+      <a class="btn" href="https://github.com/NotDjz/Clip_Recorder/releases">Download for Windows</a>
+      <span class="meta">ClipRecorderSetup.exe — pick a folder, it launches, that is the whole setup.</span>
+    </div>
+  </section>
+
+  <footer>
+    Free and open source under the MIT licence.
+    <a href="https://github.com/NotDjz/Clip_Recorder">Read the source on GitHub</a>.
+  </footer>
+</div>
+
+<script>
+(function () {
+  var canvas = document.getElementById("strip");
+  var ctx = canvas.getContext("2d");
+  var SPAN = 120;                 // seconds of history the app keeps
+  var sel = 60;                   // currently selected buffer length
+  var phase = 0;                  // tick drift, conveys "running"
+  var flash = 0;                  // capture flash, 1 -> 0
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  function css(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function resize() {
+    var dpr = window.devicePixelRatio || 1;
+    var r = canvas.getBoundingClientRect();
+    canvas.width = Math.round(r.width * dpr);
+    canvas.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function draw() {
+    var r = canvas.getBoundingClientRect();
+    var w = r.width, h = r.height;
+    var ink = css("--ink"), mute = css("--mute"), rec = css("--record");
+    var tick = css("--tick"), selFill = css("--sel"), panel = css("--panel");
+    var pxPerSec = w / SPAN;
+    var baseY = h - 34;
+
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = panel;
+    ctx.fillRect(0, 0, w, h);
+
+    // the window the hotkey would write
+    var selX = w - sel * pxPerSec;
+    ctx.fillStyle = selFill;
+    ctx.fillRect(selX, 0, w - selX, baseY);
+
+    // per-second ticks, drifting left
+    ctx.strokeStyle = tick;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var s = 0; s <= SPAN; s++) {
+      var x = Math.round(w - (s * pxPerSec) + (phase % pxPerSec)) + .5;
+      if (x < 0 || x > w) continue;
+      var tall = (s % 10 === 0);
+      ctx.moveTo(x, baseY);
+      ctx.lineTo(x, tall ? baseY - 26 : baseY - 9);
+    }
+    ctx.stroke();
+
+    // baseline
+    ctx.strokeStyle = mute;
+    ctx.beginPath();
+    ctx.moveTo(0, baseY + .5);
+    ctx.lineTo(w, baseY + .5);
+    ctx.stroke();
+
+    // axis labels every 30s
+    ctx.fillStyle = mute;
+    ctx.font = '11px "DM Mono", ui-monospace, Menlo, monospace';
+    for (var t = 0; t <= SPAN; t += 30) {
+      var lx = w - t * pxPerSec;
+      var label = t === 0 ? "now" : "−" + t + "s";
+      ctx.textAlign = t === 0 ? "right" : (lx < 30 ? "left" : "center");
+      ctx.fillText(label, t === 0 ? w - 4 : lx, baseY + 18);
+    }
+
+    // left edge of the saved window
+    ctx.strokeStyle = rec;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(selX) + .5, 0);
+    ctx.lineTo(Math.round(selX) + .5, baseY);
+    ctx.stroke();
+    ctx.fillStyle = rec;
+    ctx.textAlign = "left";
+    ctx.fillText(sel + "s kept", Math.min(selX + 8, w - 62), 18);
+
+    // the flash of a capture
+    if (flash > 0) {
+      ctx.globalAlpha = flash * .5;
+      ctx.fillStyle = rec;
+      ctx.fillRect(selX, 0, w - selX, baseY);
+      ctx.globalAlpha = 1;
+    }
+
+    // now playhead
+    ctx.fillStyle = rec;
+    ctx.fillRect(w - 2, 0, 2, baseY);
+  }
+
+  // Under reduced motion the strip holds still, so there is nothing to redraw
+  // frame after frame — only a theme change or a capture needs a new paint.
+  var last = performance.now();
+  function frame(now) {
+    var dt = (now - last) / 1000; last = now;
+    var moving = !reduce.matches;
+    if (moving) phase += dt * (canvas.getBoundingClientRect().width / SPAN);
+    if (flash > 0) flash = Math.max(0, flash - dt * 1.6);
+    if (moving || flash > 0) { draw(); requestAnimationFrame(frame); }
+    else { draw(); running = false; }
+  }
+  var running = false;
+  function run() {
+    if (running) return;
+    running = true; last = performance.now();
+    requestAnimationFrame(frame);
+  }
+  reduce.addEventListener("change", function () { run(); });
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+  new MutationObserver(draw).observe(document.documentElement, {
+    attributes: true, attributeFilter: ["data-theme"]
+  });
+
+  function pad(n) { return n < 10 ? "0" + n : "" + n; }
+
+  function capture() {
+    flash = reduce.matches ? 0 : 1;
+    run();
+    draw();
+    var d = new Date();
+    var name = "Clip_" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate())
+             + "_" + pad(d.getHours()) + pad(d.getMinutes()) + "_" + pad(d.getSeconds()) + ".mp4";
+    var li = document.createElement("li");
+    var mins = Math.floor(sel / 60), secs = sel % 60;
+    li.innerHTML = '<span class="name"></span><span class="span"></span><span class="dur"></span>';
+    li.querySelector(".name").textContent = name;
+    li.querySelector(".span").textContent = "−" + sel + "s to now";
+    li.querySelector(".dur").textContent = mins + ":" + pad(secs);
+    var list = document.getElementById("clips");
+    list.insertBefore(li, list.firstChild);
+    while (list.children.length > 5) list.removeChild(list.lastChild);
+  }
+
+  document.getElementById("capture").addEventListener("click", capture);
+
+  document.addEventListener("keydown", function (e) {
+    if (e.ctrlKey && e.altKey && (e.key === "r" || e.key === "R")) {
+      e.preventDefault();
+      capture();
+    }
+  });
+
+  var lenButtons = document.querySelectorAll(".lenset button");
+  Array.prototype.forEach.call(lenButtons, function (b) {
+    b.addEventListener("click", function () {
+      sel = parseInt(b.dataset.len, 10);
+      Array.prototype.forEach.call(lenButtons, function (o) {
+        if (o === b) { o.setAttribute("aria-pressed", "true"); }
+        else { o.removeAttribute("aria-pressed"); }
+      });
+      canvas.setAttribute("aria-label",
+        "A 120-second rolling buffer. The most recent " + sel +
+        " seconds are marked as the region the hotkey would save.");
+      draw();
+    });
+  });
+
+  window.addEventListener("resize", resize);
+  resize();
+  run();
+})();
+</script>
+</body>
+</html>
