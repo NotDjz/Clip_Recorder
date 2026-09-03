@@ -1,0 +1,3 @@
+# cmd.exe misparses a .bat with LF-only endings: REM reads as M and the
+# build dies before it starts. Force CRLF so a checkout cannot reintroduce it.
+*.bat text eol=crlf
