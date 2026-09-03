@@ -155,6 +155,8 @@ SEGMENT_DIR_PREFIX = "cliprec_"
 # before the tray icon appears — and a genuinely stuck one never self-clears,
 # so it would be a permanent per-launch tax.
 ORPHAN_KILL_WAIT_MS = 3000
+# Never wait zero on an individual orphan, even once the shared budget is spent.
+ORPHAN_KILL_FLOOR_MS = 250
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
 
@@ -252,21 +254,46 @@ class AudioCapture:
                         self._channels = dev["maxInputChannels"]
                         break
 
+            # Exact prefix FIRST, library resolver second. The resolver matches
+            # with `in` (pyaudiowpatch 0.2.12.8) where this matches with
+            # `startswith`: wider, but therefore less precise. With a default
+            # output named "Headphones", `in` also matches a lower-indexed
+            # "USB Headphones [Loopback]" and captures the wrong card silently —
+            # the exact wrong-audio-source failure this file was bitten by once.
+            # Each device is adopted last, after its rate and channel count have
+            # been read: adopting first would leave the object describing
+            # hardware it is not capturing if either lookup raised, and would
+            # skip the resolver below because a device is already set.
             if not self._loopback_device:
                 speakers = self._pa.get_device_info_by_index(
                     wasapi["defaultOutputDevice"])
-                self._rate = int(speakers["defaultSampleRate"])
-                self._channels = speakers["maxOutputChannels"]
                 if speakers.get("isLoopbackDevice"):
+                    self._rate = int(speakers["defaultSampleRate"])
+                    self._channels = speakers["maxOutputChannels"]
                     self._loopback_device = speakers
                 else:
                     for i in range(self._pa.get_device_count()):
                         dev = self._pa.get_device_info_by_index(i)
                         if (dev.get("name", "").startswith(speakers["name"])
                                 and dev.get("isLoopbackDevice")):
-                            self._loopback_device = dev
+                            self._rate = int(dev["defaultSampleRate"])
                             self._channels = dev["maxInputChannels"]
+                            self._loopback_device = dev
                             break
+
+            # The resolver catches what the prefix match misses (a loopback the
+            # driver names differently from its output). Logged rather than
+            # swallowed: a silent miss here downgrades the clip to mic-only with
+            # nothing on screen or in the log to explain it.
+            if not self._loopback_device:
+                try:
+                    dev = self._pa.get_default_wasapi_loopback()
+                    self._rate = int(dev["defaultSampleRate"])
+                    self._channels = dev["maxInputChannels"]
+                    self._loopback_device = dev
+                except Exception as e:      # LookupError / OSError / old lib
+                    log(f"default loopback lookup failed: "
+                        f"{type(e).__name__}: {e}")
 
             # --- Microphone ---
             if self._configured_mic:
@@ -1846,7 +1873,12 @@ def _kill_orphan_ffmpeg(seg_dir, deadline=None):
             # file and leaves the directory behind.
             wait_ms = ORPHAN_KILL_WAIT_MS
             if deadline is not None:
-                wait_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                # Floor, not max(0, ...): once a slow first orphan has eaten the
+                # shared budget, a zero wait means the rmtree that follows races
+                # the still-open segment file and the directory survives — the
+                # very race this wait exists to close.
+                wait_ms = max(ORPHAN_KILL_FLOOR_MS,
+                              int((deadline - time.monotonic()) * 1000))
             k32.WaitForSingleObject(handle, wait_ms)
             log(f"killed orphan ffmpeg pid={pid} from {os.path.basename(seg_dir)}")
     finally:
@@ -1866,10 +1898,19 @@ def main():
         tmp = tempfile.gettempdir()
         deadline = time.monotonic() + ORPHAN_KILL_WAIT_MS / 1000.0
         for d in os.listdir(tmp):
-            if d.startswith(SEGMENT_DIR_PREFIX):
-                path = os.path.join(tmp, d)
+            if not d.startswith(SEGMENT_DIR_PREFIX):
+                continue
+            path = os.path.join(tmp, d)
+            # Caught per directory, not around the loop: orphans accumulate in
+            # numbers (four were seen in practice), and the whole point of this
+            # sweep is that ONE failure must not leave the rest holding their
+            # NVENC sessions. Logged, because a silent skip here reproduces the
+            # symptom this code exists to prevent.
+            try:
                 _kill_orphan_ffmpeg(path, deadline)
-                shutil.rmtree(path, ignore_errors=True)
+            except Exception as e:
+                log(f"orphan cleanup failed for {d}: {type(e).__name__}: {e}")
+            shutil.rmtree(path, ignore_errors=True)
     except Exception:
         pass
 
@@ -1957,14 +1998,21 @@ def main():
                 f"Remove-Item -LiteralPath '{ps_quote(LOG_FILE)}' -Force -ErrorAction SilentlyContinue;"
                 f"Remove-Item -LiteralPath '{ps_quote(desktop_lnk)}' -Force -ErrorAction SilentlyContinue;"
             )
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
-                # CREATE_BREAKAWAY_FROM_JOB is load-bearing: this helper waits
-                # for us to exit before deleting the exe, so without it the
-                # kill-on-close job takes it down with us and uninstall does
-                # nothing at all — silently.
-                creationflags=0x08000000 | CREATE_BREAKAWAY_FROM_JOB,
-            )
+            # CREATE_BREAKAWAY_FROM_JOB is load-bearing: this helper waits for
+            # us to exit before deleting the exe, so without it the kill-on-close
+            # job takes it down with us and uninstall does nothing at all.
+            # Guarded because breakaway is refused (ERROR_ACCESS_DENIED) inside
+            # an outer job that forbids it — and an unhandled raise here would
+            # skip root.destroy()/sys.exit() below, after capture, audio, hotkeys
+            # and tray have already been torn down: a headless zombie process.
+            try:
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
+                    creationflags=0x08000000 | CREATE_BREAKAWAY_FROM_JOB,
+                )
+            except OSError as e:
+                log(f"uninstall helper could not break away: "
+                    f"{type(e).__name__}: {e}")
         root.destroy()
         sys.exit(0)
 

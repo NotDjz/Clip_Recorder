@@ -71,6 +71,17 @@ MUTATIONS = [
      "        _ensure_kill_on_close_job()\n        self.segment_dir",
      "        self.segment_dir",
      "test_capture_joins_the_job_before_spawning_ffmpeg"),
+    # Both anchors below are deliberately short. A long anchor that quotes a log
+    # message or four consecutive statements dies on any unrelated edit, and a
+    # dead anchor degrades to SKIP — a guard rail that stops being checked.
+    ("guard the whole orphan sweep instead of each directory",
+     "            try:\n                _kill_orphan_ffmpeg(path, deadline)",
+     "            _kill_orphan_ffmpeg(path, deadline)\n            try:\n                pass",
+     "test_orphan_sweep_isolates_each_directory"),
+    ("probe ddagrab before joining the job (the one-probe blind spot)",
+     "        _ensure_kill_on_close_job()",
+     "        self.has_ddagrab = detect_ddagrab()\n        _ensure_kill_on_close_job()",
+     "test_capture_joins_the_job_before_spawning_ffmpeg"),
     ("let the job kill the uninstall helper (uninstall silently does nothing)",
      "creationflags=0x08000000 | CREATE_BREAKAWAY_FROM_JOB,",
      "creationflags=0x08000000,",

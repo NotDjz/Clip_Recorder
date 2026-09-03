@@ -519,8 +519,27 @@ def test_capture_joins_the_job_before_spawning_ffmpeg():
     src = inspect.getsource(cr.FFmpegCapture.__init__)
     assert "_ensure_kill_on_close_job()" in src, \
         "capture must join the kill-on-close job"
-    assert src.index("_ensure_kill_on_close_job()") < src.index("detect_nvenc()"), \
-        "the job must be established before any ffmpeg is spawned"
+    job_at = src.index("_ensure_kill_on_close_job()")
+    # Both probes, not just the first: asserting only on detect_nvenc() passed
+    # while detect_ddagrab() could be reordered above the job and spawn its
+    # ffmpeg outside it.
+    for probe in ("detect_nvenc()", "detect_ddagrab()"):
+        assert job_at < src.index(probe), \
+            f"the job must be established before {probe} spawns ffmpeg"
+
+
+def test_orphan_sweep_isolates_each_directory():
+    """One failing orphan must not abort the sweep for the rest."""
+    src = inspect.getsource(cr.main)
+    start = src.index("for d in os.listdir(tmp)")
+    # Bound the slice at the sweep's OWN handler, not a byte count: a fixed
+    # window overran into the ffmpeg -version check below, which has a `try:`
+    # of its own, so the assertion held only by 21 characters of luck.
+    loop = src[start:src.index("\n    except Exception:", start)]
+    assert "_kill_orphan_ffmpeg" in loop, "the sweep no longer kills orphans"
+    assert "try:" in loop, "the orphan kill is not guarded inside the loop"
+    assert loop.index("try:") < loop.index("_kill_orphan_ffmpeg"), \
+        "the guard must sit inside the loop, not around it"
 
 
 def test_uninstall_helper_breaks_away_from_the_job():
