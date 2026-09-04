@@ -7,10 +7,12 @@ Ctrl+Alt+R saves the last X seconds as MP4.
 
 import atexit
 import collections
+import io
 import json
 import math
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -135,6 +137,9 @@ FG2 = "#8B958F"         # labels, read-only facts
 ACCENT = "#FF4A3D"      # the record dot and Save. Nothing else.
 STRIP_TICK = "#49524D"  # buffer graduations; BG3 on BG2 is unreadable
 STRIP_KEPT = "#2C2422"  # the slice the hotkey would write, tinted red
+# Punched out by -transparentcolor to round the banner's corners, so it must
+# never appear in the design itself.
+BANNER_KEY = "#FF00FF"
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 FONT_S = ("Segoe UI", 9)
@@ -715,6 +720,13 @@ def get_output_folder(cfg):
 # {B97D20BB-F46A-4C97-BA10-5E3608430854} — the per-user Startup folder. Same
 # reasoning as FOLDERID_VIDEOS above: the API follows a relocated folder, which
 # a hand-built %APPDATA% path does not.
+# {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
+FOLDERID_DESKTOP = _GUID(
+    0xB4BFCC3A, 0xDB2C, 0x424C,
+    (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41),
+)
+
+
 FOLDERID_STARTUP = _GUID(
     0xB97D20BB, 0xF46A, 0x4C97,
     (ctypes.c_ubyte * 8)(0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54),
@@ -725,6 +737,16 @@ def _get_startup_folder():
     return _known_folder(FOLDERID_STARTUP, os.path.join(
         os.environ.get("APPDATA", ""), "Microsoft", "Windows",
         "Start Menu", "Programs", "Startup"))
+
+
+def desktop_lnk_path():
+    """Through the API, not os.path.expanduser: with OneDrive Known Folder
+    Backup the desktop lives under ~/OneDrive/Desktop and the hand-built path
+    does not exist, so the shortcut is silently never created or removed."""
+    return os.path.join(
+        _known_folder(FOLDERID_DESKTOP,
+                      os.path.join(os.path.expanduser("~"), "Desktop")),
+        "ClipRecorder.lnk")
 
 
 def startup_lnk_path():
@@ -1347,12 +1369,9 @@ class FFmpegCapture:
 
                 if os.path.exists(output_path):
                     success = True
-                    winsound.PlaySound(
-                        "SystemExclamation",
-                        winsound.SND_ALIAS | winsound.SND_ASYNC,
-                    )
+                    play_save_sound()
                     if on_success:
-                        on_success()
+                        on_success(round(total_duration))
             except Exception:
                 log(f"[{concat_id}] EXCEPTION in _run:\n{traceback.format_exc()}")
             finally:
@@ -1391,6 +1410,59 @@ class FFmpegCapture:
             pass
 
 
+# ─── Save sound ──────────────────────────────────────────────────────────────
+
+# Low and short on purpose: this fires while you are still playing, so it has to
+# register without cutting through the game the way SystemExclamation did — that
+# alias is also what Windows uses for error dialogs, which is not what a saved
+# clip is. Synthesised rather than shipped: no asset in the .spec, no licence.
+# (frequency, amplitude, second-harmonic ratio) per voice
+SAVE_TONE_VOICES = ((220.0, 0.34, 0.5), (330.0, 0.18, 0.0))
+SAVE_TONE_MS = 200
+_save_sound_wav = None
+
+
+def _save_sound():
+    """WAV bytes for the save chime, rendered once and kept.
+
+    The 4 ms attack matters: starting a sine at full amplitude puts a step in the
+    waveform, which is audible as a click before the note."""
+    global _save_sound_wav
+    if _save_sound_wav is not None:
+        return _save_sound_wav
+    rate = 48000
+    n = int(rate * SAVE_TONE_MS / 1000)
+    attack = max(1, int(0.004 * rate))
+    buf = [0.0] * n
+    for freq, amp, harm in SAVE_TONE_VOICES:
+        for i in range(n):
+            e = min(1.0, i / attack) * math.exp(-5.0 * i / n)
+            buf[i] += amp * e * (math.sin(2 * math.pi * freq * i / rate)
+                                 + harm * math.sin(4 * math.pi * freq * i / rate))
+    bio = io.BytesIO()
+    with wave.open(bio, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(max(-1.0, min(1.0, v)) * 32767)) for v in buf))
+    _save_sound_wav = bio.getvalue()
+    return _save_sound_wav
+
+
+def play_save_sound():
+    """winsound REFUSES SND_ASYNC with SND_MEMORY (RuntimeError: cannot play
+    asynchronously from memory), so the play is synchronous and gets its own
+    thread — otherwise it would sit in front of the notification banner for the
+    length of the sound."""
+    def _play():
+        try:
+            winsound.PlaySound(_save_sound(), winsound.SND_MEMORY)
+        except Exception as e:
+            log(f"save sound failed: {type(e).__name__}: {e}")
+    threading.Thread(target=_play, daemon=True).start()
+
+
 # ─── Notification Banner ────────────────────────────────────────────────────
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20      # 19 on Win10 builds before 20H1
@@ -1410,7 +1482,7 @@ class NotificationBanner:
         self._win = None
         self._hide_id = None
 
-    def show(self, text="Clip saved", duration_ms=3000):
+    def show(self, seconds, text="Clip saved", duration_ms=3000):
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         if self._hide_id:
@@ -1423,17 +1495,40 @@ class NotificationBanner:
         self._win.withdraw()
         self._win.overrideredirect(True)
         self._win.attributes("-topmost", True)
-        self._win.configure(bg="#1a1a2e")
+        ground = BANNER_KEY
+        try:
+            self._win.attributes("-transparentcolor", BANNER_KEY)
+        except tk.TclError:
+            # Without the key colour the pill cannot be cut out, so fall back to
+            # a plain rectangle — leaving it magenta would put a bright block
+            # over the game instead of a banner.
+            ground = BG
+        self._win.configure(bg=ground)
 
-        w, h = 220, 36
-        x = mon["x"] + mon["w"] - w - 20
-        y = mon["y"] + 20
+        w, h = 250, 40
+        x = mon["x"] + mon["w"] - w - 24
+        y = mon["y"] + 24
         self._win.geometry(f"{w}x{h}+{x}+{y}")
 
-        tk.Label(
-            self._win, text=f"  {text}  ✓", bg="#1a1a2e", fg="#22cc66",
-            font=("Segoe UI", 11, "bold"), anchor="center",
-        ).pack(fill="both", expand=True)
+        c = tk.Canvas(self._win, width=w, height=h, bg=ground,
+                      highlightthickness=0)
+        c.pack()
+        r = h // 2                      # a pill: two circles and a rectangle
+        c.create_oval(0, 0, h, h, fill=BG, outline="")
+        c.create_oval(w - h, 0, w, h, fill=BG, outline="")
+        c.create_rectangle(r, 0, w - r, h, fill=BG, outline="")
+        # The record dot, resolved. No tick: it repeats "saved" in a second
+        # modality, and the accent is worth more spent once.
+        PAD, DOT = 20, 4
+        c.create_oval(PAD - 1, h // 2 - DOT, PAD + 7, h // 2 + DOT,
+                      fill=ACCENT, outline="")
+        c.create_text(38, h // 2, text=text, anchor="w", fill=FG,
+                      font=FONT_STATUS)
+        # The clip's real length, which runs buffer_seconds to +SEGMENT_DURATION
+        # because whole segments are selected — so 60s often reads 61s. Showing
+        # the true figure beats rounding it to the setting.
+        c.create_text(w - PAD, h // 2, text=f"{seconds}s", anchor="e",
+                      fill=FG2, font=FONT_MONO)
 
         self._win.update_idletasks()
         self._apply_window_styles()
@@ -1822,7 +1917,8 @@ class SettingsWindow:
             cursor="hand2",
         )
         self.hotkey_btn.pack(side="left")
-        tk.Label(row, text="  click to change", bg=BG2, fg=FG2,
+        tk.Label(row, text="  click to change — needs Ctrl, Alt or Shift",
+                 bg=BG2, fg=FG2,
                  font=FONT_S).pack(side="left")
 
         # ── Startup ──
@@ -1997,8 +2093,12 @@ class SettingsWindow:
         # re-points the target, so just do it whenever the box is ticked.
         wanted = self.startup_var.get()
         if wanted or startup_enabled():
-            set_startup(wanted)
-            self.startup_var.set(startup_enabled())     # show what really happened
+            # Off the Tk thread: set_startup spawns powershell with timeout=10,
+            # and _apply() runs on the UI thread — done inline this freezes the
+            # window, the tray and every pending after() callback for seconds,
+            # on every Save, even one that only changed the frame rate.
+            threading.Thread(target=set_startup, args=(wanted,),
+                             daemon=True).start()
 
     def _save(self):
         self._apply()
@@ -2237,7 +2337,8 @@ def main():
     hotkeys = None
 
     def do_save():
-        capture.save_replay(on_success=lambda: root.after(0, banner.show))
+        capture.save_replay(
+            on_success=lambda secs: root.after(0, lambda: banner.show(secs)))
 
     def shutdown():
         nonlocal tray, hotkeys
@@ -2260,7 +2361,7 @@ def main():
             tray.stop()
         if getattr(sys, "frozen", False):
             exe_path = sys.executable
-            desktop_lnk = os.path.join(os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk")
+            desktop_lnk = desktop_lnk_path()
             # Leaving this one behind would make Windows try to launch a deleted
             # exe at every single sign-in, forever, with nothing left to fix it.
             startup_lnk = startup_lnk_path()

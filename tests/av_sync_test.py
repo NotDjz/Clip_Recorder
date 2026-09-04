@@ -291,7 +291,8 @@ def run_generate(args):
                 root.after(5000, do_save)
 
         print(f"Triggering save_replay() ({len(results) + 1}/{args.repeats})...")
-        capture.save_replay(on_success=lambda: root.after(0, on_success))
+        capture.save_replay(
+            on_success=lambda secs: root.after(0, on_success))
 
     wait_ms = int((args.buffer + 10) * 1000)
     root.after(wait_ms, do_save)

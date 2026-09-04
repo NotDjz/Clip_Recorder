@@ -58,17 +58,25 @@ class _GUID(ctypes.Structure):
                 ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
 
 
+# {B4BFCC3A-DB2C-424C-B029-7FE99A87C641} — with OneDrive Known Folder Backup the
+# desktop lives under ~/OneDrive/Desktop, so a hand-built ~/Desktop silently misses.
+FOLDERID_DESKTOP = _GUID(
+    0xB4BFCC3A, 0xDB2C, 0x424C,
+    (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41),
+)
+
+
 FOLDERID_STARTUP = _GUID(
     0xB97D20BB, 0xF46A, 0x4C97,
     (ctypes.c_ubyte * 8)(0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54),
 )
 
 
-def _get_startup_folder():
+def _known_folder(folderid, fallback):
     try:
         path_ptr = ctypes.c_wchar_p()
         hr = ctypes.windll.shell32.SHGetKnownFolderPath(
-            ctypes.byref(FOLDERID_STARTUP), 0, None, ctypes.byref(path_ptr)
+            ctypes.byref(folderid), 0, None, ctypes.byref(path_ptr)
         )
         if hr == 0 and path_ptr.value:
             path = path_ptr.value
@@ -76,8 +84,18 @@ def _get_startup_folder():
             return path
     except Exception:
         pass
-    return os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows",
-                        "Start Menu", "Programs", "Startup")
+    return fallback
+
+
+def _get_startup_folder():
+    return _known_folder(FOLDERID_STARTUP, os.path.join(
+        os.environ.get("APPDATA", ""), "Microsoft", "Windows",
+        "Start Menu", "Programs", "Startup"))
+
+
+def _get_desktop_folder():
+    return _known_folder(FOLDERID_DESKTOP,
+                         os.path.join(os.path.expanduser("~"), "Desktop"))
 
 
 def _create_shortcut(target_exe, lnk_path):
@@ -232,7 +250,7 @@ def main():
                 json.dump(DEFAULTS, f, indent=2, ensure_ascii=False)
         if result["shortcut"]:
             _create_shortcut(new_exe, os.path.join(
-                os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk"))
+                _get_desktop_folder(), "ClipRecorder.lnk"))
         # Reconcile, do not just create: on a re-install, unticking has to REMOVE
         # the existing shortcut, and re-ticking has to re-point it — otherwise a
         # changed install folder leaves Windows launching the old, deleted exe.

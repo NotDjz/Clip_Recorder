@@ -383,7 +383,8 @@ def run_generate(args):
     def do_save():
         result["save_tc"] = time.monotonic() - t0
         print(f"Triggering save_replay() at timecode {result['save_tc']:.1f}s ...")
-        capture.save_replay(on_success=lambda: root.after(0, on_success))
+        capture.save_replay(
+            on_success=lambda secs: root.after(0, on_success))
 
     # --save-after forces a save BEFORE the buffer has refilled, which is what
     # happens right after a settings change: the selection falls back to "take

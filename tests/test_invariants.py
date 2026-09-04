@@ -568,6 +568,26 @@ def test_uninstall_removes_known_files_and_never_recurses():
         assert target in ps, f"uninstall no longer removes {target}"
 
 
+def test_banner_keeps_its_window_styles():
+    """The banner is an overlay drawn over games and excluded from the clip.
+
+    WS_EX_NOACTIVATE is what stops it stealing foreground from a windowed or
+    borderless game when it appears. WDA_EXCLUDEFROMCAPTURE (0x11) is what keeps
+    it out of the recorded MP4 — lose it and every clip carries the banner burnt
+    into the picture. Both are set while the window is still withdrawn, because
+    a style applied after the first deiconify() arrives a frame too late."""
+    styles = inspect.getsource(cr.NotificationBanner._apply_window_styles)
+    for flag in ("WS_EX_TRANSPARENT", "WS_EX_TOOLWINDOW", "WS_EX_NOACTIVATE"):
+        assert flag in styles, f"the banner no longer sets {flag}"
+    assert "0x00000011" in styles, (
+        "WDA_EXCLUDEFROMCAPTURE is gone; the banner would be recorded")
+    show = inspect.getsource(cr.NotificationBanner.show)
+    order = [show.index(s) for s in ("withdraw()", "_apply_window_styles()",
+                                     "deiconify()")]
+    assert order == sorted(order), (
+        "styles must be applied while withdrawn, before the first deiconify()")
+
+
 def test_settings_vars_match_what_apply_parses():
     """_apply() PARSES what _build() puts in these StringVars.
 
