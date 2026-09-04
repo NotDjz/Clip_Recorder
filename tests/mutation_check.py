@@ -74,6 +74,10 @@ MUTATIONS = [
     # Both anchors below are deliberately short. A long anchor that quotes a log
     # message or four consecutive statements dies on any unrelated edit, and a
     # dead anchor degrades to SKIP — a guard rail that stops being checked.
+    ("change the monitor label separator (device selection breaks silently)",
+     "f\"{i+1}: {m['name']}",
+     "f\"{i+1} - {m['name']}",
+     "test_settings_vars_match_what_apply_parses"),
     ("guard the whole orphan sweep instead of each directory",
      "            try:\n                _kill_orphan_ffmpeg(path, deadline)",
      "            _kill_orphan_ffmpeg(path, deadline)\n            try:\n                pass",

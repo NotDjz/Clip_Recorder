@@ -67,7 +67,7 @@ Prefer `taskkill` **without** `/F` where possible: a forced kill skips the app's
 **Start with the two deterministic suites — they need no devices, no ffmpeg and no screen, and run in about a second:**
 
 ```
-py tests\test_invariants.py     # 26 guard rails: the invariants this project already paid for
+py tests\test_invariants.py     # 27 guard rails: the invariants this project already paid for
 py tests\test_render_window.py  # 6 unit tests on the real-time audio reconstruction
 py tests\mutation_check.py      # proves the guard rails still bite (breaks each invariant on purpose)
 ```
@@ -84,7 +84,7 @@ Silence means it passed (the tests assert; only `main()` prints). Same pattern f
 
 **There is no type checker wired up, and the `pyright-lsp` plugin cannot supply one:** it handles `.py`/`.pyi` only, and all the code lives in a `.pyw`, so the LSP answers `No LSP server available for file type: .pyw`. Pyright *can* still be run, on a throwaway `.py` copy: `npx pyright --outputjson` with `reportMissingModuleSource: false` (no stubs exist for `pystray`, `pyaudiowpatch`, `PIL`). Done once — 18 diagnostics, **0 real defects**: all were guards pyright cannot narrow across methods, plus the normal PyInstaller `sys._MEIPASS` idiom. Not worth repeating unless the file gains type annotations. The syntax check is `py -m py_compile src\clip_recorder.pyw` — worth running after editing, because a `.pyw` is not exercised by any casual run and a syntax error otherwise surfaces only when the app silently fails to launch (windowed, no console).
 
-**Run `mutation_check.py` after touching `test_invariants.py`.** A guard rail that cannot fail is worse than none — it buys false confidence. That checker caught two tests of mine that were silently useless: one matched on filenames that snapshotting had already renamed, and one only ever exercised the no-audio branch because its fake never wrote the WAV to disk. It currently breaks 16 invariants on purpose and all 16 are caught by their named test. Keep mutation anchors SHORT: an anchor that quotes a log message or four consecutive statements dies on any unrelated edit, and a dead anchor degrades to SKIP — a guard rail that has quietly stopped being checked. It earned its keep again on the job-object work: `test_uninstall_helper_breaks_away_from_the_job` was matching the flag name in the *comment* above the call, so it could not fail. Assert on the `creationflags=` expression, never on a name appearing somewhere nearby.
+**Run `mutation_check.py` after touching `test_invariants.py`.** A guard rail that cannot fail is worse than none — it buys false confidence. That checker caught two tests of mine that were silently useless: one matched on filenames that snapshotting had already renamed, and one only ever exercised the no-audio branch because its fake never wrote the WAV to disk. It currently breaks 17 invariants on purpose and all 17 are caught by their named test. Keep mutation anchors SHORT: an anchor that quotes a log message or four consecutive statements dies on any unrelated edit, and a dead anchor degrades to SKIP — a guard rail that has quietly stopped being checked. It earned its keep again on the job-object work: `test_uninstall_helper_breaks_away_from_the_job` was matching the flag name in the *comment* above the call, so it could not fail. Assert on the `creationflags=` expression, never on a name appearing somewhere nearby.
 
 The ways to verify end-to-end (all default to `--monitor 1`, the second screen — **tell the user before running one**, they must close Spotify/games or that audio lands in the loopback capture and corrupts the measurement):
 - **Manual**: run the app, press Ctrl+Alt+R, check the output MP4 (and `clip_recorder.log`, see "Diagnostic logging" below).
@@ -105,6 +105,17 @@ Single file, six classes:
 | `TrayIcon` | pystray system tray icon |
 
 `SettingsWindow` has a single **Save** button (applies + persists to `config.json`). There used to be a separate "Apply" (live, non-persisting) button — removed as a confusing strict subset of Save; don't re-add it.
+
+**`_build()` produces values that `_apply()` PARSES — these formats are a contract.** Break one and device selection fails with no exception at all, just the wrong monitor or a microphone pinned to a device literally named "(Auto — system default)":
+- The monitor label must stay `"N: name (WxH)"`, N 1-based — `_apply()` reads it back with `int(value.split(":")[0]) - 1`. A redesign that switches the separator to an em dash looks better and silently selects the wrong screen.
+- The auto sentinel must keep its `"(Auto"` prefix, matched by `startswith`.
+- `fps_var` and `buffer_var` must stay int-parseable strings.
+- **`hotkey_btn` must stay a classic `tk.Button`**: `_start_hotkey_capture()` recolours it with `.config(bg=, fg=)`, which every ttk widget refuses.
+`test_settings_vars_match_what_apply_parses` pins the first, second and fourth; the int-parseable rule is covered only by `_apply()` raising, so keep it in mind by hand.
+
+Two Windows details the redesign needed. Dropdowns are `ttk.Combobox`, the only one tkinter can render dark — but only under the `clam` theme, and its popup is a classic Listbox that `ttk.Style` cannot reach, so that half goes through `option_add("*TCombobox*Listbox.…")`.
+
+And the title bar: `_use_dark_titlebar()` sets **`DWMWA_CAPTION_COLOR` (35)**, not just `DWMWA_USE_IMMERSIVE_DARK_MODE` (20). Dark mode alone is not enough — with Windows' "show accent colour on title bars" switched on, the **active** window's bar takes the accent regardless, so on a bright accent it sits across the top of a dark window like a stripe. This cost a wrong conclusion once: an early attempt looked fixed because the screenshot happened to catch the window **inactive**, and inactive bars never take the accent. Verify this one with the window focused, or you are measuring the wrong state. Attributes 35/36 are Win11 22000+; older builds return an error that is dropped, keeping the plain dark-mode bar.
 
 ### Video pipeline — critical invariants
 

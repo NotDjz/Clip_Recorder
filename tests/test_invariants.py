@@ -565,6 +565,34 @@ def test_uninstall_removes_known_files_and_never_recurses():
         assert target in ps, f"uninstall no longer removes {target}"
 
 
+def test_settings_vars_match_what_apply_parses():
+    """_apply() PARSES what _build() puts in these StringVars.
+
+    A redesign that changes a display format breaks device selection with no
+    exception at all — just the wrong monitor, or the microphone silently pinned
+    to a device literally named "(Auto — system default)"."""
+    build = inspect.getsource(cr.SettingsWindow._build)
+    apply_ = inspect.getsource(cr.SettingsWindow._apply)
+
+    # monitor: "N: name (WxH)" read back as int(value.split(":")[0]) - 1
+    assert 'split(":")' in apply_, "the monitor parse changed"
+    assert 'f"{i+1}: ' in build, "the monitor label no longer starts with 'N: '"
+
+    # the auto sentinel, produced by both device pickers and matched by prefix
+    assert 'startswith("(Auto")' in apply_, "the auto sentinel check changed"
+    # On the two real expressions, not a count: a comment mentioning the
+    # sentinel inflated the count and made this fail for the wrong reason -
+    # the same 'matched a name sitting nearby' trap CLAUDE.md warns about.
+    for devices in ("loopback_devices", "mic_devices"):
+        expected = '["(Auto — system default)"] + ' + devices
+        assert expected in build, (
+            f"the {devices} picker no longer offers the sentinel _apply() parses")
+
+    # recoloured via .config(bg=, fg=) during capture, which ttk widgets refuse
+    assert "self.hotkey_btn = tk.Button(" in build, \
+        "hotkey_btn must stay a classic tk.Button"
+
+
 def test_settings_has_no_apply_button():
     """A separate Apply was removed as a confusing strict subset of Save.
     (Reads the module source: inspect.getsource on a class defined in a .pyw

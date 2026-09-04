@@ -18,7 +18,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 import uuid
 import winsound
 import ctypes
@@ -123,15 +123,24 @@ KEYSYM_TO_KEY = {**{chr(c): chr(c).upper() for c in range(ord('a'), ord('z') + 1
 
 # ─── Theme ───────────────────────────────────────────────────────────────────
 
-BG = "#1e1e1e"
-BG2 = "#2d2d2d"
-BG3 = "#3c3c3c"
-FG = "#e0e0e0"
-FG2 = "#999999"
-ACCENT = "#ff4444"
+# Used by SettingsWindow and its uninstall dialog only — nothing else in the app
+# reads these, so retuning them cannot disturb the tray icon or the banner (which
+# carries its own colours). The greys are biased slightly green-cool rather than
+# pure neutral: a pure grey reads as inherited, not chosen.
+BG = "#191C1B"          # window ground
+BG2 = "#232725"         # grouped surface
+BG3 = "#2F3532"         # control surface / separators
+FG = "#E6EAE7"          # text
+FG2 = "#8B958F"         # labels, read-only facts
+ACCENT = "#FF4A3D"      # the record dot and Save. Nothing else.
+STRIP_TICK = "#49524D"  # buffer graduations; BG3 on BG2 is unreadable
+STRIP_KEPT = "#2C2422"  # the slice the hotkey would write, tinted red
 FONT = ("Segoe UI", 10)
 FONT_B = ("Segoe UI", 10, "bold")
 FONT_S = ("Segoe UI", 9)
+FONT_XS = ("Segoe UI", 8)
+FONT_MONO = ("Consolas", 10)        # ships with Windows; used for the hotkey
+FONT_STATUS = ("Segoe UI", 11, "bold")
 
 # ─── Capture constants ──────────────────────────────────────────────────────
 
@@ -960,6 +969,12 @@ class FFmpegCapture:
             except Exception:
                 pass
 
+    def is_running(self):
+        """A method, not a property: poll() reaps the child, so it is not free
+        of side effects. Note this is NOT the negation of _check_health()'s
+        test, which asks the different question 'did it exist and die?'."""
+        return bool(self.proc and self.proc.poll() is None)
+
     def start(self):
         if self.proc and self.proc.poll() is None:
             return
@@ -1294,6 +1309,9 @@ class FFmpegCapture:
 
 # ─── Notification Banner ────────────────────────────────────────────────────
 
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20      # 19 on Win10 builds before 20H1
+DWMWA_CAPTION_COLOR = 35                # Win11 22000+; overrides the accent
+DWMWA_TEXT_COLOR = 36
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080
@@ -1364,6 +1382,36 @@ class NotificationBanner:
 
 # ─── Hotkey ──────────────────────────────────────────────────────────────────
 
+def _colorref(hex_rgb):
+    """#RRGGBB -> Win32 COLORREF, which is 0x00BBGGRR: the bytes run backwards."""
+    r, g, b = (int(hex_rgb[i:i + 2], 16) for i in (1, 3, 5))
+    return (b << 16) | (g << 8) | r
+
+
+def _use_dark_titlebar(win):
+    """Paint the title bar to match the window instead of the desktop accent.
+
+    Dark mode alone is NOT enough: with "show accent colour on title bars"
+    switched on, Windows paints the ACTIVE window's bar in the accent regardless
+    — which is why an early attempt here looked fixed. It had only been captured
+    while the window was inactive, and inactive bars never take the accent.
+    DWMWA_CAPTION_COLOR is what actually overrides it (Win11 22000+; older
+    builds return an error we drop, and keep the dark-mode bar)."""
+    try:
+        win.update_idletasks()
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        for attr, value in ((DWMWA_USE_IMMERSIVE_DARK_MODE, 1),
+                            (DWMWA_CAPTION_COLOR, _colorref(BG)),
+                            (DWMWA_TEXT_COLOR, _colorref(FG))):
+            v = ctypes.c_int(value)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
+    except Exception as e:
+        # Cosmetic only, so never fatal — but logged, not swallowed: this file
+        # already shipped one silently inert ctypes block (see the job object).
+        log(f"dark title bar failed: {type(e).__name__}: {e}")
+
+
 HOTKEY_SAVE = 1
 
 
@@ -1429,6 +1477,7 @@ class SettingsWindow:
         self.on_uninstall = None
         self._capturing_hotkey = False
         self._held_mods = set()
+        self._status_gen = 0
 
     def toggle(self):
         if self.win and self.win.winfo_exists():
@@ -1437,175 +1486,279 @@ class SettingsWindow:
             return
         self._build()
 
+    def _style_comboboxes(self):
+        """ttk.Combobox is the only dropdown tkinter can render dark, but it only
+        takes colour on the 'clam' theme, and its popup is a classic Listbox that
+        ttk.Style cannot reach — that one goes through the option database."""
+        style = ttk.Style(self.win)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass                                # fall back to whatever is there
+        style.configure("CR.TCombobox", fieldbackground=BG3, background=BG3,
+                        foreground=FG, arrowcolor=FG2, bordercolor=BG3,
+                        lightcolor=BG3, darkcolor=BG3, relief="flat", padding=3)
+        style.map("CR.TCombobox",
+                  fieldbackground=[("readonly", BG3)],
+                  foreground=[("readonly", FG)],
+                  selectbackground=[("readonly", BG3)],
+                  selectforeground=[("readonly", FG)])
+        for opt, val in (("background", BG3), ("foreground", FG),
+                         ("selectBackground", ACCENT),
+                         ("selectForeground", "#ffffff")):
+            self.win.option_add(f"*TCombobox*Listbox.{opt}", val)
+
+    def _group(self, title):
+        """A titled block. The title is dim and sentence case: the accent is spent
+        on the record dot and Save, not on decorating three headings."""
+        tk.Label(self.win, text=title, bg=BG, fg=FG2, font=FONT_S,
+                 anchor="w").pack(fill="x", padx=16, pady=(12, 4))
+        frame = tk.Frame(self.win, bg=BG2)
+        frame.pack(fill="x", padx=16)
+        return frame
+
+    def _row(self, parent, label):
+        row = tk.Frame(parent, bg=BG2)
+        row.pack(fill="x", padx=12, pady=4)
+        tk.Label(row, text=label, bg=BG2, fg=FG2, font=FONT,
+                 width=14, anchor="w").pack(side="left")
+        return row
+
+    def _combo(self, row, var, values, width=0):
+        """width=0 takes the rest of the row; a fixed width is for the short
+        numeric pickers, which look absurd stretched across it."""
+        cb = ttk.Combobox(row, textvariable=var, values=values,
+                          state="readonly", style="CR.TCombobox", font=FONT_S)
+        if width:
+            cb.config(width=width)
+        cb.pack(side="left", fill="x", expand=not width)
+
+    def _buffer_secs(self):
+        """The duration both halves of the status block have to agree on. The
+        combobox is readonly, so only a hand-edited config.json can make this
+        unparseable — fall back to the same default the rest of the app uses."""
+        for read in (self.buffer_var.get,
+                     lambda: self.config.get("buffer_seconds")):
+            try:
+                return int(read())
+            except (ValueError, TypeError, tk.TclError):
+                pass            # a hand-edited null reaches here, not just ""
+        return DEFAULTS["buffer_seconds"]
+
+    def _draw_strip(self, *_):
+        """The rolling buffer: the whole 120s memory, with the window the hotkey
+        would write marked in red. Redrawn on a duration change, never animated —
+        an animation loop would burn CPU for as long as the window is open."""
+        c = self.strip
+        if not c.winfo_exists():            # destroyed by a previous toggle()
+            return
+        c.delete("all")
+        w, h = c.winfo_width(), c.winfo_height()
+        if w <= 1:
+            return                              # not laid out yet
+        span = max(BUFFER_OPTIONS)
+        kept = min(self._buffer_secs(), span)
+        px = w / span
+        x0 = w - kept * px
+        c.create_rectangle(x0, 0, w, h, fill=STRIP_KEPT, outline="")
+        for s in range(0, span + 1, 2):
+            x = w - s * px
+            c.create_line(x, h - 8, x, h, fill=STRIP_TICK)
+        for s in range(0, span + 1, 30):
+            x = w - s * px
+            c.create_line(x, h - 12, x, h, fill=FG2)
+        c.create_line(x0, 0, x0, h, fill=ACCENT)
+        c.create_line(w - 1, 0, w - 1, h, fill=ACCENT, width=2)
+
+    def _refresh_status(self, *_):
+        """Drives the WHOLE status block, not just the sentence.
+
+        Read once at build time, the dot would still say "Stopped" after
+        _check_health() restarted ffmpeg a second later, and the facts line would
+        show the saved fps while the combobox above it showed the pending one —
+        two numbers for the same thing, side by side."""
+        if not self.win or not self.win.winfo_exists():
+            return
+        key = self.hotkey_var.get()
+        if key == "Press a key...":             # mid-capture; show the real one
+            key = self.config.get("hotkey", "Ctrl+Alt+R")
+        self.sentence_var.set(
+            f"{key} saves the last {self._buffer_secs()} seconds.")
+
+        self._refresh_liveness()
+        self.facts_label.config(text="     ".join([
+            "NVENC" if self.capture.has_nvenc else "x264",
+            "DXGI" if self.capture.has_ddagrab else "GDI",
+            f"{self.fps_var.get()} fps",
+        ]))
+        self._draw_strip()
+
+    def _refresh_liveness(self):
+        """The dot and the state word: the only two things here that change
+        without the user touching a control."""
+        running = self.capture.is_running()
+        self.dot_label.config(fg=ACCENT if running else FG2)
+        self.state_label.config(text="  Recording" if running else "  Stopped")
+
+    def _poll_status(self, gen):
+        """Liveness is not a build-time fact: _check_health() restarts a dead
+        ffmpeg about a second later.
+
+        Reschedules BEFORE doing the work, so one exception cannot silently
+        freeze the block for good in a windowed .pyw with no console. Carries a
+        generation token because reopening Settings inside the tick leaves
+        self.win pointing at a live window again — the old chain would survive
+        that check and poll forever alongside the new one. Same guard as the
+        audio _heal_gen.
+
+        It deliberately does NOT redraw the strip: that depends only on
+        buffer_var, which no timer can change."""
+        if gen != self._status_gen or not self.win or not self.win.winfo_exists():
+            return
+        self.root.after(1000, self._poll_status, gen)
+        self._refresh_liveness()
+
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Settings")
-        self.win.geometry("420x510")
+        self.win.geometry("460x560")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
         self._icon_photo = ImageTk.PhotoImage(create_tray_icon_image(32))
         self.win.iconphoto(False, self._icon_photo)
         self.win.protocol("WM_DELETE_WINDOW", self._close)
+        self._style_comboboxes()
+        _use_dark_titlebar(self.win)
 
-        # ── Capture ──
-        self._section("Capture")
-        cf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
-        cf.pack(fill="x", padx=15, pady=(0, 10))
-
-        # Monitor
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(row, text="Monitor:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
+        # The status block below reads fps_var and traces buffer_var and
+        # hotkey_var, so these four have to exist before it is built. The other
+        # three vars are created next to the widget that owns them.
         mon_labels = []
         for i, m in enumerate(self.monitors):
             tag = " ★" if m["primary"] else ""
+            # "N: name (WxH)" is a PARSED format — _apply() does
+            # int(value.split(":")[0]) - 1. Changing the separator silently
+            # selects the wrong monitor.
             mon_labels.append(f"{i+1}: {m['name']} ({m['w']}×{m['h']}){tag}")
         self.monitor_var = tk.StringVar(
             value=mon_labels[min(self.config["monitor"], len(mon_labels) - 1)]
         )
-        om = tk.OptionMenu(row, self.monitor_var, *mon_labels)
-        om.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                  highlightthickness=0, font=FONT_S, relief="flat")
-        om["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-        om.pack(side="left", fill="x", expand=True)
-
-        # FPS
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=4)
-        tk.Label(row, text="FPS:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
         fps_choices = FPS_OPTIONS if self.capture.has_ddagrab else [f for f in FPS_OPTIONS if f <= 60]
         current_fps = self.config.get("fps", 60)
         if current_fps not in fps_choices:
             current_fps = fps_choices[-1]
         self.fps_var = tk.StringVar(value=str(current_fps))
-        om2 = tk.OptionMenu(row, self.fps_var, *[str(f) for f in fps_choices])
-        om2.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                   highlightthickness=0, font=FONT_S, relief="flat")
-        om2["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-        om2.pack(side="left")
+        self.buffer_var = tk.StringVar(
+            value=str(self.config.get("buffer_seconds", 30)))
+        self.hotkey_var = tk.StringVar(
+            value=self.config.get("hotkey", "Ctrl+Alt+R"))
+        self.sentence_var = tk.StringVar()
 
-        # Audio (WASAPI loopback)
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(4, 2))
-        tk.Label(row, text="System audio:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
+        # ── Status: is it running, and what does the key do? ──
+        st = tk.Frame(self.win, bg=BG)
+        st.pack(fill="x", padx=16, pady=(14, 0))
+        top = tk.Frame(st, bg=BG)
+        top.pack(fill="x")
+        # Encoder and capture method are hardware FACTS, not settings — they read
+        # out here instead of sitting in rows identical to the ones you can change.
+        # All three are filled by _refresh_status() so they stay current.
+        self.dot_label = tk.Label(top, text="●", bg=BG, font=FONT_S)
+        self.dot_label.pack(side="left")
+        self.state_label = tk.Label(top, bg=BG, fg=FG, font=FONT_STATUS)
+        self.state_label.pack(side="left")
+        self.facts_label = tk.Label(top, bg=BG, fg=FG2, font=FONT_XS)
+        self.facts_label.pack(side="right")
+
+        self.strip = tk.Canvas(st, height=26, bg=BG2, highlightthickness=1,
+                               highlightbackground=BG3)
+        self.strip.pack(fill="x", pady=(11, 9))
+        self.strip.bind("<Configure>", self._draw_strip)
+
+        tk.Label(st, textvariable=self.sentence_var, bg=BG, fg=FG,
+                 font=FONT, anchor="w").pack(fill="x")
+
+        # ── Capture ──
+        cf = self._group("Capture")
+        self._combo(self._row(cf, "Monitor"), self.monitor_var, mon_labels)
+        row = self._row(cf, "Frame rate")
+        self._combo(row, self.fps_var, [str(f) for f in fps_choices], width=6)
+        tk.Label(row, text="  fps", bg=BG2, fg=FG2, font=FONT).pack(side="left")
+
+        # ── Audio ──
+        # "(Auto" is a PARSED prefix — _apply() does value.startswith("(Auto") to
+        # mean "empty string in config", i.e. auto-detect. Renaming it silently
+        # pins the config to a device literally named "(Auto — system default)".
+        af = self._group("Audio")
         loopback_devices = AudioCapture.list_loopback_devices()
         current_loopback = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else ""
         loopback_choices = ["(Auto — system default)"] + loopback_devices
         self.loopback_var = tk.StringVar(value=current_loopback or loopback_choices[0])
+        row = self._row(af, "System sound")
         if loopback_devices:
-            om_lb = tk.OptionMenu(row, self.loopback_var, *loopback_choices)
-            om_lb.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                         highlightthickness=0, font=FONT_S, relief="flat")
-            om_lb["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-            om_lb.pack(side="left", fill="x", expand=True)
+            self._combo(row, self.loopback_var, loopback_choices)
         else:
             tk.Label(row, text="Not available", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Microphone
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(2, 2))
-        tk.Label(row, text="Mic:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
         mic_devices = AudioCapture.list_mic_devices()
         current_mic = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else ""
         mic_choices = ["(Auto — system default)"] + mic_devices
         self.mic_var = tk.StringVar(value=current_mic or mic_choices[0])
+        row = self._row(af, "Microphone")
         if mic_devices:
-            om_mic = tk.OptionMenu(row, self.mic_var, *mic_choices)
-            om_mic.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                          highlightthickness=0, font=FONT_S, relief="flat")
-            om_mic["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-            om_mic.pack(side="left", fill="x", expand=True)
+            self._combo(row, self.mic_var, mic_choices)
         else:
             tk.Label(row, text="Not detected", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Encoder
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=2)
-        tk.Label(row, text="Encoder:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
-        enc = "NVENC (GPU)" if self.capture.has_nvenc else "x264 (CPU)"
-        tk.Label(row, text=enc, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
-
-        # Capture method
-        row = tk.Frame(cf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(2, 8))
-        tk.Label(row, text="Capture:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
-        cap_method = "DXGI (ddagrab)" if self.capture.has_ddagrab else "GDI (gdigrab)"
-        tk.Label(row, text=cap_method, bg=BG2, fg=ACCENT, font=FONT_B).pack(side="left")
-
         # ── Replay ──
-        self._section("Replay")
-        rf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
-        rf.pack(fill="x", padx=15, pady=(0, 10))
+        rf = self._group("Replay")
+        row = self._row(rf, "Keep the last")
+        self._combo(row, self.buffer_var,
+                    [str(b) for b in BUFFER_OPTIONS], width=6)
+        tk.Label(row, text="  seconds", bg=BG2, fg=FG2,
+                 font=FONT).pack(side="left")
 
-        # Buffer
-        row = tk.Frame(rf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(8, 4))
-        tk.Label(row, text="Duration (s):", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
-        self.buffer_var = tk.StringVar(
-            value=str(self.config.get("buffer_seconds", 30))
-        )
-        om4 = tk.OptionMenu(row, self.buffer_var, *[str(b) for b in BUFFER_OPTIONS])
-        om4.config(bg=BG3, fg=FG, activebackground=BG2, activeforeground=FG,
-                   highlightthickness=0, font=FONT_S, relief="flat")
-        om4["menu"].config(bg=BG3, fg=FG, activebackground=ACCENT, font=FONT_S)
-        om4.pack(side="left")
-
-        # Output folder
-        row = tk.Frame(rf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=(4, 8))
-        tk.Label(row, text="Folder:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
+        row = self._row(rf, "Save clips to")
         self.folder_var = tk.StringVar(value=get_output_folder(self.config))
         tk.Entry(row, textvariable=self.folder_var, bg=BG3, fg=FG,
-                 insertbackground=FG, font=FONT_S, relief="flat", bd=2,
-                 ).pack(side="left", fill="x", expand=True, padx=(0, 5))
-        tk.Button(row, text="...", command=self._browse_folder,
-                  bg=BG3, fg=FG, relief="flat", font=FONT_S,
-                  cursor="hand2", width=3).pack(side="left")
+                 insertbackground=FG, font=FONT_S, relief="flat", bd=4,
+                 ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        tk.Button(row, text="Browse", command=self._browse_folder,
+                  bg=BG3, fg=FG2, relief="flat", font=FONT_S,
+                  cursor="hand2", padx=8).pack(side="left")
 
-        # ── Hotkey ──
-        self._section("Hotkey")
-        kf = tk.Frame(self.win, bg=BG2, bd=1, relief="flat")
-        kf.pack(fill="x", padx=15, pady=(0, 10))
-        row = tk.Frame(kf, bg=BG2)
-        row.pack(fill="x", padx=10, pady=6)
-        tk.Label(row, text="Hotkey:", bg=BG2, fg=FG, font=FONT,
-                 width=12, anchor="w").pack(side="left")
-        self.hotkey_var = tk.StringVar(value=self.config.get("hotkey", "Ctrl+Alt+R"))
+        # Stays a classic tk.Button: _start_hotkey_capture() recolours it with
+        # .config(bg=, fg=), which a ttk widget refuses outright.
+        row = self._row(rf, "Hotkey")
         self.hotkey_btn = tk.Button(
             row, textvariable=self.hotkey_var, command=self._start_hotkey_capture,
-            bg=BG3, fg=ACCENT, font=FONT_B, relief="flat", padx=10, cursor="hand2",
+            bg=BG3, fg=ACCENT, font=FONT_MONO, relief="flat", padx=10,
+            cursor="hand2",
         )
         self.hotkey_btn.pack(side="left")
-        tk.Label(row, text="  Click to change", bg=BG2, fg=FG2,
+        tk.Label(row, text="  click to change", bg=BG2, fg=FG2,
                  font=FONT_S).pack(side="left")
 
-        # ── Buttons ──
+        # ── Footer: Save is primary, Uninstall keeps its distance ──
+        tk.Frame(self.win, bg=BG3, height=1).pack(fill="x", padx=16, pady=(18, 0))
         bf = tk.Frame(self.win, bg=BG)
-        bf.pack(fill="x", padx=15, pady=(8, 10))
-        tk.Button(bf, text="Save", command=self._save,
+        bf.pack(fill="x", padx=16, pady=(14, 0))
+        tk.Button(bf, text="Save changes", command=self._save,
                   bg=ACCENT, fg="#ffffff", font=FONT_B, relief="flat",
-                  padx=15, cursor="hand2").pack(side="left")
-        tk.Button(bf, text="Uninstall...", command=self._confirm_uninstall,
-                  bg=BG3, fg=FG2, font=FONT, relief="flat",
-                  padx=10, cursor="hand2").pack(side="right")
+                  padx=18, pady=4, cursor="hand2").pack(side="left")
+        tk.Button(bf, text="Uninstall…", command=self._confirm_uninstall,
+                  bg=BG, fg=FG2, font=FONT_S, relief="flat",
+                  padx=6, cursor="hand2").pack(side="right")
+
+        for var in (self.buffer_var, self.hotkey_var, self.fps_var):
+            var.trace_add("write", self._refresh_status)
+        self._status_gen += 1           # retires any poller from a previous open
+        self._poll_status(self._status_gen)
 
         self.win.lift()
         self.win.focus_force()
-
-    def _section(self, text):
-        tk.Label(self.win, text=text, bg=BG, fg=ACCENT, font=FONT_B,
-                 anchor="w").pack(fill="x", padx=15, pady=(8, 2))
 
     def _browse_folder(self):
         folder = filedialog.askdirectory(
@@ -1738,6 +1891,7 @@ class SettingsWindow:
     def _confirm_uninstall(self):
         dlg = tk.Toplevel(self.win)
         dlg.title("Uninstall Clip Recorder")
+        _use_dark_titlebar(dlg)     # else it opens a light bar on top of a dark one
         dlg.configure(bg=BG)
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)
