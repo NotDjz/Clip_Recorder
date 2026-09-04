@@ -1917,7 +1917,7 @@ class SettingsWindow:
             cursor="hand2",
         )
         self.hotkey_btn.pack(side="left")
-        tk.Label(row, text="  click to change — needs Ctrl, Alt or Shift",
+        tk.Label(row, text="  click to change — combination",
                  bg=BG2, fg=FG2,
                  font=FONT_S).pack(side="left")
 
