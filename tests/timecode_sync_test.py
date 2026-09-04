@@ -310,9 +310,13 @@ def run_generate(args):
     pa = cr.pyaudio.PyAudio()
     wasapi = pa.get_host_api_info_by_type(cr.pyaudio.paWASAPI)
     out_dev = pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-    out_stream = pa.open(format=cr.pyaudio.paInt16, channels=2, rate=TONE_RATE,
+    # WASAPI shared mode demands the endpoint's OWN rate, so TONE_RATE cannot be
+    # assumed: a 44.1 kHz output (any Bluetooth speaker) made this raise
+    # -9997 Invalid sample rate and the whole harness refused to start.
+    tone_rate = int(out_dev["defaultSampleRate"])
+    out_stream = pa.open(format=cr.pyaudio.paInt16, channels=2, rate=tone_rate,
                          output=True, output_device_index=out_dev["index"])
-    beep = make_beep_pcm()
+    beep = make_beep_pcm(rate=tone_rate)
 
     win = tk.Toplevel(root)
     win.overrideredirect(True)

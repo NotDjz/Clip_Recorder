@@ -244,6 +244,8 @@ py tests\timecode_sync_test.py --generate --fps 60 --buffer 15 --monitor 1
 py tests\timecode_sync_test.py --analyze "C:\path\to\Clip_....mp4"
 ```
 
+The tone is played at the **output endpoint's own `defaultSampleRate`**, not a fixed 48 kHz: WASAPI shared mode demands the exact device rate, so a 44.1 kHz output — any Bluetooth speaker — made `pa.open()` raise `-9997 Invalid sample rate` and the harness refused to start at all. Measured clean on a 44.1 kHz Bluetooth endpoint as well as the 48 kHz Realtek, so the endpoint is not a variable worth controlling.
+
 Two gotchas when reading it: the schedule is **periodic**, so pinning the clip to the timecode axis is only unique modulo `BEEP_EVERY` — the analyzer takes the smallest physically-possible loss. And the beep is played at low amplitude on purpose; the discontinuity threshold keys off the 95th-percentile step so it stays sensitive at that level (a `median*100` threshold can never trigger — int16 caps at 32767).
 
 **Run tests on the second monitor (`--monitor 1`, the VG258), never the primary** — and tell the user before running, so they can close Spotify/games whose audio would otherwise leak into the loopback capture and corrupt the measurement.
