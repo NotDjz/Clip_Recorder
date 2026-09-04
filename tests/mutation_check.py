@@ -18,6 +18,8 @@ import os
 import subprocess
 import sys
 
+CR, LF = chr(13), chr(10)
+
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
 SUITE = os.path.join(REPO_DIR, "tests", "test_invariants.py")
@@ -105,6 +107,19 @@ MUTATIONS = [
 ]
 
 
+def fit_endings(text, src):
+    """Anchors here are written with \n line breaks, but the working tree is
+    CRLF whenever git checked it out under core.autocrlf - the normal state on
+    Windows. The source is read with newline='' to keep its bytes intact for the
+    hash check, so every multi-line anchor silently stops matching and degrades
+    to SKIP: a guard rail that has quietly stopped being checked, which is the
+    exact failure this file exists to catch. Seen for real after a git stash.
+    """
+    if (CR + LF) in src:
+        return text.replace(CR + LF, LF).replace(LF, CR + LF)
+    return text
+
+
 def run_suite():
     """Names of the tests that failed (lines look like '  FAIL  name: msg')."""
     p = subprocess.run([sys.executable, SUITE], capture_output=True, text=True)
@@ -121,6 +136,8 @@ def main():
     ok = not base_fail
 
     for label, find, repl, expect in MUTATIONS:
+        find = fit_endings(find, original)
+        repl = fit_endings(repl, original)
         if find not in original:
             print(f"  SKIP    {label}\n          anchor no longer in the source — update this mutation")
             ok = False
