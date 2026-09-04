@@ -684,11 +684,12 @@ FOLDERID_VIDEOS = _GUID(
 )
 
 
-def _get_videos_folder():
+def _known_folder(folderid, fallback):
+    """The HRESULT + CoTaskMemFree contract, written once."""
     try:
         path_ptr = ctypes.c_wchar_p()
         hr = ctypes.windll.shell32.SHGetKnownFolderPath(
-            ctypes.byref(FOLDERID_VIDEOS), 0, None, ctypes.byref(path_ptr)
+            ctypes.byref(folderid), 0, None, ctypes.byref(path_ptr)
         )
         if hr == 0 and path_ptr.value:
             path = path_ptr.value
@@ -696,7 +697,12 @@ def _get_videos_folder():
             return path
     except Exception:
         pass
-    return os.path.join(os.path.expanduser("~"), "Videos")
+    return fallback
+
+
+def _get_videos_folder():
+    return _known_folder(FOLDERID_VIDEOS,
+                         os.path.join(os.path.expanduser("~"), "Videos"))
 
 
 def get_output_folder(cfg):
@@ -704,6 +710,84 @@ def get_output_folder(cfg):
     if not folder:
         folder = os.path.join(_get_videos_folder(), "ClipRecorder")
     return folder
+
+
+# {B97D20BB-F46A-4C97-BA10-5E3608430854} — the per-user Startup folder. Same
+# reasoning as FOLDERID_VIDEOS above: the API follows a relocated folder, which
+# a hand-built %APPDATA% path does not.
+FOLDERID_STARTUP = _GUID(
+    0xB97D20BB, 0xF46A, 0x4C97,
+    (ctypes.c_ubyte * 8)(0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54),
+)
+
+
+def _get_startup_folder():
+    return _known_folder(FOLDERID_STARTUP, os.path.join(
+        os.environ.get("APPDATA", ""), "Microsoft", "Windows",
+        "Start Menu", "Programs", "Startup"))
+
+
+def startup_lnk_path():
+    return os.path.join(_get_startup_folder(), "ClipRecorder.lnk")
+
+
+def startup_enabled():
+    """The FILESYSTEM is the source of truth, deliberately — not a config key.
+
+    Two sources would drift the moment someone deletes the shortcut by hand, and
+    the app would keep insisting it starts with Windows when it does not."""
+    return os.path.exists(startup_lnk_path())
+
+
+def set_startup(enabled):
+    """Create or remove the Startup shortcut. Only meaningful frozen: from source
+    sys.executable is python.exe, and a shortcut to that launches nothing useful.
+
+    setup.pyw carries its own copy. Importing the app from Setup is genuinely
+    out: the module body pulls in pystray, PIL and pyaudiowpatch and binds
+    CONFIG_FILE to Setup's own directory. A shared third module would work on
+    the build side, but every test harness loads the app with
+    spec_from_file_location, which puts nothing on sys.path — so each would
+    break until it was taught otherwise. Keeping ~30 lines of ctypes constants
+    twice is the chosen trade, not an unavoidable one."""
+    lnk = startup_lnk_path()
+    try:
+        if not enabled:
+            if os.path.exists(lnk):
+                os.remove(lnk)
+            return True
+        if not getattr(sys, "frozen", False):
+            return False
+        target = sys.executable
+        # Paths travel in the ENVIRONMENT, never interpolated into the script.
+        # Quoting them is not fixable by escaping: PowerShell accepts U+2018,
+        # U+2019, U+201A and U+201B as string delimiters, AND the console
+        # codepage rewrites those to a plain apostrophe in transit — so a quote
+        # can appear *after* the escape ran and close the literal. Measured.
+        ps = (
+            "$s = New-Object -ComObject WScript.Shell;"
+            "$sc = $s.CreateShortcut($env:CR_LNK);"
+            "$sc.TargetPath = $env:CR_TARGET;"
+            "$sc.WorkingDirectory = Split-Path -Parent $env:CR_TARGET;"
+            "$sc.IconLocation = $env:CR_TARGET;"
+            "$sc.Save()"
+        )
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, timeout=10, creationflags=0x08000000,
+            env={**os.environ, "CR_LNK": lnk, "CR_TARGET": target},
+        )
+        # PowerShell can refuse New-Object -ComObject without raising here
+        # (Constrained Language Mode, AppLocker): a nonzero exit is the only
+        # signal, and without logging it the checkbox just reverts in silence.
+        if r.returncode != 0:
+            log(f"startup shortcut refused (rc={r.returncode}): "
+                f"{r.stderr[-300:].decode('utf-8', 'replace').strip()}")
+        return os.path.exists(lnk)
+    except Exception as e:
+        log(f"startup shortcut ({'on' if enabled else 'off'}) failed: "
+            f"{type(e).__name__}: {e}")
+        return False
 
 
 # ─── Tray icon image ────────────────────────────────────────────────────────
@@ -1621,7 +1705,7 @@ class SettingsWindow:
     def _build(self):
         self.win = tk.Toplevel(self.root)
         self.win.title("Clip Recorder — Settings")
-        self.win.geometry("460x560")
+        self.win.geometry("460x615")
         self.win.resizable(False, False)
         self.win.configure(bg=BG)
         self.win.attributes("-topmost", True)
@@ -1741,6 +1825,28 @@ class SettingsWindow:
         tk.Label(row, text="  click to change", bg=BG2, fg=FG2,
                  font=FONT_S).pack(side="left")
 
+        # ── Startup ──
+        # No config key: the shortcut's existence IS the state. Storing it twice
+        # would drift the moment someone deletes it by hand, and the app would go
+        # on claiming it starts with Windows when it does not.
+        sf = self._group("Startup")
+        row = tk.Frame(sf, bg=BG2)
+        row.pack(fill="x", padx=12, pady=6)
+        self.startup_var = tk.BooleanVar(value=startup_enabled())
+        frozen = getattr(sys, "frozen", False)
+        tk.Checkbutton(
+            row, text="Start with Windows", variable=self.startup_var,
+            bg=BG2, fg=FG if frozen else FG2, selectcolor=BG3,
+            activebackground=BG2, activeforeground=FG, font=FONT,
+            highlightthickness=0, bd=0, cursor="hand2" if frozen else "arrow",
+            state="normal" if frozen else "disabled",
+        ).pack(side="left")
+        if not frozen:
+            # From source sys.executable is python.exe; a shortcut to that starts
+            # nothing useful, so the control would be a lie rather than a setting.
+            tk.Label(row, text="  built app only", bg=BG2, fg=FG2,
+                     font=FONT_S).pack(side="left")
+
         # ── Footer: Save is primary, Uninstall keeps its distance ──
         tk.Frame(self.win, bg=BG3, height=1).pack(fill="x", padx=16, pady=(18, 0))
         bf = tk.Frame(self.win, bg=BG)
@@ -1754,6 +1860,10 @@ class SettingsWindow:
 
         for var in (self.buffer_var, self.hotkey_var, self.fps_var):
             var.trace_add("write", self._refresh_status)
+        # Fill the block once here: the traces only fire on a CHANGE, and
+        # _poll_status refreshes liveness alone — without this the sentence and
+        # the facts line open blank.
+        self._refresh_status()
         self._status_gen += 1           # retires any poller from a previous open
         self._poll_status(self._status_gen)
 
@@ -1877,6 +1987,18 @@ class SettingsWindow:
 
         if hotkey_changed and self.on_hotkey_change:
             self.on_hotkey_change()
+
+        # Reconcile the Startup shortcut with the checkbox. Goes through Save
+        # like every other control: the window has ONE button by design, and
+        # CLAUDE.md forbids re-adding a second one.
+        # No `!= startup_enabled()` guard: existence alone cannot tell a shortcut
+        # pointing at THIS exe from one left by an older install, and the guard
+        # made the stale case unfixable from here. Creating is idempotent and
+        # re-points the target, so just do it whenever the box is ticked.
+        wanted = self.startup_var.get()
+        if wanted or startup_enabled():
+            set_startup(wanted)
+            self.startup_var.set(startup_enabled())     # show what really happened
 
     def _save(self):
         self._apply()
@@ -2139,19 +2261,26 @@ def main():
         if getattr(sys, "frozen", False):
             exe_path = sys.executable
             desktop_lnk = os.path.join(os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk")
+            # Leaving this one behind would make Windows try to launch a deleted
+            # exe at every single sign-in, forever, with nothing left to fix it.
+            startup_lnk = startup_lnk_path()
             pid = os.getpid()
 
-            def ps_quote(path):
-                return path.replace("'", "''")
-
+            # Same rule as set_startup: paths go through the environment. This
+            # is the sink that matters most — the helper is detached, hidden and
+            # breaks away from the job object, so injected code would outlive
+            # the app it was just told to remove.
             ps_script = (
                 f"Wait-Process -Id {pid} -Timeout 10 -ErrorAction SilentlyContinue;"
                 "Start-Sleep -Milliseconds 500;"
-                f"Remove-Item -LiteralPath '{ps_quote(exe_path)}' -Force -ErrorAction SilentlyContinue;"
-                f"Remove-Item -LiteralPath '{ps_quote(CONFIG_FILE)}' -Force -ErrorAction SilentlyContinue;"
-                f"Remove-Item -LiteralPath '{ps_quote(LOG_FILE)}' -Force -ErrorAction SilentlyContinue;"
-                f"Remove-Item -LiteralPath '{ps_quote(desktop_lnk)}' -Force -ErrorAction SilentlyContinue;"
+                "foreach ($v in 'CR_EXE','CR_CONFIG','CR_LOG','CR_DESKTOP_LNK','CR_STARTUP_LNK') {"
+                "  Remove-Item -LiteralPath ([Environment]::GetEnvironmentVariable($v))"
+                "    -Force -ErrorAction SilentlyContinue }"
             )
+            uninstall_env = {**os.environ,
+                             "CR_EXE": exe_path, "CR_CONFIG": CONFIG_FILE,
+                             "CR_LOG": LOG_FILE, "CR_DESKTOP_LNK": desktop_lnk,
+                             "CR_STARTUP_LNK": startup_lnk}
             # CREATE_BREAKAWAY_FROM_JOB is load-bearing: this helper waits for
             # us to exit before deleting the exe, so without it the kill-on-close
             # job takes it down with us and uninstall does nothing at all.
@@ -2163,6 +2292,7 @@ def main():
                 subprocess.Popen(
                     ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
                     creationflags=0x08000000 | CREATE_BREAKAWAY_FROM_JOB,
+                    env=uninstall_env,
                 )
             except OSError as e:
                 log(f"uninstall helper could not break away: "

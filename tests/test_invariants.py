@@ -561,7 +561,10 @@ def test_uninstall_removes_known_files_and_never_recurses():
     src = inspect.getsource(cr)
     assert "-Recurse" not in src, "uninstall must never recurse over a folder"
     ps = src[src.index("Wait-Process"):src.index("Wait-Process") + 1200]
-    for target in ("exe_path", "CONFIG_FILE", "LOG_FILE", "desktop_lnk"):
+    # startup_lnk is the one that hurts most if forgotten: Windows would try to
+    # launch a deleted exe at every sign-in, with the app gone to fix it.
+    for target in ("exe_path", "CONFIG_FILE", "LOG_FILE", "desktop_lnk",
+                   "startup_lnk"):
         assert target in ps, f"uninstall no longer removes {target}"
 
 

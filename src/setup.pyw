@@ -48,21 +48,59 @@ DEFAULTS = {
 }
 
 
-def _create_desktop_shortcut(target_exe):
+# {B97D20BB-F46A-4C97-BA10-5E3608430854} — the per-user Startup folder. Resolved
+# through the API rather than a hand-built %APPDATA% path so a relocated folder
+# still works. clip_recorder.pyw carries its own copy of this: the two scripts are
+# standalone by design (Setup never imports the app), so it is structural, not an
+# oversight — change one and change the other.
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
+FOLDERID_STARTUP = _GUID(
+    0xB97D20BB, 0xF46A, 0x4C97,
+    (ctypes.c_ubyte * 8)(0xBA, 0x10, 0x5E, 0x36, 0x08, 0x43, 0x08, 0x54),
+)
+
+
+def _get_startup_folder():
     try:
-        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
-        lnk_path = os.path.join(desktop, "ClipRecorder.lnk")
+        path_ptr = ctypes.c_wchar_p()
+        hr = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(FOLDERID_STARTUP), 0, None, ctypes.byref(path_ptr)
+        )
+        if hr == 0 and path_ptr.value:
+            path = path_ptr.value
+            ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+            return path
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows",
+                        "Start Menu", "Programs", "Startup")
+
+
+def _create_shortcut(target_exe, lnk_path):
+    """One helper for both shortcuts: the script is identical, only where the
+    .lnk lands differs."""
+    try:
+        # Paths travel in the ENVIRONMENT, never interpolated into the script.
+        # Escaping cannot fix this: PowerShell takes U+2018/2019/201A/201B as
+        # string delimiters, and the console codepage rewrites them to a plain
+        # apostrophe in transit — a quote can appear AFTER the escape ran. The
+        # install directory comes from the Browse dialog, so it is user-chosen.
         ps_script = (
             "$s = New-Object -ComObject WScript.Shell;"
-            f"$sc = $s.CreateShortcut('{lnk_path}');"
-            f"$sc.TargetPath = '{target_exe}';"
-            f"$sc.WorkingDirectory = '{os.path.dirname(target_exe)}';"
-            f"$sc.IconLocation = '{target_exe}';"
+            "$sc = $s.CreateShortcut($env:CR_LNK);"
+            "$sc.TargetPath = $env:CR_TARGET;"
+            "$sc.WorkingDirectory = Split-Path -Parent $env:CR_TARGET;"
+            "$sc.IconLocation = $env:CR_TARGET;"
             "$sc.Save()"
         )
         subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
             capture_output=True, timeout=10, creationflags=0x08000000,
+            env={**os.environ, "CR_LNK": lnk_path, "CR_TARGET": target_exe},
         )
     except Exception:
         pass
@@ -100,7 +138,7 @@ def main():
         )
         return
 
-    result = {"path": "", "shortcut": True, "confirmed": False}
+    result = {"path": "", "shortcut": True, "startup": True, "confirmed": False}
 
     dlg = tk.Tk()
     dlg.title("Clip Recorder — Setup")
@@ -140,12 +178,19 @@ def main():
         bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
     ).pack(padx=20, pady=(10, 0), anchor="w")
 
+    startup_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(
+        dlg, text="Start Clip Recorder when Windows starts", variable=startup_var,
+        bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, font=FONT_S,
+    ).pack(padx=20, pady=(4, 0), anchor="w")
+
     def cancel():
         dlg.destroy()
 
     def confirm():
         result["path"] = path_var.get().strip() or default_path
         result["shortcut"] = shortcut_var.get()
+        result["startup"] = startup_var.get()
         result["confirmed"] = True
         dlg.destroy()
 
@@ -186,7 +231,19 @@ def main():
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(DEFAULTS, f, indent=2, ensure_ascii=False)
         if result["shortcut"]:
-            _create_desktop_shortcut(new_exe)
+            _create_shortcut(new_exe, os.path.join(
+                os.path.expanduser("~"), "Desktop", "ClipRecorder.lnk"))
+        # Reconcile, do not just create: on a re-install, unticking has to REMOVE
+        # the existing shortcut, and re-ticking has to re-point it — otherwise a
+        # changed install folder leaves Windows launching the old, deleted exe.
+        startup_lnk = os.path.join(_get_startup_folder(), "ClipRecorder.lnk")
+        if result["startup"]:
+            _create_shortcut(new_exe, startup_lnk)
+        elif os.path.exists(startup_lnk):
+            try:
+                os.remove(startup_lnk)
+            except OSError:
+                pass
         subprocess.Popen([new_exe])
     except Exception:
         r = tk.Tk()

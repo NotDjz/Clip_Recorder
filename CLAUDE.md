@@ -183,6 +183,18 @@ Empty `output_folder` defaults to `~\Videos\ClipRecorder` (`get_output_folder()`
 
 Separate single-file script, its own PyInstaller build (`build_setup.bat`), bundling the already-built `dist\ClipRecorder.exe` via `--add-data "dist\ClipRecorder.exe;."` (extracted at setup runtime from `BUNDLE_DIR`/`sys._MEIPASS`, same technique already used to bundle `ffmpeg.exe` inside the app itself). This is the ONLY thing users download from GitHub Releases now — running it shows a dialog asking where to install (defaults to `%LOCALAPPDATA%\Programs\ClipRecorder`, browsable, optional desktop shortcut), copies the embedded app exe there, launches it, and exits. It does not run the app itself.
 
+- Offers **"Start Clip Recorder when Windows starts"**, ticked by default, which drops a `.lnk` in the per-user Startup folder resolved via `SHGetKnownFolderPath(FOLDERID_Startup)`. It **reconciles** rather than only creates: unticking on a re-install removes an existing shortcut, because a changed install folder would otherwise leave Windows launching the old, deleted exe every sign-in. Settings carries the same switch.
+- **Never interpolate a path into a PowerShell script — pass it in the environment.** Both
+  shortcut helpers and the uninstall script now do. Escaping the apostrophe is NOT enough and
+  cannot be made enough: PowerShell accepts U+2018, U+2019, U+201A and U+201B as string
+  delimiters, **and** the console codepage rewrites those to a plain `'` in transit — so a
+  quote can appear *after* the escape ran and close the literal. Measured with a control: a
+  path containing U+2019 and no straight apostrophe executed injected code through the
+  escaped-interpolation form (rc=0, silently) and was inert through the environment form.
+  The install directory comes from Setup's Browse dialog, and the uninstall helper is the
+  worst sink of all — detached, hidden, and breaking away from the job object, so anything
+  injected there outlives the app that was just told to delete itself.
+- **The shortcut's existence IS the state — there is no config key for it.** Two sources would drift the moment someone deletes the `.lnk` by hand. `_apply()` therefore re-creates unconditionally when the box is ticked rather than comparing: existence alone cannot distinguish a shortcut pointing at THIS exe from one an older install left behind, and a `!=` guard made that stale case unfixable from the UI.
 - Checks the app isn't currently running first (same `ClipRecorder_SingleInstance` mutex name, `CreateMutexW(None, False, ...)` + `GetLastError() == 183`, closing its own handle right after the check) — gives a clear "please close it first" message instead of failing on a locked file.
 - **Only writes `config.json` at the target if one doesn't already exist there** — re-running Setup to update an existing install must not wipe the user's saved settings. The exe itself is always overwritten.
 - The old approach — the app copying *itself* on first launch (`prompt_install_location()`, now removed from `clip_recorder.pyw` entirely) — left the original download as a fully-functional duplicate app in Downloads, which is confusing; Setup fixes this by being a distinct, disposable installer.
@@ -191,7 +203,7 @@ Separate single-file script, its own PyInstaller build (`build_setup.bat`), bund
 
 ## Uninstall
 
-An "Uninstall..." button in Settings (`SettingsWindow._confirm_uninstall`) opens a confirmation dialog (no clip-deletion option — the clips folder is user-configurable at any time via Settings, so uninstall must never assume it knows where they currently are, or that whatever folder is currently configured is safe to bulk-delete). On confirm, `uninstall()` (in `main()`) tears down capture/audio/hotkeys/tray, then — only when `sys.frozen` — spawns a detached, hidden PowerShell helper (`Wait-Process -Id <pid> -Timeout 10` then a short sleep, then individual `Remove-Item` calls) that deletes the exe, `config.json`, `clip_recorder.log`, and the desktop shortcut once this process has actually exited (a running `.exe` can't delete itself — the file is locked). **Deliberately never deletes the exe's containing folder recursively, and never touches the clips folder** — a portable exe can sit anywhere (Desktop, Downloads), so only the specific known app files are removed, never `-Recurse` on `SCRIPT_DIR`.
+An "Uninstall..." button in Settings (`SettingsWindow._confirm_uninstall`) opens a confirmation dialog (no clip-deletion option — the clips folder is user-configurable at any time via Settings, so uninstall must never assume it knows where they currently are, or that whatever folder is currently configured is safe to bulk-delete). On confirm, `uninstall()` (in `main()`) tears down capture/audio/hotkeys/tray, then — only when `sys.frozen` — spawns a detached, hidden PowerShell helper (`Wait-Process -Id <pid> -Timeout 10` then a short sleep, then individual `Remove-Item` calls) that deletes the exe, `config.json`, `clip_recorder.log`, the desktop shortcut **and the Startup shortcut** once this process has actually exited (a running `.exe` can't delete itself — the file is locked). **Deliberately never deletes the exe's containing folder recursively, and never touches the clips folder** — a portable exe can sit anywhere (Desktop, Downloads), so only the specific known app files are removed, never `-Recurse` on `SCRIPT_DIR`.
 
 ## Dev workflow — build vs. run
 
