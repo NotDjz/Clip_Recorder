@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -184,6 +185,7 @@ def make_capture(fps=60, buffer_seconds=15, ddagrab=True, nvenc=True, audio=None
     cap.segment_dir = tempfile.mkdtemp(prefix="inv_test_")   # NOT cliprec_*: see CLAUDE.md
     cap.has_nvenc = nvenc
     cap.has_ddagrab = ddagrab
+    cap._capture_started = 0.0   # __init__ is skipped above; mirror it
     cap._poll_id = None
     return cap
 
@@ -648,6 +650,169 @@ def test_log_is_capped():
     assert lines[0] == "[log truncated]"
     assert "entry 03999" in lines[-1], "the newest entries were not the ones kept"
     assert lines[1].startswith("[20"), "a partial line was left at the cut point"
+
+
+
+def test_giving_up_reports_a_reason():
+    """A save that gives up used to return having told nobody. The hotkey now
+    puts a "Saving clip" banner on screen before the work starts, so a silent
+    abort leaves it sitting over the game. Three of the give-up paths are
+    driven here, and their reasons must stay distinguishable: one tells the
+    user to wait, the others say the clip was lost."""
+    def reasons_for(segment_count, drop_dir=False, just_started=False):
+        cap = make_capture(buffer_seconds=5)
+        if just_started:
+            cap._capture_started = time.time()
+        seed_segments(cap, segment_count)
+        if drop_dir:
+            shutil.rmtree(cap.segment_dir, ignore_errors=True)
+        seen = []
+        try:
+            cap.save_replay(on_failure=seen.append)
+        finally:
+            shutil.rmtree(cap.segment_dir, ignore_errors=True)
+        return seen
+
+    # listdir itself raises: the segment directory went away under us.
+    assert reasons_for(0, drop_dir=True) == ["error"], "the listdir abort said nothing"
+    # Nothing captured at all. Not "wait a moment" - on a stale NVENC session
+    # this is permanent, and telling the user to wait would be a lie.
+    assert reasons_for(0) == ["error"], "the no-segment abort said nothing"
+    # The same empty directory moments after a restart: ffmpeg has simply not
+    # written seg_000 yet, so here waiting really is the advice. Telling these
+    # two apart is the whole reason a reason exists.
+    assert reasons_for(0, just_started=True) == ["too_soon"], \
+        "an empty directory just after a restart was called a lost clip"
+    # Only the in-progress segment exists: pressed too soon after a restart.
+    assert reasons_for(1) == ["too_soon"], "the too-soon abort said nothing"
+
+
+def test_a_superseded_banner_stops_pulsing():
+    """The saving banner breathes its record dot on an after() chain. When a
+    second banner replaces it, the old chain must retire - otherwise it keeps
+    recolouring the dot that now belongs to its replacement, and "Clip saved"
+    sits there breathing as though it were still working.
+
+    The window below is deliberately alive, so dropping the generation check
+    reaches self._canvas (None) and raises, instead of being masked by the
+    window test that follows it."""
+    class LiveWindow:
+        def winfo_exists(self):
+            return True
+
+    class FakeRootWithAfter:
+        def __init__(self):
+            self.cancelled = []
+
+        def after(self, ms, fn, *a):
+            return "tick"
+
+        def after_cancel(self, ident):
+            self.cancelled.append(ident)
+
+    class FakeCanvas:
+        def __init__(self):
+            self.fills = []
+
+        def itemconfig(self, item, fill):
+            self.fills.append(fill)
+
+    b = cr.NotificationBanner.__new__(cr.NotificationBanner)
+    b.root = FakeRootWithAfter()
+    b._win, b._canvas, b._dot = LiveWindow(), FakeCanvas(), "dot"
+    b._pulse_gen, b._pulse_id = 0, None
+
+    # A live chain recolours the dot and books its next tick.
+    b._pulse(0, 0)
+    assert b._canvas.fills, "a live pulse did not recolour the dot"
+    assert b._pulse_id == "tick", "a live pulse did not schedule its next tick"
+
+    # Replacing the banner must retire that generation. Without this half, the
+    # comparison in _pulse is permanently true and guards nothing.
+    retired = b._pulse_gen
+    b._stop_pulse()
+    assert b._pulse_gen != retired, "_stop_pulse left the generation untouched"
+    assert b._pulse_id is None and b.root.cancelled == ["tick"]
+
+    # The retired chain must now be inert even though the window is still alive.
+    b._canvas.fills.clear()
+    b._pulse(retired, 1)
+    assert not b._canvas.fills, "a retired chain recoloured its successor's dot"
+    assert b._pulse_id is None, "a retired chain rescheduled itself"
+
+def test_chimes_never_play_on_the_calling_thread():
+    """winsound refuses SND_ASYNC together with SND_MEMORY, so every play is
+    synchronous and has to be handed to its own thread. The press chime fires
+    on the tk thread from do_save, so playing it inline would stall the whole
+    interface for the length of the sound - and the save chime would sit in
+    front of the banner it is supposed to accompany."""
+    played = []
+    real = cr.winsound.PlaySound
+    cr.winsound.PlaySound = lambda data, flags: played.append(
+        threading.current_thread())
+    try:
+        cr.play_start_sound()
+        cr.play_save_sound()
+        cr.play_fail_sound()
+        deadline = time.time() + 3
+        while len(played) < 3 and time.time() < deadline:
+            time.sleep(0.01)
+    finally:
+        cr.winsound.PlaySound = real
+
+    assert len(played) == 3, f"a chime never reached winsound: {played}"
+    for t in played:
+        assert t is not threading.main_thread(), \
+            "a chime played on the calling thread"
+
+
+def test_the_hotkey_acknowledges_the_press():
+    """The chime and the saving banner ARE the feature, and nothing pinned that
+    do_save fires them: the chime test calls play_start_sound() itself, so
+    deleting the call from do_save left every harness green."""
+    src = inspect.getsource(cr.main)
+    body = src[src.index("def do_save("):]
+    # Relies on do_save being followed by another 4-space def inside main()
+    # (shutdown). If that stops being true .index raises, so this fails loudly
+    # rather than quietly passing on an empty slice.
+    body = body[:body.index("\n    def ")]
+    assert "play_start_sound()" in body, "do_save no longer plays the press chime"
+    assert 'state="saving"' in body, "do_save no longer shows the saving banner"
+
+
+def test_a_lost_clip_is_heard_as_well_as_seen():
+    """The press chime ascends and, without a matching descent, never resolves
+    when the clip is lost: the only report is a pill in the corner, which is
+    exactly where the user is not looking. Nothing else pins that show_failure
+    plays it - the chime test calls play_fail_sound() itself."""
+    src = inspect.getsource(cr.main)
+    body = src[src.index("def show_failure("):]
+    # Relies on show_failure being followed by another 4-space def inside
+    # main() (start_save); if that stops being true .index raises, so this
+    # fails loudly rather than passing on an empty slice.
+    body = body[:body.index("\n    def ")]
+    assert "play_fail_sound()" in body, "show_failure no longer plays the failure chime"
+
+
+def test_a_failed_encode_reports_instead_of_going_quiet():
+    """The give-up path most likely to be taken for real is the worker's own:
+    concat, mix or mux fails and no clip appears. The three synchronous aborts
+    were covered; this one was not, and it is the case that would otherwise
+    leave a "Saving clip" banner expiring with no clip and no explanation."""
+    cap = make_capture(buffer_seconds=5)
+    seed_segments(cap, 8)
+    seen = []
+    rec = Recorder(); rec.install()
+    try:
+        # The fake ffmpeg writes nothing, so output_path never appears.
+        cap.save_replay(on_failure=seen.append)
+        deadline = time.time() + 5
+        while not seen and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        rec.restore()
+        shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    assert seen == ["error"], f"a failed encode reported {seen!r}"
 
 
 def main():

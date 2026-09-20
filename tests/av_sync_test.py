@@ -292,7 +292,10 @@ def run_generate(args):
 
         print(f"Triggering save_replay() ({len(results) + 1}/{args.repeats})...")
         capture.save_replay(
-            on_success=lambda secs: root.after(0, on_success))
+            on_success=lambda secs: root.after(0, on_success),
+            # Without this an abort is observed as a hang: the harness waits out
+            # its safety stop and then blames "not all saves succeeded".
+            on_failure=lambda reason: print(f"  !! save_replay ABORTED: {reason}"))
 
     wait_ms = int((args.buffer + 10) * 1000)
     root.after(wait_ms, do_save)

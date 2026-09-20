@@ -20,7 +20,7 @@ import threading
 import time
 import traceback
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, font as tkfont, ttk
 import uuid
 import winsound
 import ctypes
@@ -137,6 +137,10 @@ FG2 = "#8B958F"         # labels, read-only facts
 ACCENT = "#FF4A3D"      # the record dot and Save. Nothing else.
 STRIP_TICK = "#49524D"  # buffer graduations; BG3 on BG2 is unreadable
 STRIP_KEPT = "#2C2422"  # the slice the hotkey would write, tinted red
+# Deliberately the same grey as STRIP_TICK rather than an alias of it: they
+# answer to different designs, and coupling them would move the banner every
+# time the settings strip is retuned.
+BANNER_PROVISIONAL = "#49524D"  # a clip length we have not measured yet
 # Punched out by -transparentcolor to round the banner's corners, so it must
 # never appear in the design itself.
 BANNER_KEY = "#FF00FF"
@@ -146,6 +150,42 @@ FONT_S = ("Segoe UI", 9)
 FONT_XS = ("Segoe UI", 8)
 FONT_MONO = ("Consolas", 10)        # ships with Windows; used for the hotkey
 FONT_STATUS = ("Segoe UI", 11, "bold")
+
+# The banner's tally light. One breath of the record dot while a clip is being
+# written: down and back up, never a sweep or a spinner, both of which pull the
+# eye of someone who is still playing.
+BANNER_HOLD_MS = 3000           # how long a finished banner stays up
+BANNER_SAVING_MS = 3500         # long enough to register, short enough to leave
+BANNER_PULSE_MS = 70            # ~14 fps; one itemconfig per tick
+BANNER_PULSE_FLOOR = 0.32       # how far the dot dims at the bottom of a breath
+BANNER_PULSE_STEPS = 20         # x BANNER_PULSE_MS = one 1.4s breath
+BANNER_MIN_W = 250              # the pill never gets narrower or shorter than
+BANNER_MIN_H = 40               # the size it shipped at
+BANNER_PAD = 20                 # dot inset on the left, length inset right
+BANNER_DOT_R = 4
+BANNER_TEXT_X = 38              # where the label starts, clear of the dot
+
+
+def _rgb(hex_rgb):
+    """#RRGGBB -> (r, g, b)."""
+    return tuple(int(hex_rgb[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _mix(fg, bg, t):
+    """fg blended toward bg. t=1 is fg, t=0 is bg. Hex in, hex out."""
+    return "#%02x%02x%02x" % tuple(
+        round(b + (a - b) * t) for a, b in zip(_rgb(fg), _rgb(bg)))
+
+
+def _breath(step):
+    """A cosine breath over BANNER_PULSE_STEPS: full accent at step 0, dimmest
+    (BANNER_PULSE_FLOOR) halfway through."""
+    eased = 0.5 + 0.5 * math.cos(2 * math.pi * step / BANNER_PULSE_STEPS)
+    return BANNER_PULSE_FLOOR + (1 - BANNER_PULSE_FLOOR) * eased
+
+
+_BANNER_RAMP = tuple(_mix(ACCENT, BG, _breath(i))
+                     for i in range(BANNER_PULSE_STEPS))
 
 # ─── Capture constants ──────────────────────────────────────────────────────
 
@@ -965,6 +1005,7 @@ class FFmpegCapture:
         self.monitors = monitors
         self.audio = audio_capture
         self.proc = None
+        self._capture_started = 0.0
         # Before any ffmpeg is spawned — including the probes just below.
         _ensure_kill_on_close_job()
         self.segment_dir = tempfile.mkdtemp(prefix=SEGMENT_DIR_PREFIX)
@@ -976,6 +1017,11 @@ class FFmpegCapture:
     def _start_ffmpeg(self):
         if self.proc and self.proc.poll() is None:
             return
+        # When capture actually (re)started - below the guard, or a no-op call
+        # would refresh it. An empty segment directory means "not yet" only
+        # while this is recent; later it means ffmpeg is producing nothing,
+        # and telling the user to wait would be a lie.
+        self._capture_started = time.time()
 
         os.makedirs(self.segment_dir, exist_ok=True)
 
@@ -1106,12 +1152,20 @@ class FFmpegCapture:
         self._wipe_segments()
         self._start_ffmpeg()
 
-    def save_replay(self, on_success=None):
+    def save_replay(self, on_success=None, on_failure=None):
         save_time = time.time()
         replay_secs = self.config.get("buffer_seconds", 30)
         fps = self.config.get("fps", 60)
         output_folder = get_output_folder(self.config)
         os.makedirs(output_folder, exist_ok=True)
+
+        def _fail(reason):
+            """Every abort below used to return having told nobody at all, so
+            a lost clip looked exactly like a saved one: no sound, no banner,
+            nothing. What this buys is that the moment is reported as lost
+            rather than left to look like it was kept."""
+            if on_failure:
+                on_failure(reason)
 
         concat_id = uuid.uuid4().hex[:8]
         log(f"[{concat_id}] save_replay start: fps={fps} buffer_seconds={replay_secs} "
@@ -1124,10 +1178,18 @@ class FFmpegCapture:
             ]
         except Exception as e:
             log(f"[{concat_id}] ABORT: listdir failed: {e}")
+            _fail("error")
             return
 
         if not files:
-            log(f"[{concat_id}] ABORT: no segment files found")
+            # Right after a restart ffmpeg simply has not written seg_000 yet,
+            # and waiting IS the advice. Judged on elapsed time, not on whether
+            # the process is alive: _check_health restarts a dying ffmpeg every
+            # couple of seconds, so liveness flickers and the same permanent
+            # failure would name a different reason on each press.
+            age = save_time - self._capture_started
+            log(f"[{concat_id}] ABORT: no segment files found (capture age={age:.1f}s)")
+            _fail("too_soon" if age < SEGMENT_DURATION * 3 else "error")
             return
 
         files_with_mtime = []
@@ -1142,6 +1204,7 @@ class FFmpegCapture:
 
         if not files_with_mtime:
             log(f"[{concat_id}] ABORT: no segment mtimes readable")
+            _fail("error")
             return
 
         log(f"[{concat_id}] found {len(files_with_mtime)} segments, "
@@ -1161,6 +1224,7 @@ class FFmpegCapture:
         if not complete:
             log(f"[{concat_id}] ABORT: only the in-progress segment exists yet "
                 f"(capture just started/restarted) — nothing complete to save")
+            _fail("too_soon")
             return
 
         # Select whole segments only, walking backward until their real (mtime-based)
@@ -1198,6 +1262,7 @@ class FFmpegCapture:
 
         if not selected:
             log(f"[{concat_id}] ABORT: selection produced empty list")
+            _fail("error")
             return
 
         log(f"[{concat_id}] selected {len(selected)}/{n} segments, total_duration={total_duration:.3f}s "
@@ -1232,6 +1297,7 @@ class FFmpegCapture:
                         os.remove(p)
                     except Exception:
                         pass
+                _fail("error")
                 return
             snap_paths.append(dst)
             concat_names.append(dst_name)
@@ -1333,12 +1399,22 @@ class FFmpegCapture:
         def _run():
             run_start = time.time()
             success = False
+            # The name is only second-resolution, so two saves started inside
+            # the same second share it. Asking "did it exist before" is not
+            # enough: neither has muxed yet when both look. Only the run that
+            # actually wrote the file may call it a success or remove it.
+            wrote_output = False
+            output_rc = None
             try:
                 r = subprocess.run(
                     cmd_video, capture_output=True, timeout=30,
                     creationflags=0x08000000,
                 )
                 _log_result("video_concat", r)
+                # With no audio there is no mux: cmd_video writes output_path.
+                wrote_output = video_only is None
+                if wrote_output:
+                    output_rc = r.returncode
 
                 if mixed_wav and loopback_wav and mic_wav:
                     r = subprocess.run([
@@ -1366,8 +1442,18 @@ class FFmpegCapture:
                     ], capture_output=True, timeout=30,
                        creationflags=0x08000000)
                     _log_result("final_mux", r)
+                    wrote_output = True
+                    output_rc = r.returncode
 
-                if os.path.exists(output_path):
+                # exists() alone is not proof: ffmpeg opens its output before
+                # it can fail, so a full disk or a truncated snapshot leaves a
+                # stub behind. And without wrote_output a skipped mux would let
+                # us claim the file an earlier save wrote in the same second.
+                # output_rc is captured where we know which call it belongs to,
+                # rather than read off whichever subprocess ran last.
+                if (wrote_output and output_rc == 0
+                        and os.path.exists(output_path)
+                        and os.path.getsize(output_path) > 0):
                     success = True
                     play_save_sound()
                     if on_success:
@@ -1378,12 +1464,27 @@ class FFmpegCapture:
                 log(f"[{concat_id}] done: output_exists={os.path.exists(output_path)} "
                     f"on_success_called={success} mux_time={time.time() - run_start:.3f}s "
                     f"total_save_replay_time={time.time() - save_time:.3f}s")
-                for tmp in [concat_file, loopback_wav, mic_wav, mixed_wav, video_only] + snap_paths:
+                leftovers = [concat_file, loopback_wav, mic_wav, mixed_wav,
+                             video_only] + snap_paths
+                if not success and wrote_output:
+                    # Never leave a truncated clip sitting beside the good ones
+                    # while the banner says it was not saved - but only ever
+                    # remove a file this run actually wrote.
+                    leftovers.append(output_path)
+                for tmp in leftovers:
                     if tmp:
                         try:
                             os.remove(tmp)
                         except Exception:
                             pass
+                # Last, and guarded. This marshals onto the tk thread, which
+                # raises once the app has been destroyed, and an exception here
+                # would skip the cleanup above.
+                if not success:
+                    try:
+                        _fail("error")
+                    except Exception:
+                        log(f"[{concat_id}] could not report the failure")
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1416,29 +1517,48 @@ class FFmpegCapture:
 # register without cutting through the game the way SystemExclamation did — that
 # alias is also what Windows uses for error dialogs, which is not what a saved
 # clip is. Synthesised rather than shipped: no asset in the .spec, no licence.
-# (frequency, amplitude, second-harmonic ratio) per voice
-SAVE_TONE_VOICES = ((220.0, 0.34, 0.5), (330.0, 0.18, 0.0))
-SAVE_TONE_MS = 200
-_save_sound_wav = None
+Note = collections.namedtuple("Note", "start_ms freq amp dur_ms harm")
+SAVE_TONE = (Note(0, 220.0, 0.34, 200, 0.5), Note(0, 330.0, 0.18, 200, 0.0))
+# The press climbs through the same two pitches the save chime plays together,
+# so the pair reads as one gesture rather than two unrelated beeps: pressing
+# ascends, finishing resolves into the chord. Quieter and shorter than the end,
+# because you already know you pressed - it only has to carry when your eyes
+# are on the middle of the screen rather than the corner.
+START_TONE = (Note(0, 220.0, 0.20, 60, 0.0), Note(55, 330.0, 0.20, 80, 0.0))
+# The press played backwards: the gesture undoes itself. Same two pitches, so
+# nothing new enters the palette, and the last note runs longer so it settles
+# instead of stopping. Without it an ascent is left hanging and a lost clip is
+# reported only in the corner of the screen - the one place the chimes exist
+# for, because that is where the user is not looking.
+FAIL_TONE = (Note(0, 330.0, 0.20, 60, 0.0), Note(55, 220.0, 0.22, 110, 0.0))
+_tone_cache = {}
 
 
-def _save_sound():
-    """WAV bytes for the save chime, rendered once and kept.
+def _tone(events):
+    """WAV bytes for one chime, rendered once per tone and kept.
+
+    The length comes from the events rather than alongside them. A separate
+    total was a second source of truth keyed on nothing: the cache returned the
+    first render whatever length was asked for, and a total shorter than the
+    events cut the last note mid-oscillation - the exact waveform step the
+    attack ramp below exists to remove.
 
     The 4 ms attack matters: starting a sine at full amplitude puts a step in the
     waveform, which is audible as a click before the note."""
-    global _save_sound_wav
-    if _save_sound_wav is not None:
-        return _save_sound_wav
+    if events in _tone_cache:
+        return _tone_cache[events]
     rate = 48000
-    n = int(rate * SAVE_TONE_MS / 1000)
+    n = int(rate * max(e.start_ms + e.dur_ms for e in events) / 1000)
     attack = max(1, int(0.004 * rate))
     buf = [0.0] * n
-    for freq, amp, harm in SAVE_TONE_VOICES:
-        for i in range(n):
-            e = min(1.0, i / attack) * math.exp(-5.0 * i / n)
-            buf[i] += amp * e * (math.sin(2 * math.pi * freq * i / rate)
-                                 + harm * math.sin(4 * math.pi * freq * i / rate))
+    for start_ms, freq, amp, dur_ms, harm in events:
+        start = int(rate * start_ms / 1000)
+        m = int(rate * dur_ms / 1000)
+        for i in range(m):
+            e = min(1.0, i / attack) * math.exp(-5.0 * i / m)
+            buf[start + i] += amp * e * (
+                math.sin(2 * math.pi * freq * i / rate)
+                + harm * math.sin(4 * math.pi * freq * i / rate))
     bio = io.BytesIO()
     with wave.open(bio, "wb") as w:
         w.setnchannels(1)
@@ -1446,21 +1566,35 @@ def _save_sound():
         w.setframerate(rate)
         w.writeframes(b"".join(
             struct.pack("<h", int(max(-1.0, min(1.0, v)) * 32767)) for v in buf))
-    _save_sound_wav = bio.getvalue()
-    return _save_sound_wav
+    wav = bio.getvalue()
+    _tone_cache[events] = wav
+    return wav
+
+
+def _play_tone(events, what):
+    """winsound REFUSES SND_ASYNC with SND_MEMORY (RuntimeError: cannot play
+    asynchronously from memory), so the play is synchronous and gets its own
+    thread. Called inline it would sit in front of the notification banner for
+    the length of the sound — and the press chime fires on the tk thread, which
+    would stall the whole interface."""
+    def run():
+        try:
+            winsound.PlaySound(_tone(events), winsound.SND_MEMORY)
+        except Exception as e:
+            log(f"{what} sound failed: {type(e).__name__}: {e}")
+    threading.Thread(target=run, daemon=True).start()
 
 
 def play_save_sound():
-    """winsound REFUSES SND_ASYNC with SND_MEMORY (RuntimeError: cannot play
-    asynchronously from memory), so the play is synchronous and gets its own
-    thread — otherwise it would sit in front of the notification banner for the
-    length of the sound."""
-    def _play():
-        try:
-            winsound.PlaySound(_save_sound(), winsound.SND_MEMORY)
-        except Exception as e:
-            log(f"save sound failed: {type(e).__name__}: {e}")
-    threading.Thread(target=_play, daemon=True).start()
+    _play_tone(SAVE_TONE, "save")
+
+
+def play_start_sound():
+    _play_tone(START_TONE, "start")
+
+
+def play_fail_sound():
+    _play_tone(FAIL_TONE, "fail")
 
 
 # ─── Notification Banner ────────────────────────────────────────────────────
@@ -1481,12 +1615,44 @@ class NotificationBanner:
         self.config = config
         self._win = None
         self._hide_id = None
+        self._canvas = None
+        self._dot = None
+        self._pulse_id = None
+        self._pulse_gen = 0
+        self._f_status = None
+        self._f_mono = None
 
-    def show(self, seconds, text="Clip saved", duration_ms=3000):
+    def _measure(self, text, secs_text):
+        """The pill's size for this content. It was a fixed 250x40 while its
+        fonts scale with the display DPI (SetProcessDpiAwareness(2) at
+        startup), so at 125% "Not enough footage yet" ran off the end - the
+        same defect the hotkey hint had. Measure what is going in and grow,
+        on both axes: a fixed height leaves the text no room at 150% and the
+        rounded caps stop matching it."""
+        if self._f_status is None:
+            # Each of these registers a named font in the Tcl interpreter and
+            # drops it again; build them once rather than per banner.
+            self._f_status = tkfont.Font(font=FONT_STATUS)
+            self._f_mono = tkfont.Font(font=FONT_MONO)
+        needed = BANNER_TEXT_X + self._f_status.measure(text) + BANNER_PAD
+        if secs_text:
+            needed += self._f_mono.measure(secs_text) + 12
+        return (max(BANNER_MIN_W, needed),
+                max(BANNER_MIN_H, self._f_status.metrics("linespace") + 18))
+
+    def show(self, seconds=None, text="Clip saved",
+             duration_ms=BANNER_HOLD_MS, state="saved"):
+        """state is "saving", "saved" or "failed", and it settles three things
+        at once: whether the record dot is filled or hollow, whether it
+        breathes, and whether the length beside it reads as a measured fact or
+        as a figure we have not confirmed yet."""
+        if state not in ("saving", "saved", "failed"):
+            raise ValueError(f"unknown banner state: {state!r}")
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         if self._hide_id:
             self.root.after_cancel(self._hide_id)
+        self._stop_pulse()
 
         mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
         mon = self.monitors[mon_idx]
@@ -1505,7 +1671,8 @@ class NotificationBanner:
             ground = BG
         self._win.configure(bg=ground)
 
-        w, h = 250, 40
+        secs_text = f"{seconds}s" if seconds is not None else ""
+        w, h = self._measure(text, secs_text)
         x = mon["x"] + mon["w"] - w - 24
         y = mon["y"] + 24
         self._win.geometry(f"{w}x{h}+{x}+{y}")
@@ -1513,28 +1680,59 @@ class NotificationBanner:
         c = tk.Canvas(self._win, width=w, height=h, bg=ground,
                       highlightthickness=0)
         c.pack()
+        self._canvas = c
         r = h // 2                      # a pill: two circles and a rectangle
         c.create_oval(0, 0, h, h, fill=BG, outline="")
         c.create_oval(w - h, 0, w, h, fill=BG, outline="")
         c.create_rectangle(r, 0, w - r, h, fill=BG, outline="")
         # The record dot, resolved. No tick: it repeats "saved" in a second
         # modality, and the accent is worth more spent once.
-        PAD, DOT = 20, 4
-        c.create_oval(PAD - 1, h // 2 - DOT, PAD + 7, h // 2 + DOT,
-                      fill=ACCENT, outline="")
-        c.create_text(38, h // 2, text=text, anchor="w", fill=FG,
+        box = (BANNER_PAD - 1, h // 2 - BANNER_DOT_R,
+               BANNER_PAD + 7, h // 2 + BANNER_DOT_R)
+        if state == "failed":
+            # A tally light that never lit: nothing was recorded. Keeps the
+            # palette closed, and does not shout at someone still in a game.
+            self._dot = c.create_oval(*box, outline=FG2, width=2)
+        else:
+            self._dot = c.create_oval(*box, fill=ACCENT, outline="")
+        c.create_text(BANNER_TEXT_X, h // 2, text=text, anchor="w", fill=FG,
                       font=FONT_STATUS)
         # The clip's real length, which runs buffer_seconds to +SEGMENT_DURATION
         # because whole segments are selected — so 60s often reads 61s. Showing
         # the true figure beats rounding it to the setting.
-        c.create_text(w - PAD, h // 2, text=f"{seconds}s", anchor="e",
-                      fill=FG2, font=FONT_MONO)
+        if secs_text:
+            c.create_text(w - BANNER_PAD, h // 2, text=secs_text, anchor="e",
+                          fill=BANNER_PROVISIONAL if state == "saving" else FG2,
+                          font=FONT_MONO)
 
         self._win.update_idletasks()
         self._apply_window_styles()
         self._win.deiconify()
+        # deiconify only maps the window. A ready after(0) callback outranks
+        # tk's idle redraw, so without this the pill sits mapped and unpainted
+        # while save_replay's synchronous half holds the thread.
+        self._win.update()
         self._win.after_idle(self._apply_window_styles)
         self._hide_id = self.root.after(duration_ms, self._hide)
+        if state == "saving":
+            self._pulse(self._pulse_gen, 0)
+
+    def _pulse(self, gen, step):
+        """Breathe the record dot while the clip is written. One itemconfig per
+        tick; a banner that replaces this one bumps _pulse_gen so this loop
+        retires instead of recolouring the dot that is now somebody else's."""
+        if (gen != self._pulse_gen or not self._win
+                or not self._win.winfo_exists()):
+            return
+        self._canvas.itemconfig(self._dot, fill=_BANNER_RAMP[step])
+        self._pulse_id = self.root.after(
+            BANNER_PULSE_MS, self._pulse, gen, (step + 1) % BANNER_PULSE_STEPS)
+
+    def _stop_pulse(self):
+        self._pulse_gen += 1
+        if self._pulse_id:
+            self.root.after_cancel(self._pulse_id)
+            self._pulse_id = None
 
     def _apply_window_styles(self):
         if not self._win or not self._win.winfo_exists():
@@ -1553,9 +1751,12 @@ class NotificationBanner:
             pass
 
     def _hide(self):
+        self._stop_pulse()
         if self._win and self._win.winfo_exists():
             self._win.destroy()
         self._win = None
+        self._canvas = None
+        self._dot = None
         self._hide_id = None
 
 
@@ -1563,7 +1764,7 @@ class NotificationBanner:
 
 def _colorref(hex_rgb):
     """#RRGGBB -> Win32 COLORREF, which is 0x00BBGGRR: the bytes run backwards."""
-    r, g, b = (int(hex_rgb[i:i + 2], 16) for i in (1, 3, 5))
+    r, g, b = _rgb(hex_rgb)
     return (b << 16) | (g << 8) | r
 
 
@@ -2336,9 +2537,35 @@ def main():
     tray = None
     hotkeys = None
 
+    def show_failure(reason):
+        if reason == "too_soon":
+            text = "Not enough footage yet"
+        else:
+            text = "Clip not saved"
+        play_fail_sound()
+        banner.show(text=text, state="failed")
+
+    def start_save():
+        try:
+            capture.save_replay(
+                on_success=lambda secs: root.after(0, banner.show, secs),
+                on_failure=lambda reason: root.after(0, show_failure, reason))
+        except Exception:
+            # makedirs on a disconnected share, an unwritable temp volume: the
+            # synchronous half can raise outright, and in a windowed .pyw that
+            # traceback goes nowhere at all.
+            log(f"save_replay raised before starting:\n{traceback.format_exc()}")
+            show_failure("error")
+
     def do_save():
-        capture.save_replay(
-            on_success=lambda secs: root.after(0, lambda: banner.show(secs)))
+        # Acknowledge the press at once, then yield so the pill actually paints:
+        # save_replay's first half runs on this thread and holds it for up to
+        # half a second, during which nothing would be drawn.
+        play_start_sound()
+        banner.show(seconds=config.get("buffer_seconds", 30),
+                    text="Saving clip", duration_ms=BANNER_SAVING_MS,
+                    state="saving")
+        root.after(0, start_save)
 
     def shutdown():
         nonlocal tray, hotkeys

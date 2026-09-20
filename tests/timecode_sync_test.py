@@ -384,7 +384,10 @@ def run_generate(args):
         result["save_tc"] = time.monotonic() - t0
         print(f"Triggering save_replay() at timecode {result['save_tc']:.1f}s ...")
         capture.save_replay(
-            on_success=lambda secs: root.after(0, on_success))
+            on_success=lambda secs: root.after(0, on_success),
+            # Without this an abort is observed as a hang: the harness waits out
+            # its safety stop and then blames "not all saves succeeded".
+            on_failure=lambda reason: print(f"  !! save_replay ABORTED: {reason}"))
 
     # --save-after forces a save BEFORE the buffer has refilled, which is what
     # happens right after a settings change: the selection falls back to "take
