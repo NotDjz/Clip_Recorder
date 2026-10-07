@@ -1051,18 +1051,22 @@ class FFmpegCapture:
                 "-i", "desktop",
             ]
 
+        # Both encoders target the same measured quality (VMAF ~94 against a
+        # 1080p240 game clip). qp 20 / crf 18 scored 97 but cost 2-3x the size:
+        # 1.3 GB for 90 s. H.264 on purpose: Discord, WhatsApp and Premiere
+        # still cannot play AV1.
         if self.has_nvenc:
             cmd += [
                 "-c:v", "h264_nvenc",
                 "-preset", "p1", "-tune", "ll",
-                "-rc", "constqp", "-qp", "20",
+                "-rc", "constqp", "-qp", "26",
                 "-g", str(keyframe_interval),
             ]
         else:
             cmd += [
                 "-c:v", "libx264",
                 "-preset", "ultrafast", "-tune", "zerolatency",
-                "-crf", "18",
+                "-crf", "23",
                 "-g", str(keyframe_interval),
             ]
 
