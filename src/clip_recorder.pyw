@@ -213,6 +213,10 @@ ORPHAN_KILL_WAIT_MS = 3000
 ORPHAN_KILL_FLOOR_MS = 250
 FPS_OPTIONS = [30, 60, 120, 240]
 BUFFER_OPTIONS = [15, 30, 60, 90, 120]
+# B-frames leave a 3-frame reorder lag: 12 ms at 240 fps, but 50 ms at 60 and
+# 100 ms at 30, where the audio would run visibly ahead. Measured (sync and
+# size) at 120 and 240 only, so below this the encoder runs as it always did.
+B_FRAMES_MIN_FPS = 120
 
 # ─── Monitors ────────────────────────────────────────────────────────────────
 
@@ -1027,7 +1031,9 @@ class FFmpegCapture:
 
         mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
         mon = self.monitors[mon_idx]
-        fps = self.config.get("fps", 60)
+        # int(): config.json is hand-editable, and "fps": "120" must not crash
+        # the >= comparison below and leave the app capturing nothing.
+        fps = int(self.config.get("fps", 60))
         buffer_secs = self.config.get("buffer_seconds", 30)
         segment_wrap = math.ceil(buffer_secs / SEGMENT_DURATION) + 2
         keyframe_interval = fps * SEGMENT_DURATION
@@ -1051,22 +1057,35 @@ class FFmpegCapture:
                 "-i", "desktop",
             ]
 
-        # Both encoders target the same measured quality (VMAF ~94 against a
-        # 1080p240 game clip). qp 20 / crf 18 scored 97 but cost 2-3x the size:
-        # 1.3 GB for 90 s. H.264 on purpose: Discord, WhatsApp and Premiere
-        # still cannot play AV1.
+        # Quality first: qp 20 / crf 18 (VMAF ~97 against a 1080p240 game
+        # clip). qp 26 / crf 23 was tried for v1.3: 2-3x smaller, but visibly
+        # worse in motion, and reverted. 3 B-frames, as OBS's recording guide
+        # uses, measured 20% smaller at 240 fps and 26% at 120 for the same
+        # VMAF; they rely on save_replay never passing -ss, and only run from
+        # B_FRAMES_MIN_FPS up. -delay 0 is not optional: by default NVENC then
+        # holds ~15 frames before writing (async depth of its 16 default
+        # surfaces, ~62 ms at 240 fps), the segments close late, and the
+        # video sits that much behind the wall-clock-anchored audio (timecode
+        # test: 70 ms of extra A/V offset without it, 10 ms with it, which is
+        # the 3-frame B reorder itself). Lower the fps setting for lighter
+        # clips still. H.264 on purpose: Discord, WhatsApp and Premiere still
+        # cannot play AV1.
         if self.has_nvenc:
+            if fps >= B_FRAMES_MIN_FPS:
+                tuning = ["-tune", "hq", "-bf", "3", "-delay", "0"]
+            else:
+                tuning = ["-tune", "ll"]
             cmd += [
                 "-c:v", "h264_nvenc",
-                "-preset", "p1", "-tune", "ll",
-                "-rc", "constqp", "-qp", "26",
+                "-preset", "p1", *tuning,
+                "-rc", "constqp", "-qp", "20",
                 "-g", str(keyframe_interval),
             ]
         else:
             cmd += [
                 "-c:v", "libx264",
                 "-preset", "ultrafast", "-tune", "zerolatency",
-                "-crf", "23",
+                "-crf", "18",
                 "-g", str(keyframe_interval),
             ]
 
@@ -1318,7 +1337,6 @@ class FFmpegCapture:
 
         has_loopback = self.audio and self.audio.available
         has_mic = self.audio and self.audio.mic_available
-        has_any_audio = has_loopback or has_mic
 
         loopback_wav = os.path.join(self.segment_dir, f"loopback_{concat_id}.wav") if has_loopback else None
         mic_wav = os.path.join(self.segment_dir, f"mic_{concat_id}.wav") if has_mic else None
@@ -1370,30 +1388,23 @@ class FFmpegCapture:
         if audio_wav and audio_wav != mixed_wav:
             mixed_wav = None
 
-        if has_any_audio and audio_wav:
-            video_only = os.path.join(self.segment_dir, f"video_{concat_id}.mp4")
-            cmd_video = [
-                FFMPEG, "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_file,
-                "-ss", "0",
-                "-t", str(total_duration),
-                "-c", "copy",
-                "-movflags", "+faststart",
-                video_only,
-            ]
-        else:
-            video_only = None
-            cmd_video = [
-                FFMPEG, "-y",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_file,
-                "-ss", "0",
-                "-t", str(total_duration),
-                "-c", "copy",
-                "-movflags", "+faststart",
-                output_path,
-            ]
+        # No -ss at all, not even -ss 0: with B-frames each segment's IDR has
+        # a negative DTS, -ss 0 discards it, and -c copy then has nothing
+        # decodable until the next keyframe, so the whole first segment
+        # vanished from every clip (measured, without a single warning).
+        # With audio, the concat writes a video-only file that the mux then
+        # combines; without, it writes the clip itself.
+        video_only = (os.path.join(self.segment_dir, f"video_{concat_id}.mp4")
+                      if audio_wav else None)
+        cmd_video = [
+            FFMPEG, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_file,
+            "-t", str(total_duration),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            video_only or output_path,
+        ]
 
         def _log_result(label, result):
             err = result.stderr.decode("utf-8", errors="replace")[-2000:] if result.stderr else ""

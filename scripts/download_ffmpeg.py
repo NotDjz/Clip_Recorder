@@ -28,7 +28,12 @@ def main():
         # Removed before downloading, so a failed or refused download cannot
         # leave this unverified binary where the next build would bundle it.
         print("ffmpeg.exe present but not the pinned build, removing it.")
-        os.remove(EXE)
+        try:
+            os.remove(EXE)
+        except OSError as e:
+            print(f"ERROR: cannot remove the unverified ffmpeg.exe ({e}). "
+                  "Close whatever is using it and run again.")
+            raise SystemExit(1)
 
     print(f"Downloading {URL} (~250 MB)...")
     data = urllib.request.urlopen(URL, timeout=120).read()

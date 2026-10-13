@@ -276,6 +276,24 @@ def test_ddagrab_nvenc_has_no_pixel_format_filter():
     assert "ddagrab" in cmd and "output_idx" in cmd
 
 
+def test_nvenc_b_frames_never_hold_output_back():
+    """B-frames only where measured, never without -delay 0 (see _start_ffmpeg)."""
+    for fps in cr.FPS_OPTIONS:
+        cap = make_capture(fps=fps, ddagrab=True, nvenc=True)
+        rec = Recorder(); rec.install()
+        try:
+            cap._start_ffmpeg()
+        finally:
+            rec.restore(); shutil.rmtree(cap.segment_dir, ignore_errors=True)
+        cmd = rec.popen_cmds[0]
+        if fps >= cr.B_FRAMES_MIN_FPS:
+            assert "-bf" in cmd and arg_after(cmd, "-delay") == "0", \
+                f"fps={fps}: B-frames without -delay 0 make the video lag the audio"
+        else:
+            assert "-bf" not in cmd, \
+                f"fps={fps}: B-frames lag 3 frames, {3000 // fps} ms here, never measured"
+
+
 def test_gdigrab_selects_the_monitor_by_offset():
     cap = make_capture(ddagrab=False, monitor=1)
     rec = Recorder(); rec.install()
@@ -326,9 +344,10 @@ def test_concat_references_only_snapshot_copies():
 
 
 def test_never_seeks_into_a_segment():
-    """Whole segments only: a fractional -ss lands on the wrong real keyframe.
-    Checked on BOTH branches — save_replay builds a different command when there
-    is audio to mux than when there is none."""
+    """Whole segments only, and no -ss at all: a fractional -ss lands on the
+    wrong real keyframe, and even -ss 0 drops the first B-frame segment (see
+    save_replay). Checked with and without audio to mux, which change the
+    command's output."""
     for audio in (None, FakeAudio()):
         cap = make_capture(buffer_seconds=5, audio=audio)
         seed_segments(cap, 8)
@@ -341,7 +360,7 @@ def test_never_seeks_into_a_segment():
         shutil.rmtree(cap.segment_dir, ignore_errors=True)
         assert cmds, "no concat command was issued"
         for cmd in cmds:
-            assert arg_after(cmd, "-ss") == "0", \
+            assert "-ss" not in cmd, \
                 f"save_replay seeks into a segment (audio={audio is not None})"
 
 
@@ -861,6 +880,11 @@ def test_ffmpeg_download_refuses_an_unpinned_binary():
         accepted = run() == 0
         with open(dl.EXE, "rb") as f:
             written_when_pinned = f.read() == payload
+
+        def no_network(*a, **k):                 # the verified copy must be kept as is
+            raise AssertionError("a verified ffmpeg.exe was deleted and fetched again")
+        urllib.request.urlopen = no_network
+        kept_verified = run() == 0 and os.path.exists(dl.EXE)
     finally:
         urllib.request.urlopen = real_urlopen
         shutil.rmtree(d, ignore_errors=True)
@@ -871,6 +895,7 @@ def test_ffmpeg_download_refuses_an_unpinned_binary():
         "a stale ffmpeg.exe survived a refused download, for the next build to bundle"
     assert accepted and written_when_pinned, \
         "a download matching the pinned hash was not written"
+    assert kept_verified, "an already verified ffmpeg.exe was not kept"
 
 
 def main():

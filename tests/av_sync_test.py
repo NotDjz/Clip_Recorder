@@ -12,6 +12,7 @@ Usage:
     py tests\\av_sync_test.py --analyze "C:\\path\\to\\Clip_20260101_000000.mp4"
 """
 import argparse
+import array
 import importlib.util
 import math
 import os
@@ -90,7 +91,7 @@ def extract_audio_onsets(mp4_path):
     raw = result.stdout      # analysed even on a non-zero exit, as before
     if not raw:
         return []
-    samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
+    samples = array.array("h", raw[:len(raw) - len(raw) % 2])
     window = max(1, rate // 100)  # ~10ms windows
     energies = []
     for i in range(0, len(samples) - window, window):
