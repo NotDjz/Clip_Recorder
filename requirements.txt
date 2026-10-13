@@ -1,3 +1,5 @@
-pystray
-Pillow
-pyaudiowpatch
+pystray==0.19.5
+Pillow==12.2.0
+pyaudiowpatch==0.2.12.8
+# build only (scripts\build.bat): it produces the shipped binary
+pyinstaller==6.21.0

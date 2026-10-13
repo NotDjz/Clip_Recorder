@@ -26,10 +26,8 @@ import os
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import wave
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(TESTS_DIR)
@@ -119,23 +117,16 @@ def extract_indicator_intervals(mp4_path):
 
 
 def _decode_audio(mp4_path):
-    tmp_wav = tempfile.mktemp(suffix=".wav")
-    try:
-        subprocess.run(
-            [_ffmpeg_path(), "-y", "-i", mp4_path, "-ac", "1", "-ar", "48000", tmp_wav],
-            capture_output=True, timeout=180, creationflags=0x08000000,
-        )
-        if not os.path.exists(tmp_wav):
-            return None, 0
-        with wave.open(tmp_wav, "rb") as wf:
-            rate = wf.getframerate()
-            raw = wf.readframes(wf.getnframes())
-        return array.array("h", raw[:len(raw) - (len(raw) % 2)]), rate
-    finally:
-        try:
-            os.remove(tmp_wav)
-        except Exception:
-            pass
+    rate = 48000
+    result = subprocess.run(
+        [_ffmpeg_path(), "-i", mp4_path, "-ac", "1", "-ar", str(rate),
+         "-f", "s16le", "-"],
+        capture_output=True, timeout=180, creationflags=0x08000000,
+    )
+    raw = result.stdout      # analysed even on a non-zero exit, as before
+    if not raw:
+        return None, 0
+    return array.array("h", raw[:len(raw) - (len(raw) % 2)]), rate
 
 
 def extract_audio_intervals(samples, rate):

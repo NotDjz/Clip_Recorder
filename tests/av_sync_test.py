@@ -19,10 +19,8 @@ import re
 import struct
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import wave
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(TESTS_DIR)
@@ -83,39 +81,32 @@ def make_tone_pcm(rate=TONE_RATE, freq=TONE_FREQ, ms=TONE_MS, channels=2):
 
 
 def extract_audio_onsets(mp4_path):
-    tmp_wav = tempfile.mktemp(suffix=".wav")
-    try:
-        subprocess.run(
-            [_ffmpeg_path(), "-y", "-i", mp4_path, "-ac", "1", "-ar", "48000", tmp_wav],
-            capture_output=True, timeout=60, creationflags=0x08000000,
-        )
-        if not os.path.exists(tmp_wav):
-            return []
-        with wave.open(tmp_wav, "rb") as wf:
-            rate = wf.getframerate()
-            raw = wf.readframes(wf.getnframes())
-        samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
-        window = max(1, rate // 100)  # ~10ms windows
-        energies = []
-        for i in range(0, len(samples) - window, window):
-            chunk = samples[i:i + window]
-            energies.append(sum(s * s for s in chunk) / len(chunk))
-        if not energies:
-            return []
-        threshold = max(energies) * 0.15
-        min_gap = max(1, int(0.5 * rate / window))
-        onsets = []
-        last_i = -min_gap
-        for i, e in enumerate(energies):
-            if e >= threshold and (i - last_i) >= min_gap:
-                onsets.append(i * window / rate)
-                last_i = i
-        return onsets
-    finally:
-        try:
-            os.remove(tmp_wav)
-        except Exception:
-            pass
+    rate = 48000
+    result = subprocess.run(
+        [_ffmpeg_path(), "-i", mp4_path, "-ac", "1", "-ar", str(rate),
+         "-f", "s16le", "-"],
+        capture_output=True, timeout=60, creationflags=0x08000000,
+    )
+    raw = result.stdout      # analysed even on a non-zero exit, as before
+    if not raw:
+        return []
+    samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
+    window = max(1, rate // 100)  # ~10ms windows
+    energies = []
+    for i in range(0, len(samples) - window, window):
+        chunk = samples[i:i + window]
+        energies.append(sum(s * s for s in chunk) / len(chunk))
+    if not energies:
+        return []
+    threshold = max(energies) * 0.15
+    min_gap = max(1, int(0.5 * rate / window))
+    onsets = []
+    last_i = -min_gap
+    for i, e in enumerate(energies):
+        if e >= threshold and (i - last_i) >= min_gap:
+            onsets.append(i * window / rate)
+            last_i = i
+    return onsets
 
 
 def extract_video_transitions(mp4_path, sample_fps=20):

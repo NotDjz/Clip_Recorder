@@ -815,6 +815,64 @@ def test_a_failed_encode_reports_instead_of_going_quiet():
     assert seen == ["error"], f"a failed encode reported {seen!r}"
 
 
+def test_ffmpeg_download_refuses_an_unpinned_binary():
+    """ffmpeg.exe ships inside the installer, the only release asset. A download
+    that does not hash to the pinned build must never reach the disk, or one
+    swapped file upstream would ship to every user."""
+    import contextlib
+    import hashlib
+    import io
+    import urllib.request
+    import zipfile
+
+    payload = b"not ffmpeg"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("ffmpeg-x/bin/ffmpeg.exe", payload)
+
+    spec = importlib.util.spec_from_file_location(
+        "download_ffmpeg", os.path.join(REPO_DIR, "scripts", "download_ffmpeg.py"))
+    dl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dl)
+    d = tempfile.mkdtemp(prefix="inv_test_")
+    dl.EXE = os.path.join(d, "ffmpeg.exe")       # never the repo's real ffmpeg.exe
+
+    def run():
+        """main()'s exit code, output silenced. SystemExit must never escape:
+        this suite's loop only catches Exception, so one would end the whole
+        run with no FAIL line and no summary."""
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                dl.main()
+            return 0
+        except SystemExit as e:
+            return e.code
+
+    real_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = lambda *a, **k: io.BytesIO(buf.getvalue())
+    try:
+        refused = run() == 1
+        written_unverified = os.path.exists(dl.EXE)
+        with open(dl.EXE, "wb") as f:            # a stale build already in place
+            f.write(b"stale")
+        refused_again = run() == 1
+        stale_kept = os.path.exists(dl.EXE)
+        dl.FFMPEG_SHA256 = hashlib.sha256(payload).hexdigest()
+        accepted = run() == 0
+        with open(dl.EXE, "rb") as f:
+            written_when_pinned = f.read() == payload
+    finally:
+        urllib.request.urlopen = real_urlopen
+        shutil.rmtree(d, ignore_errors=True)
+    assert refused and refused_again, \
+        "a download that does not match the pinned hash was not refused"
+    assert not written_unverified, "an unverified ffmpeg.exe was written to disk"
+    assert not stale_kept, \
+        "a stale ffmpeg.exe survived a refused download, for the next build to bundle"
+    assert accepted and written_when_pinned, \
+        "a download matching the pinned hash was not written"
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

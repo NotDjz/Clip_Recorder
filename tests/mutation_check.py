@@ -22,10 +22,17 @@ CR, LF = chr(13), chr(10)
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
+DOWNLOADER = os.path.join(REPO_DIR, "scripts", "download_ffmpeg.py")
 SUITE = os.path.join(REPO_DIR, "tests", "test_invariants.py")
 
-# (label, find, replace, the test that should catch it)
+# (label, find, replace, the test that should catch it[, file, default APP])
 MUTATIONS = [
+    ("write a downloaded ffmpeg.exe without checking the pin",
+     "hashlib.sha256(exe).hexdigest() != FFMPEG_SHA256", "False",
+     "test_ffmpeg_download_refuses_an_unpinned_binary", DOWNLOADER),
+    ("leave a stale ffmpeg.exe in place for the next build",
+     "os.remove(EXE)", "pass",
+     "test_ffmpeg_download_refuses_an_unpinned_binary", DOWNLOADER),
     ("include the in-progress segment",
      "complete = files_with_mtime[:-1]", "complete = files_with_mtime[:]",
      "test_in_progress_segment_is_never_selected"),
@@ -150,32 +157,47 @@ def fit_endings(text, src):
 
 
 def run_suite():
-    """Names of the tests that failed (lines look like '  FAIL  name: msg')."""
+    """Names of the tests that failed (lines look like '  FAIL  name: msg').
+
+    Matched on the suite's exact prefix, never on a stripped line: code under
+    test may print its own "ERROR: ..." and must not read as a failing test."""
     p = subprocess.run([sys.executable, SUITE], capture_output=True, text=True)
-    return {l.split()[1].rstrip(":") for l in p.stdout.splitlines()
-            if l.strip().startswith(("FAIL", "ERROR"))}
+    failing = {l.split()[1].rstrip(":") for l in p.stdout.splitlines()
+               if l.startswith(("  FAIL  ", "  ERROR "))}
+    if p.returncode != 0 and not failing:
+        # It died before printing a result line (an escaped SystemExit, an
+        # import error): that is not a clean run, whatever stdout says.
+        failing.add("<suite crashed>")
+    return failing
+
+
+def read(path):
+    return io.open(path, encoding="utf-8", newline="").read()
 
 
 def main():
-    original = io.open(APP, encoding="utf-8", newline="").read()
-    orig_hash = hashlib.sha256(original.encode()).hexdigest()
+    files = {APP} | {m[4] for m in MUTATIONS if len(m) > 4}
+    originals = {p: read(p) for p in files}
+    orig_hashes = {p: hashlib.sha256(originals[p].encode()).hexdigest() for p in files}
 
     base_fail = run_suite()
     print(f"baseline: {'clean' if not base_fail else 'ALREADY FAILING: ' + str(base_fail)}\n")
     ok = not base_fail
 
-    for label, find, repl, expect in MUTATIONS:
+    for label, find, repl, expect, *target in MUTATIONS:
+        path = target[0] if target else APP
+        original = originals[path]
         find = fit_endings(find, original)
         repl = fit_endings(repl, original)
         if find not in original:
             print(f"  SKIP    {label}\n          anchor no longer in the source — update this mutation")
             ok = False
             continue
-        io.open(APP, "w", encoding="utf-8", newline="").write(original.replace(find, repl, 1))
+        io.open(path, "w", encoding="utf-8", newline="").write(original.replace(find, repl, 1))
         try:
             failing = run_suite()
         finally:
-            io.open(APP, "w", encoding="utf-8", newline="").write(original)
+            io.open(path, "w", encoding="utf-8", newline="").write(original)
         ok &= bool(failing)
         named = expect in failing
         print(f"  {'CAUGHT' if failing else 'MISSED'}  {label}")
@@ -184,8 +206,8 @@ def main():
         elif not named:
             print(f"          caught by {', '.join(sorted(failing))} (expected {expect})")
 
-    restored = hashlib.sha256(
-        io.open(APP, encoding="utf-8", newline="").read().encode()).hexdigest() == orig_hash
+    restored = all(hashlib.sha256(read(p).encode()).hexdigest() == orig_hashes[p]
+                   for p in files)
     print(f"\nsource restored intact: {restored}")
     print("RESULT:", "PASS — every invariant is genuinely guarded"
           if ok and restored else "PROBLEM — see above")
