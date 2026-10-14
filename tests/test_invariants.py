@@ -125,11 +125,13 @@ class FakeAudio:
 class Recorder:
     """Captures the ffmpeg command lines instead of running them."""
 
-    def __init__(self):
+    def __init__(self, fail_on=None, timeout_on=None):
         self.popen_cmds = []
         self.run_cmds = []
         self.concat_lists = []
         self.concat_marks = []
+        self.fail_on = fail_on       # a command containing this returns code 1
+        self.timeout_on = timeout_on # ... or raises TimeoutExpired
 
     def install(self):
         self._popen, self._run, self._thread = cr.subprocess.Popen, cr.subprocess.run, cr.threading.Thread
@@ -157,7 +159,23 @@ class Recorder:
                     rec.concat_marks.append(marks)
                 except Exception:
                     pass
-            return FakeCompleted()
+            done = FakeCompleted()
+            joined = " ".join(map(str, cmd))
+            if "concat" in cmd and os.path.basename(str(cmd[-1])).startswith("video_"):
+                # The intermediate video-only file, or the mux is never reached.
+                # Never the clip itself: tests rely on output_path not appearing.
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"\0")
+            if "amix" in joined:
+                # A real amix writes its WAV even when it then fails part-way:
+                # the partial-file case is exactly what must not be trusted.
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"RIFF")
+            if rec.fail_on and rec.fail_on in joined:
+                done.returncode = 1
+            if rec.timeout_on and rec.timeout_on in joined:
+                raise cr.subprocess.TimeoutExpired(cmd, 30)
+            return done
 
         class SyncThread:                      # run save_replay's worker inline
             def __init__(self, target=None, args=(), kwargs=None, daemon=None):
@@ -832,6 +850,44 @@ def test_a_failed_encode_reports_instead_of_going_quiet():
         rec.restore()
         shutil.rmtree(cap.segment_dir, ignore_errors=True)
     assert seen == ["error"], f"a failed encode reported {seen!r}"
+
+
+def test_a_restart_never_mixes_two_captures():
+    """_check_health() restarts a dead ffmpeg through start(). Its segments,
+    the last one cut mid-write, must not survive into the new capture: a save
+    would select both, and the mtime span would include the restart gap."""
+    cap = make_capture()
+    old = seed_segments(cap, 5)
+    rec = Recorder(); rec.install()
+    try:
+        cap.start()                      # what _check_health schedules
+    finally:
+        rec.restore()
+    left = [n for n in old if os.path.exists(os.path.join(cap.segment_dir, n))]
+    shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    assert not left, f"segments from the previous capture survived a restart: {left}"
+
+
+def test_a_failed_mix_falls_back_to_the_game_audio():
+    """A failed amix used to lose the whole clip, or leave a partial WAV for
+    -shortest to cut the video down to. The game audio is still there."""
+    for how in ({"fail_on": "amix"}, {"timeout_on": "amix"}):
+        audio = FakeAudio()
+        audio.mic_available = True
+        cap = make_capture(buffer_seconds=5, audio=audio)
+        seed_segments(cap, 8)
+        rec = Recorder(**how); rec.install()
+        try:
+            cap.save_replay()
+        finally:
+            rec.restore()
+            shutil.rmtree(cap.segment_dir, ignore_errors=True)
+        mux = [c for c in rec.run_cmds if "-c:a" in c]
+        assert mux, f"a failed mix ({how}) cost the whole clip: no mux was run"
+        cmd = mux[0]
+        audio_in = os.path.basename(cmd[cmd.index("-i", cmd.index("-i") + 1) + 1])
+        assert audio_in.startswith("loopback_"), \
+            f"after a failed mix ({how}) the mux used {audio_in}, not the game audio"
 
 
 def test_ffmpeg_download_refuses_an_unpinned_binary():

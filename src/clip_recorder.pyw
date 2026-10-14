@@ -1028,6 +1028,11 @@ class FFmpegCapture:
         self._capture_started = time.time()
 
         os.makedirs(self.segment_dir, exist_ok=True)
+        # Every capture starts from an empty segment set. A health restart
+        # (_check_health -> start) used to keep the dead process's segments,
+        # its last one cut mid-write, and a save then mixed both captures with
+        # the restart gap inside the mtime span.
+        self._wipe_segments()
 
         mon_idx = min(self.config["monitor"], len(self.monitors) - 1)
         mon = self.monitors[mon_idx]
@@ -1172,8 +1177,7 @@ class FFmpegCapture:
         circular buffer (max 120s) already spans any buffer_seconds, so it
         just keeps running across the change."""
         self._stop_ffmpeg()
-        self._wipe_segments()
-        self._start_ffmpeg()
+        self._start_ffmpeg()             # wipes the old segments itself
 
     def save_replay(self, on_success=None, on_failure=None):
         save_time = time.time()
@@ -1431,24 +1435,36 @@ class FFmpegCapture:
                 if wrote_output:
                     output_rc = r.returncode
 
-                if mixed_wav and loopback_wav and mic_wav:
-                    r = subprocess.run([
-                        FFMPEG, "-y",
-                        "-i", loopback_wav, "-i", mic_wav,
-                        "-filter_complex",
-                        "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];"
-                        "[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
-                        "[a0][a1]amix=inputs=2:duration=longest:normalize=0",
-                        "-ac", "2", "-ar", "48000",
-                        mixed_wav,
-                    ], capture_output=True, timeout=30,
-                       creationflags=0x08000000)
-                    _log_result("audio_mix", r)
+                mux_audio = audio_wav
+                if mixed_wav:            # only set when both WAVs exist
+                    try:
+                        r = subprocess.run([
+                            FFMPEG, "-y",
+                            "-i", loopback_wav, "-i", mic_wav,
+                            "-filter_complex",
+                            "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];"
+                            "[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];"
+                            "[a0][a1]amix=inputs=2:duration=longest:normalize=0",
+                            "-ac", "2", "-ar", "48000",
+                            mixed_wav,
+                        ], capture_output=True, timeout=30,
+                           creationflags=0x08000000)
+                        _log_result("audio_mix", r)
+                        mix_ok = r.returncode == 0 and os.path.exists(mixed_wav)
+                    except subprocess.TimeoutExpired:
+                        log(f"[{concat_id}] audio_mix timed out")
+                        mix_ok = False       # a long buffer on a busy PC: same fallback
+                    if not mix_ok:
+                        # A failed mix must not cost the clip, and a partial
+                        # mixed WAV must never be what -shortest cuts the video
+                        # down to. The game audio is still whole.
+                        log(f"[{concat_id}] audio_mix failed, using the loopback audio alone")
+                        mux_audio = loopback_wav
 
-                if video_only and audio_wav and os.path.exists(audio_wav) and os.path.exists(video_only):
+                if video_only and mux_audio and os.path.exists(mux_audio) and os.path.exists(video_only):
                     r = subprocess.run([
                         FFMPEG, "-y",
-                        "-i", video_only, "-i", audio_wav,
+                        "-i", video_only, "-i", mux_audio,
                         "-c:v", "copy",
                         "-c:a", "aac", "-b:a", "192k",
                         "-shortest",
