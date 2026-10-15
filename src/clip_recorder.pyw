@@ -205,6 +205,9 @@ FFMPEG_PID_FILE = "ffmpeg.pid"
 # ffmpeg lists every closed segment's start and end here, on the capture clock's
 # timeline (see _read_capture_clock): what save_replay anchors the clip on.
 SEGMENT_LIST_FILE = "segments.csv"
+# AudioCapture.heal() gives up on a stream after this many reopens, 2, 4 ... 64
+# health ticks apart (~4 min in all), until a device change or a restart.
+HEAL_MAX_REOPENS = 6
 # Temp-dir prefix for a capture's segments. The writer (mkdtemp) and the crash
 # scanner in main() are the two halves of one contract, ~1000 lines apart:
 # change it in only one and orphan cleanup silently stops working.
@@ -288,7 +291,6 @@ class AudioCapture:
         # Cheap bitwise-or, no I/O — surfaced in save_replay's log line.
         self._loopback_status_flags = 0
         self._mic_status_flags = 0
-        self._heal_gen = 0
         self._channels = 2
         self._rate = 48000
         self._mic_channels = 2
@@ -433,6 +435,11 @@ class AudioCapture:
             return self._mic_device["name"]
         return None
 
+    # Only ever called on the tk thread: it created PyAudio, so it has COM.
+    # From a thread without COM, WASAPI fails every open with -9999
+    # "Unanticipated host error" (measured, every time): the error long blamed
+    # on WASAPI being flaky after a close, and why the old heal thread never
+    # reopened a single stream.
     def _open_loopback_stream(self):
         if not self._loopback_device:
             return
@@ -453,6 +460,7 @@ class AudioCapture:
         except Exception as e:
             self._loopback_stream = None
             log(f"loopback stream OPEN FAILED: device={self._loopback_device.get('name')!r}: {e}")
+        return self._loopback_stream
 
     def _open_mic_stream(self):
         if not self._mic_device:
@@ -474,6 +482,7 @@ class AudioCapture:
         except Exception as e:
             self._mic_stream = None
             log(f"mic stream OPEN FAILED: device={self._mic_device.get('name')!r}: {e}")
+        return self._mic_stream
 
     @staticmethod
     def _stream_alive(stream):
@@ -484,49 +493,57 @@ class AudioCapture:
         except Exception:
             return False
 
-    def _heal_dead_streams(self, gen):
-        """Rescue a capture stream that FAILED to open or has STOPPED. Retries
-        a failed (re)open on later ticks — WASAPI can throw a transient host
-        error (-9999) right after a close, so one retry usually succeeds.
+    def heal(self):
+        """One health tick, on the tk thread every 2 s (from
+        FFmpegCapture._check_health): reopen a stream that FAILED to open or
+        has STOPPED, after sleep/resume or a driver reset. It used to be a
+        thread that gave up 9 s after start(), and could not have reopened
+        anything anyway (see the comment above _open_loopback_stream).
 
-        It deliberately does NOT close a stream that is open and active merely
-        because frames==0: WASAPI loopback legitimately delivers nothing during
-        silence, and save-time reconstruction pads those gaps — closing a
-        healthy-but-silent stream can hit that host error and leave it dead
-        (observed). Health is judged by `is_active()`, not frame count. `gen`
-        makes a stale heal thread from a superseded start() cycle exit cleanly."""
-        max_attempts = 6
-        for _ in range(max_attempts):
-            time.sleep(1.5)
-            if not self._running or gen != self._heal_gen:
-                return
+        A stream that is open and active is never reopened merely because
+        frames==0: WASAPI loopback legitimately delivers nothing during
+        silence, and save-time reconstruction pads those gaps."""
+        if not self._running:
+            return
+        self._loopback_stream = self._heal_one(
+            "loopback", self._loopback_device, self._loopback_stream,
+            self._loopback_frames, self._open_loopback_stream)
+        self._mic_stream = self._heal_one(
+            "mic", self._mic_device, self._mic_stream,
+            self._mic_frames, self._open_mic_stream)
 
-            if self._loopback_device is not None and not self._stream_alive(self._loopback_stream):
-                log(f"loopback stream not alive (frames={self._loopback_frames}), reopening")
-                if self._loopback_stream is not None:
-                    try:
-                        self._loopback_stream.stop_stream()
-                        self._loopback_stream.close()
-                    except Exception:
-                        pass
-                    self._loopback_stream = None
-                self._open_loopback_stream()
-
-            if self._mic_device is not None and not self._stream_alive(self._mic_stream):
-                log(f"mic stream not alive (frames={self._mic_frames}), reopening")
-                if self._mic_stream is not None:
-                    try:
-                        self._mic_stream.stop_stream()
-                        self._mic_stream.close()
-                    except Exception:
-                        pass
-                    self._mic_stream = None
-                self._open_mic_stream()
-
-            lb_done = self._loopback_device is None or self._stream_alive(self._loopback_stream)
-            mic_done = self._mic_device is None or self._stream_alive(self._mic_stream)
-            if lb_done and mic_done:
-                return
+    def _heal_one(self, kind, device, stream, frames, reopen):
+        """Returns the stream to keep. self._retry[kind] is [ticks left to
+        wait, reopens so far]: the wait doubles with every reopen, and after
+        HEAL_MAX_REOPENS the stream is left alone until a device change or a
+        restart. So a device that stays gone, or one that opens and dies at
+        once, can neither flood the capped log nor be reopened every tick.
+        Only a stream that delivers resets it."""
+        retry = self._retry[kind]
+        alive = self._stream_alive(stream)
+        if device is None or (alive and frames):
+            retry[:] = [0, 0]
+            return stream
+        if alive:                        # open, nothing delivered yet: silence
+            return stream
+        if retry[0]:
+            retry[0] -= 1
+            return stream
+        if retry[1] >= HEAL_MAX_REOPENS:
+            if retry[1] == HEAL_MAX_REOPENS:
+                log(f"{kind} stream still dead after {retry[1]} reopens, "
+                    f"left alone until a device change or restart")
+                retry[1] += 1
+            return stream
+        log(f"{kind} stream not alive (frames={frames}), reopening")
+        if stream is not None:
+            try:
+                stream.close()           # aborts it first if it still runs
+            except Exception:
+                pass
+        retry[1] += 1
+        retry[0] = 2 ** retry[1] - 1
+        return reopen()
 
     def start(self):
         if self._running:
@@ -537,21 +554,11 @@ class AudioCapture:
         with self._mic_lock:
             self._mic_chunks.clear()
             self._mic_bytes = 0
+        self._retry = {"loopback": [0, 0], "mic": [0, 0]}
         self._running = True
-
+        # Running even if neither opens: heal() keeps trying them.
         self._open_loopback_stream()
         self._open_mic_stream()
-
-        if not self._loopback_stream and not self._mic_stream:
-            self._running = False
-            return
-
-        self._heal_gen += 1
-        threading.Thread(
-            target=self._heal_dead_streams,
-            args=(self._heal_gen,),
-            daemon=True,
-        ).start()
 
     def stop(self):
         self._running = False
@@ -1430,11 +1437,13 @@ class FFmpegCapture:
             a = self.audio
             with a._loopback_lock:
                 lb_chunks, lb_bytes = len(a._loopback_chunks), a._loopback_bytes
+                # Silence or a stall (alive, newest chunk old) vs a stream that died.
+                lb_age = f"{time.time() - a._loopback_chunks[-1][0]:.1f}s" if lb_chunks else "none"
             buf_span = lb_bytes / (a._rate * a._channels * a._sample_width)
             log(f"[{concat_id}] loopback: rate={a._rate} "
                 f"stream_alive={a._stream_alive(a._loopback_stream)} "
                 f"frames_received={a._loopback_frames} chunks={lb_chunks} "
-                f"buf_bytes={lb_bytes} buf_span={buf_span:.3f}s "
+                f"buf_bytes={lb_bytes} buf_span={buf_span:.3f}s newest_age={lb_age} "
                 f"status_flags={a._loopback_status_flags}")
             ok = self.audio.save_wav(loopback_wav, t_end, audio_duration)
             log(f"[{concat_id}] save_wav(loopback) ok={ok} duration={audio_duration:.3f}s")
@@ -1442,11 +1451,12 @@ class FFmpegCapture:
             a = self.audio
             with a._mic_lock:
                 mic_chunks, mic_bytes = len(a._mic_chunks), a._mic_bytes
+                mic_age = f"{time.time() - a._mic_chunks[-1][0]:.1f}s" if mic_chunks else "none"
             buf_span = mic_bytes / (a._mic_rate * a._mic_channels * a._sample_width)
             log(f"[{concat_id}] mic: rate={a._mic_rate} "
                 f"stream_alive={a._stream_alive(a._mic_stream)} "
                 f"frames_received={a._mic_frames} chunks={mic_chunks} "
-                f"buf_bytes={mic_bytes} buf_span={buf_span:.3f}s "
+                f"buf_bytes={mic_bytes} buf_span={buf_span:.3f}s newest_age={mic_age} "
                 f"status_flags={a._mic_status_flags}")
             ok = self.audio.save_mic_wav(mic_wav, t_end, audio_duration)
             log(f"[{concat_id}] save_mic_wav ok={ok} duration={audio_duration:.3f}s")
@@ -1606,6 +1616,11 @@ class FFmpegCapture:
             self.root.after(1000, self.start)
             return
         self._poll_id = self.root.after(2000, self._check_health)
+        if self.audio:
+            try:                 # rescheduled first: a failing heal must not end the chain
+                self.audio.heal()
+            except Exception:
+                log(f"audio heal failed:\n{traceback.format_exc()}")
 
     def cleanup(self):
         self.stop()
@@ -2092,8 +2107,7 @@ class SettingsWindow:
         freeze the block for good in a windowed .pyw with no console. Carries a
         generation token because reopening Settings inside the tick leaves
         self.win pointing at a live window again — the old chain would survive
-        that check and poll forever alongside the new one. Same guard as the
-        audio _heal_gen.
+        that check and poll forever alongside the new one.
 
         It deliberately does NOT redraw the strip: that depends only on
         buffer_var, which no timer can change."""

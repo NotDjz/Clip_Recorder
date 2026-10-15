@@ -1008,6 +1008,129 @@ def test_capture_feeds_its_clock_through_a_roomy_pipe():
     assert sizes and sizes[0] >= 1 << 20, f"stderr pipe of {sizes} bytes, want at least 1 MB"
 
 
+class FakeStream:
+    def __init__(self):
+        self.active, self.closed = True, False
+
+    def is_active(self):
+        return self.active
+
+    def stop_stream(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+def make_audio():
+    a = cr.AudioCapture.__new__(cr.AudioCapture)   # skip __init__: no device probing
+    a._loopback_device, a._mic_device = {"name": "lb"}, None
+    a._loopback_stream, a._mic_stream = FakeStream(), None
+    a._loopback_frames, a._mic_frames = 1000, 0
+    a._running = True
+    a._retry = {"loopback": [0, 0], "mic": [0, 0]}
+    return a
+
+
+def test_audio_heal_reopens_a_stream_that_dies_late():
+    """The audio heal used to be a thread that stopped ~9 s after start(): a
+    loopback that died hours in (sleep/resume, a driver reset) stayed dead,
+    and 5 of 70 saves in one real log lost the game audio. heal() runs on
+    every health tick, and never reopens a stream that is open, even one
+    that has delivered nothing yet (silence)."""
+    a = make_audio()
+    a._mic_device, a._mic_stream = {"name": "mic"}, FakeStream()   # open, 0 frames
+    first, mic, reopened = a._loopback_stream, a._mic_stream, []
+
+    def reopen():
+        reopened.append("loopback")
+        return FakeStream()
+
+    a._open_loopback_stream = reopen
+    a._open_mic_stream = lambda: reopened.append("mic")
+    for n in range(1, 15):
+        if n == 10:                      # well past the old 6 x 1.5 s window
+            first.active = False
+        a.heal()
+    assert reopened == ["loopback"], f"reopened {reopened}, expected the dead loopback once"
+    assert first.closed and not mic.closed and a._loopback_stream is not first, \
+        "an open stream was closed, or the dead one was kept"
+
+
+def test_audio_heal_backs_off_then_leaves_a_gone_device_alone():
+    """A device that stays gone, or opens and dies at once, is reopened 2, 4,
+    8 ... ticks apart and then left alone: it can neither flood the capped log
+    nor churn every tick. And it never delays the other stream, as one shared
+    wait once let a gone mic hold a dead loopback back by up to a minute."""
+    a = make_audio()
+    a._mic_device = {"name": "mic"}
+    first, now, mic_tries, lb_reopened = a._loopback_stream, [0], [], []
+
+    def flap():                          # opens, but is dead by the next tick
+        mic_tries.append(now[0])
+        s = FakeStream()
+        s.active = False
+        return s
+
+    def reopen():
+        lb_reopened.append(now[0])
+        return FakeStream()
+
+    a._open_mic_stream, a._open_loopback_stream = flap, reopen
+    for n in range(1, 301):
+        now[0] = n
+        if n == 50:
+            first.active = False
+        a.heal()
+    gaps = [later - earlier for earlier, later in zip(mic_tries, mic_tries[1:])]
+    assert gaps == [2, 4, 8, 16, 32], f"ticks between mic reopens: {gaps}"
+    assert lb_reopened == [50], f"the dead loopback was reopened at ticks {lb_reopened}, not at once"
+
+
+def test_audio_start_keeps_running_when_nothing_opens():
+    """A first open can fail (sign-in, right after a device change). start()
+    used to give up then, and nothing ever retried: heal() now does. It opens
+    on the calling thread, never a worker: from a thread without COM, WASAPI
+    failed every open with -9999."""
+    a = make_audio()
+    a._running, a._loopback_stream = False, None
+    a._loopback_lock, a._mic_lock = threading.Lock(), threading.Lock()
+    a._loopback_chunks, a._mic_chunks = [], []
+    a._open_loopback_stream = a._open_mic_stream = lambda: None
+
+    def no_thread(*_, **__):
+        raise AssertionError("AudioCapture.start() spawned a thread")
+
+    real_thread = cr.threading.Thread
+    cr.threading.Thread = no_thread
+    try:
+        a.start()
+    finally:
+        cr.threading.Thread = real_thread
+    assert a._running, "start() gave up when no stream opened, and nothing retries it"
+
+
+def test_health_check_heals_audio_and_survives_a_failing_heal():
+    """_check_health is the tk thread's 2 s tick, and the tk thread is the
+    one with COM. It reschedules before healing, so one failing heal cannot
+    end the chain that also restarts a dead ffmpeg."""
+    calls = []
+
+    class Audio:
+        def heal(self):
+            calls.append("heal")
+            raise RuntimeError("boom")
+
+    cap = make_capture(audio=Audio())
+    cap.proc = FakeProc()
+    try:
+        cap._check_health()
+    finally:
+        shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    assert calls == ["heal"], "the health tick does not heal the audio"
+    assert cap._poll_id is not None, "a failing heal ended the health chain"
+
+
 def test_ffmpeg_download_refuses_an_unpinned_binary():
     """ffmpeg.exe ships inside the installer, the only release asset. A download
     that does not hash to the pinned build must never reach the disk, or one
