@@ -8,7 +8,9 @@ import zipfile
 
 # Pinned, never "latest": the exact build every release has shipped. The hash
 # is of ffmpeg.exe itself, so a swapped or tampered download can never reach
-# the installer. Bump the URL and the hash together.
+# the installer. Bump the URL and the hash together, then check that a save
+# logs anchor=capture: the capture clock is parsed from -debug_ts's text, which
+# a new ffmpeg may reword, and the clip would quietly fall back to mtimes.
 URL = "https://github.com/GyanD/codexffmpeg/releases/download/8.1/ffmpeg-8.1-full_build.zip"
 FFMPEG_SHA256 = "d1e2a156261ecc675081943197a85f08f2868784a0af499171ede89353edad31"
 

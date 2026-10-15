@@ -10,6 +10,7 @@ import collections
 import io
 import json
 import math
+import msvcrt
 import os
 import shutil
 import struct
@@ -23,6 +24,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, ttk
 import uuid
 import winsound
+import _winapi       # CreatePipe with a size: os.pipe and Popen cannot ask for one
 import ctypes
 import ctypes.wintypes as wt
 import wave
@@ -200,6 +202,9 @@ SEGMENT_DURATION = 1
 # Each capture records its ffmpeg's PID beside its segments so the next launch
 # can clean up after a crash — see _kill_orphan_ffmpeg().
 FFMPEG_PID_FILE = "ffmpeg.pid"
+# ffmpeg lists every closed segment's start and end here, on the capture clock's
+# timeline (see _read_capture_clock): what save_replay anchors the clip on.
+SEGMENT_LIST_FILE = "segments.csv"
 # Temp-dir prefix for a capture's segments. The writer (mkdtemp) and the crash
 # scanner in main() are the two halves of one contract, ~1000 lines apart:
 # change it in only one and orphan cleanup silently stops working.
@@ -1044,7 +1049,9 @@ class FFmpegCapture:
         keyframe_interval = fps * SEGMENT_DURATION
         seg_pattern = os.path.join(self.segment_dir, "seg_%03d.ts")
 
-        cmd = [FFMPEG, "-y"]
+        # -debug_ts: each frame's pts as it leaves the capture, read by
+        # _read_capture_clock to tie ffmpeg's clock to ours. ~6% of one core.
+        cmd = [FFMPEG, "-y", "-debug_ts"]
 
         if self.has_ddagrab:
             cmd += [
@@ -1100,17 +1107,31 @@ class FFmpegCapture:
             "-segment_time", str(SEGMENT_DURATION),
             "-segment_wrap", str(segment_wrap),
             "-reset_timestamps", "1",
+            "-segment_list", os.path.join(self.segment_dir, SEGMENT_LIST_FILE),
+            "-segment_list_type", "csv",
+            "-segment_list_size", str(segment_wrap),
             "-segment_format", "mpegts",
             seg_pattern,
         ]
 
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=0x08000000,
-        )
+        # ffmpeg stalls, capture included, whenever its stderr pipe is full, and
+        # -debug_ts writes ~1.5 KB a frame: Popen's 4 KB pipe left a busy reader
+        # ~11 ms at 240 fps. 1 MB is ~2.8 s.
+        r, w = _winapi.CreatePipe(None, 1 << 20)
+        pipe = open(msvcrt.open_osfhandle(r, os.O_RDONLY), "rb")
+        w = msvcrt.open_osfhandle(w, 0)
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=w,
+                creationflags=0x08000000,
+            )
+        finally:
+            os.close(w)     # ffmpeg has its own copy; ours would hide EOF forever
+        threading.Thread(target=self._read_capture_clock, args=(self.proc, pipe),
+                         daemon=True).start()
         # Record the PID so a later launch can clean this up if we are killed
         # before stop() runs (see _kill_orphan_ffmpeg).
         try:
@@ -1118,6 +1139,57 @@ class FFmpegCapture:
                 f.write(str(self.proc.pid))
         except Exception:
             pass
+
+    def _read_capture_clock(self, proc, pipe):
+        """Tie ffmpeg's capture clock to time.time(), as proc.capture_t0: on the
+        process itself, so a replaced ffmpeg's reader cannot touch the current
+        one. A -debug_ts 'demuxer+ffmpeg' line is printed as its frame leaves
+        the capture and can only arrive late, never early, so min(arrival - pts)
+        is the clock's zero, to ~0.1 ms in practice. The min starts afresh every
+        10 s: Windows Time slews and steps time.time() against the QPC behind
+        ddagrab's pts, and a min kept forever could never follow it forward.
+
+        Must drain the pipe to EOF, or ffmpeg blocks on it."""
+        best = window_end = None
+        try:
+            for raw in pipe:
+                if b"demuxer+ffmpeg ->" not in raw:
+                    continue
+                now = time.time()
+                try:
+                    t0 = now - float(raw.partition(b"pkt_pts_time:")[2].split()[0])
+                except (ValueError, IndexError):
+                    continue
+                if best is None or t0 < best:
+                    best = t0
+                if window_end is None:
+                    window_end = now + 1             # a first estimate after 1 s
+                elif now >= window_end:
+                    proc.capture_t0 = best
+                    best, window_end = None, now + 10
+        except OSError:
+            pass                                     # the pipe breaks as ffmpeg exits
+
+    def _segment_capture_times(self):
+        """{segment name: when its first frame was captured, in time.time()},
+        from ffmpeg's segment list and the capture clock. Empty until both
+        exist. ffmpeg rewrites the list as a .tmp renamed over it, and a rename
+        that meets our open (or an antivirus's) fails silently: the old rows
+        stay, including one for a name since reused. save_replay screens those
+        out against mtimes."""
+        t0 = getattr(self.proc, "capture_t0", None)
+        if t0 is None:
+            return {}
+        try:
+            with open(os.path.join(self.segment_dir, SEGMENT_LIST_FILE),
+                      encoding="utf-8") as f:
+                # With B-frames these starts sit 3 frames past the demuxer's pts
+                # (1.0125 s at 240 fps). Subtracting that looks right and measured
+                # wrong: A/B at 120 fps, +10 ms as is, +40 ms corrected.
+                return {name: t0 + float(start) for name, start, *_ in
+                        (line.split(",") for line in f if line.strip())}
+        except (OSError, ValueError):
+            return {}
 
     def _stop_ffmpeg(self):
         if self.proc and self.proc.poll() is None:
@@ -1141,8 +1213,10 @@ class FFmpegCapture:
         # concurrent save_replay._run() owns — snap_*.ts / concat_*.txt / *.wav /
         # video_*.mp4 — which it is actively concatenating/muxing and cleans up
         # itself; deleting those mid-flight would corrupt or fail that save.
+        # The segment list goes too: its names come back with the next
+        # capture's files, and its times belong to the previous capture clock.
         for f in os.listdir(self.segment_dir):
-            if not (f.startswith("seg_") and f.endswith(".ts")):
+            if not (f.startswith("seg_") and f.endswith(".ts")) and f != SEGMENT_LIST_FILE:
                 continue
             try:
                 os.remove(os.path.join(self.segment_dir, f))
@@ -1254,47 +1328,46 @@ class FFmpegCapture:
             _fail("too_soon")
             return
 
-        # Select whole segments only, walking backward until their real (mtime-based)
-        # combined span covers replay_secs. Every segment boundary is already a real
+        # Select whole segments only, walking backward until their real (capture-time,
+        # else mtime) combined span covers replay_secs. Every segment boundary is already a real
         # keyframe boundary, so no mid-segment seek is ever needed — this avoids the
         # nominal-vs-real keyframe grid mismatch that a fractional -ss seek runs into
         # once real per-segment duration drifts from the nominal SEGMENT_DURATION
         # (plausible whenever delivered capture rate dips under load, worse at high
         # FPS and over longer buffers since the drift compounds per segment).
         # The window must start where the OLDEST SELECTED segment *opens*, since
-        # that segment's content is included. A segment opens when the previous
-        # one closes, so in the normal path the anchor is the mtime of the
-        # segment just before the selection (`complete[n - count - 1]`).
+        # that segment's content is included.
         n = len(complete)
-        count = 1
-        total_duration = None
-        while count <= n - 1:
-            anchor_mtime = complete[n - count - 1][1]
-            candidate_duration = save_time - anchor_mtime
-            if candidate_duration >= replay_secs:
-                total_duration = candidate_duration
+        times = self._segment_capture_times()
+
+        def mtime_open(i):
+            # A segment opens when the previous one closes. With no earlier
+            # segment (just after a start/restart), estimate it as its own mtime
+            # minus one segment: using its mtime directly anchored the audio one
+            # whole segment late (1 s now; 5 s with 5 s segments).
+            return complete[i - 1][1] if i > 0 else complete[0][1] - SEGMENT_DURATION
+
+        def opened(i):
+            # When it was CAPTURED, if ffmpeg's list and clock say so: mtimes
+            # are when it was written, ~130 ms later at 240 fps. A listed time
+            # over two segments before the file's mtime is a stale row.
+            name, mtime = complete[i]
+            t = times.get(name)
+            return t if t is not None and t > mtime - 2 * SEGMENT_DURATION else mtime_open(i)
+
+        for count in range(1, n + 1):
+            total_duration = save_time - opened(n - count)
+            if total_duration >= replay_secs:
                 break
-            count += 1
-        else:
-            # Not enough history yet (just after a start/restart): everything is
-            # selected, so there is no earlier segment to anchor on. Estimate the
-            # oldest segment's OPEN time as its mtime minus one segment. Using its
-            # mtime directly — as this did — anchors the audio one whole segment
-            # late, i.e. exactly SEGMENT_DURATION of A/V offset on any save made
-            # before the buffer has refilled (1s now; it was 5s with 5s segments).
-            count = n
-            total_duration = save_time - (complete[0][1] - SEGMENT_DURATION)
+        oldest = n - count
+        mtime_lag = mtime_open(oldest) - opened(oldest)
+        anchor = "capture" if mtime_lag else "mtime"     # exactly 0 when it fell back
 
         selected = complete[-count:]
 
-        if not selected:
-            log(f"[{concat_id}] ABORT: selection produced empty list")
-            _fail("error")
-            return
-
         log(f"[{concat_id}] selected {len(selected)}/{n} segments, total_duration={total_duration:.3f}s "
             f"(requested {replay_secs}s), avg_seg_duration={total_duration / max(len(selected), 1):.3f}s "
-            f"(nominal {SEGMENT_DURATION}s)")
+            f"(nominal {SEGMENT_DURATION}s), anchor={anchor} mtime_lag={mtime_lag * 1000:+.0f}ms")
 
         # Snapshot every selected segment to a uniquely-named copy immediately —
         # the live capture FFmpeg process keeps running and, per -segment_wrap,

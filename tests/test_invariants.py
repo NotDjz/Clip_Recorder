@@ -127,6 +127,7 @@ class Recorder:
 
     def __init__(self, fail_on=None, timeout_on=None):
         self.popen_cmds = []
+        self.popen_kwargs = []
         self.run_cmds = []
         self.concat_lists = []
         self.concat_marks = []
@@ -139,6 +140,7 @@ class Recorder:
 
         def fake_popen(cmd, *a, **k):
             rec.popen_cmds.append(cmd)
+            rec.popen_kwargs.append(k)
             return FakeProc()
 
         def fake_run(cmd, *a, **k):
@@ -855,9 +857,12 @@ def test_a_failed_encode_reports_instead_of_going_quiet():
 def test_a_restart_never_mixes_two_captures():
     """_check_health() restarts a dead ffmpeg through start(). Its segments,
     the last one cut mid-write, must not survive into the new capture: a save
-    would select both, and the mtime span would include the restart gap."""
+    would select both, and the mtime span would include the restart gap. Nor
+    its segment list, whose times belong to the old capture clock."""
     cap = make_capture()
-    old = seed_segments(cap, 5)
+    old = seed_segments(cap, 5) + [cr.SEGMENT_LIST_FILE]
+    with open(os.path.join(cap.segment_dir, cr.SEGMENT_LIST_FILE), "w") as f:
+        f.write("seg_000.ts,0.000000,1.000000\n")
     rec = Recorder(); rec.install()
     try:
         cap.start()                      # what _check_health schedules
@@ -888,6 +893,119 @@ def test_a_failed_mix_falls_back_to_the_game_audio():
         audio_in = os.path.basename(cmd[cmd.index("-i", cmd.index("-i") + 1) + 1])
         assert audio_in.startswith("loopback_"), \
             f"after a failed mix ({how}) the mux used {audio_in}, not the game audio"
+
+
+def test_the_clip_is_anchored_on_capture_time_not_write_time():
+    """A segment is written ~130 ms after it is captured at 240 fps (45 ms at
+    60). Anchoring the clip on mtimes put the audio that far ahead of the
+    picture, measured against NVIDIA Instant Replay. The window starts where
+    the oldest selected segment was CAPTURED, its listed time used as is at
+    every fps: taking out the 3 frames B-frames add to it measured worse."""
+    for fps in (60, 240):
+        audio = FakeAudio()
+        cap = make_capture(fps=fps, buffer_seconds=5, audio=audio)
+        lag, t0 = 0.130, 1000.0
+        rec = Recorder(); rec.install()
+        try:
+            cap._start_ffmpeg()
+            names = seed_segments(cap, 8)
+            mtimes = {n: os.path.getmtime(os.path.join(cap.segment_dir, n)) for n in names}
+            cap.proc.capture_t0 = t0
+            with open(os.path.join(cap.segment_dir, cr.SEGMENT_LIST_FILE), "w") as f:
+                for n in names[:-1]:                 # ffmpeg never lists the open one
+                    start = mtimes[n] - lag - cr.SEGMENT_DURATION - t0
+                    f.write(f"{n},{start:.6f},{start + cr.SEGMENT_DURATION:.6f}\n")
+            cap.save_replay()
+        finally:
+            rec.restore()
+            shutil.rmtree(cap.segment_dir, ignore_errors=True)
+        oldest = f"seg_{int(rec.concat_marks[0][0][3:]):03d}.ts"
+        _, t_end, duration = audio.save_calls[0]
+        captured_open = mtimes[oldest] - lag - cr.SEGMENT_DURATION
+        assert abs((t_end - duration) - captured_open) < 0.001, \
+            f"at {fps} fps the audio window opens {((t_end - duration) - captured_open) * 1000:+.1f} ms " \
+            f"away from when the oldest segment was captured"
+
+
+def test_a_stale_list_row_never_anchors_the_clip():
+    """ffmpeg replaces its segment list by renaming a .tmp over it, and a rename
+    that meets a reader fails silently: the old rows stay, for names since
+    reused, a whole wrap earlier. Trusted, one turned a save into a single
+    segment under a buffer-long audio window."""
+    audio = FakeAudio()
+    cap = make_capture(buffer_seconds=5, audio=audio)
+    rec = Recorder(); rec.install()
+    try:
+        cap._start_ffmpeg()
+        names = seed_segments(cap, 8)
+        cap.proc.capture_t0 = 0.0
+        with open(os.path.join(cap.segment_dir, cr.SEGMENT_LIST_FILE), "w") as f:
+            for n in names[:-1]:
+                start = os.path.getmtime(os.path.join(cap.segment_dir, n)) - 9.0   # a wrap ago
+                f.write(f"{n},{start:.6f},{start + 1:.6f}\n")
+        cap.save_replay()
+    finally:
+        rec.restore()
+        shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    _, _, duration = audio.save_calls[0]
+    picked = len(rec.concat_marks[0])
+    assert picked > 1 and duration < 5 + 2 * cr.SEGMENT_DURATION, \
+        f"a stale row anchored the clip: {picked} segment(s) under {duration:.1f} s of audio"
+
+
+def test_the_capture_clock_keeps_the_earliest_arrival():
+    """The anchor is min(arrival - pts) over ffmpeg's -debug_ts capture lines:
+    a line can only arrive late, never early. The min starts afresh every
+    window, so it follows time.time() when Windows Time steps it forward."""
+    line = (b"[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 "
+            b"type:video pkt_pts:0 pkt_pts_time:%.3f pkt_dts:0\n")
+    feed = [(100.05, 0.0), (101.02, 1.0), (101.80, 1.5),   # arrival - pts: .05 .02 .30
+            (112.60, 12.0)]                                # a 0.58 s step forward
+    proc, published = FakeProc(), []
+
+    def pipe():
+        for _, pts in feed:
+            yield b"[out#0] muxer <- pkt_pts_time:9.0 must be ignored\n"
+            yield line % pts
+            published.append(getattr(proc, "capture_t0", None))
+
+    arrivals = iter(now for now, _ in feed)
+    real_time = cr.time.time
+    cr.time.time = lambda: next(arrivals)
+    try:
+        cr.FFmpegCapture.__new__(cr.FFmpegCapture)._read_capture_clock(proc, pipe())
+    finally:
+        cr.time.time = real_time
+    assert published[:2] == [None, None], f"published {published[:2]} before the first window closed"
+    assert abs(published[2] - 100.02) < 1e-9, f"first window gave {published[2]}, expected its minimum 100.02"
+    assert abs(published[3] - 100.60) < 1e-9,         f"after the clock stepped forward the anchor stayed at {published[3]}, expected 100.60"
+
+
+def test_capture_feeds_its_clock_through_a_roomy_pipe():
+    """The anchor needs -debug_ts on stderr, read by us, and the segment list.
+    ffmpeg stalls, capture included, whenever that pipe is full, and -debug_ts
+    writes ~1.5 KB a frame: Popen's own 4 KB pipe gave the reader ~11 ms at
+    240 fps."""
+    sizes = []
+    real_create = cr._winapi.CreatePipe
+
+    def create(attrs, size):
+        sizes.append(size)
+        return real_create(attrs, size)
+
+    cap = make_capture(fps=240)
+    rec = Recorder(); rec.install()
+    cr._winapi.CreatePipe = create
+    try:
+        cap._start_ffmpeg()
+    finally:
+        cr._winapi.CreatePipe = real_create
+        rec.restore()
+        shutil.rmtree(cap.segment_dir, ignore_errors=True)
+    cmd, kw = rec.popen_cmds[0], rec.popen_kwargs[0]
+    assert "-debug_ts" in cmd and "-segment_list" in cmd, "the capture no longer produces its clock"
+    assert kw["stderr"] >= 0, f"ffmpeg's stderr is {kw['stderr']}, not our pipe"   # PIPE -1, DEVNULL -3
+    assert sizes and sizes[0] >= 1 << 20, f"stderr pipe of {sizes} bytes, want at least 1 MB"
 
 
 def test_ffmpeg_download_refuses_an_unpinned_binary():
