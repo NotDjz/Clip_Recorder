@@ -1029,6 +1029,10 @@ def make_audio():
     a._loopback_frames, a._mic_frames = 1000, 0
     a._running = True
     a._retry = {"loopback": [0, 0], "mic": [0, 0]}
+    a._configured_loopback = a._configured_mic = ""
+    a._loopback_lock, a._mic_lock = threading.Lock(), threading.Lock()
+    a._loopback_chunks, a._mic_chunks = [], []
+    a._loopback_bytes = a._mic_bytes = 0
     return a
 
 
@@ -1094,8 +1098,6 @@ def test_audio_start_keeps_running_when_nothing_opens():
     failed every open with -9999."""
     a = make_audio()
     a._running, a._loopback_stream = False, None
-    a._loopback_lock, a._mic_lock = threading.Lock(), threading.Lock()
-    a._loopback_chunks, a._mic_chunks = [], []
     a._open_loopback_stream = a._open_mic_stream = lambda: None
 
     def no_thread(*_, **__):
@@ -1108,6 +1110,126 @@ def test_audio_start_keeps_running_when_nothing_opens():
     finally:
         cr.threading.Thread = real_thread
     assert a._running, "start() gave up when no stream opened, and nothing retries it"
+
+
+def test_reload_devices_reenumerates_and_keeps_history():
+    """PortAudio lists devices once per initialisation, reference-counted:
+    a device picked in Settings but plugged in after launch could not be
+    opened. The reload terminates our PyAudio and forgets the old devices
+    before detecting again, on the same object, and keeps the audio history,
+    except on a side whose format changed. A second cleanup never terminates
+    PortAudio again: an extra terminate shuts it under the next PyAudio."""
+    a = make_audio()
+    a._rate = a._mic_rate = 48000
+    a._channels = a._mic_channels = 2
+    a._loopback_chunks, a._mic_chunks = [(1.0, b"lb")], [(1.0, b"mic")]
+    events = []
+
+    class OldPa:
+        def terminate(self):
+            events.append("terminate")
+
+    def detect(rate):
+        def run():
+            stale = a._loopback_device is not None or a._mic_device is not None
+            events.append("detect over stale devices" if stale else "detect")
+            a._pa, a._loopback_device, a._rate = OldPa(), {"name": "lb"}, rate
+        return run
+
+    a._pa, a._detect = OldPa(), detect(48000)
+    a._open_loopback_stream = lambda: events.append("open loopback")
+    a._open_mic_stream = lambda: events.append("open mic")
+    a.reload_devices("Earphones [Loopback]")
+    assert events == ["terminate", "detect", "open loopback", "open mic"], f"reload ran {events}"
+    assert a._configured_loopback == "Earphones [Loopback]" and a._configured_mic == "", \
+        "the device picked in Settings was not the one detected again"
+    assert a._running and a._loopback_chunks and a._mic_chunks, \
+        "the audio history was dropped although no format changed"
+
+    a._detect = detect(44100)                        # the new device runs at 44.1 kHz
+    a.reload_devices()
+    assert not a._loopback_chunks and a._mic_chunks, \
+        "loopback history in the old format was kept, or the mic's was dropped"
+
+    events.clear()
+    a.cleanup()
+    a.cleanup()                                      # main() at exit, after Settings did one
+    assert events.count("terminate") == 1, f"PortAudio terminated {events.count('terminate')} times"
+
+
+def test_device_lists_come_live_from_windows():
+    """Settings' lists came from a PortAudio that cannot see a device plugged
+    in after launch, short of cutting the capture to re-initialise it. They
+    are read from Windows' endpoint registry instead, with PortAudio's own
+    list only as a fallback."""
+    a = make_audio()
+    a._pa = None                                     # PortAudio must not be needed
+    real = cr._active_endpoints
+    cr._active_endpoints = lambda flow: {"Render": ["Earphones (USB)"],
+                                         "Capture": ["Headset mic (USB)"]}[flow]
+    try:
+        live = a.list_devices()
+    finally:
+        cr._active_endpoints = real
+    assert live == (["Earphones (USB) [Loopback]"], ["Headset mic (USB)"]), f"listed {live}"
+
+
+def test_detect_survives_having_no_output():
+    """With no output at all (the only headset unplugged) the default output
+    index is -1: looking it up raised, and the mic was never detected."""
+    class Pa:
+        def get_host_api_info_by_type(self, _):
+            return {"index": 0, "defaultOutputDevice": -1, "defaultInputDevice": 0}
+
+        def get_device_info_by_index(self, i):
+            if i < 0:
+                raise OSError("no device at index -1")
+            return {"index": 0, "name": "Mic", "maxInputChannels": 1,
+                    "defaultSampleRate": 48000, "hostApi": 0}
+
+        def get_device_count(self):
+            return 1
+
+        def get_default_wasapi_loopback(self):
+            raise LookupError("no output")
+
+    a = cr.AudioCapture.__new__(cr.AudioCapture)
+    a._loopback_device = a._mic_device = None
+    a._configured_loopback = a._configured_mic = ""
+    real, real_log = cr.pyaudio.PyAudio, cr.log
+    cr.pyaudio.PyAudio, cr.log = Pa, lambda msg: None
+    try:
+        a._detect()
+    finally:
+        cr.pyaudio.PyAudio, cr.log = real, real_log
+    assert a._mic_device is not None, "with no output, the mic was not detected either"
+
+
+def code_of(fn):
+    """fn's source without its comments: a guard must match code, never a name
+    mentioned nearby (CLAUDE.md)."""
+    import io as _io
+    import textwrap
+    import tokenize
+    src = textwrap.dedent(inspect.getsource(fn))
+    toks = tokenize.generate_tokens(_io.StringIO(src).readline)
+    return "".join(t.string + " " for t in toks if t.type != tokenize.COMMENT)
+
+
+def test_settings_never_pins_auto_and_lists_fresh_devices():
+    """Settings pre-selected the device Auto had picked, so any Save (even an
+    fps change) pinned it in config.json and Auto stopped following the
+    default: how the user's config came to name its speakers. It lists the
+    devices live, and a device change reloads the same AudioCapture: a new one
+    left main()'s reference on the old one, terminated twice at exit."""
+    build, apply_ = code_of(cr.SettingsWindow._build), code_of(cr.SettingsWindow._apply)
+    for key in ("loopback_device", "mic_device"):
+        assert f'value = self . config . get ( "{key}" ) or' in build, \
+            f"the {key} picker pre-selects something else than the config: Save would pin Auto"
+    assert "self . capture . audio . list_devices ( )" in build, \
+        "Settings no longer lists the devices live"
+    assert "reload_devices ( loopback_name , mic_name )" in apply_ and "AudioCapture (" not in apply_, \
+        "a device change builds a new AudioCapture instead of reloading the one main() holds"
 
 
 def test_health_check_heals_audio_and_survives_a_failing_heal():

@@ -23,6 +23,7 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, ttk
 import uuid
+import winreg
 import winsound
 import _winapi       # CreatePipe with a size: os.pipe and Popen cannot ask for one
 import ctypes
@@ -266,6 +267,33 @@ def get_monitors():
 
 # ─── WASAPI Audio Capture ────────────────────────────────────────────────────
 
+MMDEVICES_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio"
+PKEY_DEVICE_DESC = "{a45c254e-df1c-4efd-8020-67d146a850e0},2"
+PKEY_INTERFACE_NAME = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
+
+
+def _active_endpoints(flow):
+    """Names of the active "Render" or "Capture" endpoints, read live from the
+    registry Windows keeps them in. Raises OSError if the key itself is gone."""
+    names = []
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, MMDEVICES_KEY + "\\" + flow) as root:
+        i = 0
+        while True:
+            try:
+                guid = winreg.EnumKey(root, i)
+            except OSError:
+                return names
+            i += 1
+            try:
+                with winreg.OpenKey(root, guid) as dev, \
+                        winreg.OpenKey(root, guid + r"\Properties") as props:
+                    if winreg.QueryValueEx(dev, "DeviceState")[0] == 1:   # ACTIVE
+                        names.append(f"{winreg.QueryValueEx(props, PKEY_DEVICE_DESC)[0]} "
+                                     f"({winreg.QueryValueEx(props, PKEY_INTERFACE_NAME)[0]})")
+            except OSError:
+                continue                 # an endpoint without the names: not listable
+
+
 class AudioCapture:
     """Captures system audio (WASAPI loopback) + microphone into circular buffers."""
 
@@ -329,7 +357,9 @@ class AudioCapture:
             # been read: adopting first would leave the object describing
             # hardware it is not capturing if either lookup raised, and would
             # skip the resolver below because a device is already set.
-            if not self._loopback_device:
+            # -1 with no output at all (the only headset unplugged): looking it
+            # up raised, and the mic below was never detected either.
+            if not self._loopback_device and wasapi["defaultOutputDevice"] >= 0:
                 speakers = self._pa.get_device_info_by_index(
                     wasapi["defaultOutputDevice"])
                 if speakers.get("isLoopbackDevice"):
@@ -384,36 +414,33 @@ class AudioCapture:
         except Exception:
             self._loopback_device = None
 
-    @staticmethod
-    def list_loopback_devices():
-        pa = pyaudio.PyAudio()
-        devices = []
+    def list_devices(self):
+        """(loopback names, mic names) for Settings, read live from Windows'
+        endpoint registry: PortAudio lists devices once per initialisation, so
+        earphones plugged in since launch were missing until a restart, and
+        re-initialising it means cutting the capture. Windows names an endpoint
+        "Description (Interface)", which is PortAudio's WASAPI name exactly,
+        loopbacks with its " [Loopback]" suffix (checked on 6 outputs and 2
+        inputs). PortAudio's own list is the fallback."""
         try:
-            for i in range(pa.get_device_count()):
-                dev = pa.get_device_info_by_index(i)
-                if dev.get("isLoopbackDevice") and dev["maxInputChannels"] > 0:
-                    devices.append(dev["name"])
-        finally:
-            pa.terminate()
-        return devices
-
-    @staticmethod
-    def list_mic_devices():
-        pa = pyaudio.PyAudio()
-        devices = []
+            return ([n + " [Loopback]" for n in _active_endpoints("Render")],
+                    _active_endpoints("Capture"))
+        except OSError as e:
+            log(f"endpoint registry unreadable ({e}), listing PortAudio's devices")
+        loopbacks, mics = [], []
         try:
-            wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-            for i in range(pa.get_device_count()):
-                dev = pa.get_device_info_by_index(i)
-                if (dev["maxInputChannels"] > 0
-                        and not dev.get("isLoopbackDevice")
-                        and dev.get("hostApi") == wasapi["index"]):
-                    devices.append(dev["name"])
+            wasapi = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
+            for i in range(self._pa.get_device_count()):
+                dev = self._pa.get_device_info_by_index(i)
+                if dev["maxInputChannels"] <= 0:
+                    continue
+                if dev.get("isLoopbackDevice"):
+                    loopbacks.append(dev["name"])
+                elif dev.get("hostApi") == wasapi:
+                    mics.append(dev["name"])
         except Exception:
             pass
-        finally:
-            pa.terminate()
-        return devices
+        return loopbacks, mics
 
     @property
     def available(self):
@@ -422,18 +449,6 @@ class AudioCapture:
     @property
     def mic_available(self):
         return self._mic_device is not None
-
-    @property
-    def device_name(self):
-        if self._loopback_device:
-            return self._loopback_device["name"]
-        return None
-
-    @property
-    def mic_name(self):
-        if self._mic_device:
-            return self._mic_device["name"]
-        return None
 
     # Only ever called on the tk thread: it created PyAudio, so it has COM.
     # From a thread without COM, WASAPI fails every open with -9999
@@ -548,17 +563,39 @@ class AudioCapture:
     def start(self):
         if self._running:
             return
-        with self._loopback_lock:
-            self._loopback_chunks.clear()
-            self._loopback_bytes = 0
-        with self._mic_lock:
-            self._mic_chunks.clear()
-            self._mic_bytes = 0
         self._retry = {"loopback": [0, 0], "mic": [0, 0]}
         self._running = True
         # Running even if neither opens: heal() keeps trying them.
         self._open_loopback_stream()
         self._open_mic_stream()
+
+    def reload_devices(self, loopback_name=None, mic_name=None):
+        """Detect the devices again, newly configured ones if given, and carry
+        on capturing: Settings' device change. PortAudio lists devices once per
+        initialisation, and initialisation is reference-counted: while this
+        PyAudio lives, earphones plugged in after launch are invisible.
+        Terminating it and detecting again sees them. The audio history
+        survives, except on a side whose format changed: _render_window cannot
+        mix two."""
+        if loopback_name is not None:
+            self._configured_loopback = loopback_name
+        if mic_name is not None:
+            self._configured_mic = mic_name
+        before = (self._rate, self._channels, self._mic_rate, self._mic_channels)
+        running = self._running
+        self.cleanup()
+        self._loopback_device = self._mic_device = None
+        self._detect()
+        if (self._rate, self._channels) != before[:2]:
+            with self._loopback_lock:
+                self._loopback_chunks.clear()
+                self._loopback_bytes = 0
+        if (self._mic_rate, self._mic_channels) != before[2:]:
+            with self._mic_lock:
+                self._mic_chunks.clear()
+                self._mic_bytes = 0
+        if running:
+            self.start()
 
     def stop(self):
         self._running = False
@@ -692,9 +729,12 @@ class AudioCapture:
 
     def cleanup(self):
         self.stop()
-        if self._pa:
+        # Taken first, so a second cleanup cannot terminate it again: PortAudio
+        # counts terminates, and an extra one shuts it under the next PyAudio.
+        pa, self._pa = self._pa, None
+        if pa:
             try:
-                self._pa.terminate()
+                pa.terminate()
             except Exception:
                 pass
 
@@ -2188,10 +2228,13 @@ class SettingsWindow:
         # mean "empty string in config", i.e. auto-detect. Renaming it silently
         # pins the config to a device literally named "(Auto — system default)".
         af = self._group("Audio")
-        loopback_devices = AudioCapture.list_loopback_devices()
-        current_loopback = self.capture.audio.device_name if self.capture.audio and self.capture.audio.available else ""
+        # Read live at every open, so a device plugged in since launch is there.
+        loopback_devices, mic_devices = (self.capture.audio.list_devices()
+                                         if self.capture.audio else ([], []))
         loopback_choices = ["(Auto — system default)"] + loopback_devices
-        self.loopback_var = tk.StringVar(value=current_loopback or loopback_choices[0])
+        # What the config says, never the device Auto happened to pick: any Save
+        # would write that in and pin it, and Auto would stop following the default.
+        self.loopback_var = tk.StringVar(value=self.config.get("loopback_device") or loopback_choices[0])
         row = self._row(af, "System sound")
         if loopback_devices:
             self._combo(row, self.loopback_var, loopback_choices)
@@ -2199,10 +2242,8 @@ class SettingsWindow:
             tk.Label(row, text="Not available", bg=BG2, fg=FG2, font=FONT_S,
                      anchor="w").pack(side="left", fill="x", expand=True)
 
-        mic_devices = AudioCapture.list_mic_devices()
-        current_mic = self.capture.audio.mic_name if self.capture.audio and self.capture.audio.mic_available else ""
         mic_choices = ["(Auto — system default)"] + mic_devices
-        self.mic_var = tk.StringVar(value=current_mic or mic_choices[0])
+        self.mic_var = tk.StringVar(value=self.config.get("mic_device") or mic_choices[0])
         row = self._row(af, "Microphone")
         if mic_devices:
             self._combo(row, self.mic_var, mic_choices)
@@ -2389,13 +2430,11 @@ class SettingsWindow:
         self.config.update(new)
 
         if audio_changed:
-            self.capture.audio.stop()
-            self.capture.audio = AudioCapture(
-                max_seconds=max(BUFFER_OPTIONS),
-                loopback_name=loopback_name,
-                mic_name=mic_name,
-            )
-            self.capture.audio.start()
+            # The same object, its devices detected again. A new AudioCapture
+            # left main()'s reference on the old one, whose cleanup at exit then
+            # terminated PortAudio under the new one; and the side whose format
+            # did not change keeps its history.
+            self.capture.audio.reload_devices(loopback_name, mic_name)
 
         if video_changed:
             self.capture.restart_video()
