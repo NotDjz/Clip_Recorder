@@ -173,6 +173,14 @@ fn prepare(
     })
 }
 
+/// Who wrote the output and whether it is a clip. Two saves in the same second share the output
+/// name: only the run whose ffmpeg actually ran on it (Some) may judge or delete it. With audio,
+/// the mux writes it, and only after a successful concat; without, the concat writes it.
+fn verdict(has_audio: bool, concat: Option<bool>, mux: Option<bool>) -> (bool, bool) {
+    let writer = if has_audio { mux } else { concat };
+    (writer.is_some(), writer == Some(true))
+}
+
 /// The audio track to mux. Both sides: the mix, but a failed or timed-out mix keeps the game
 /// sound rather than losing the clip, and a mixed WAV that is not there is never trusted.
 fn pick_audio(loopback: &Path, mixed: &Path, mix_ok: bool, mixed_exists: bool) -> PathBuf {
@@ -197,13 +205,8 @@ impl Job {
         };
         // Two saves in the same second share the output name: only the run whose ffmpeg
         // actually wrote it may judge or delete it.
-        let mut wrote_output = false;
-        let mut output_ok = false;
         let concat = self.ffmpeg("concat", &ffmpeg_cmd::concat_args(&self.list, self.duration, &video));
-        if !has_audio {
-            wrote_output = concat.is_some();
-            output_ok = concat == Some(true);
-        }
+        let mut mux = None;
         let mut temp = vec![self.list.clone()];
         if has_audio && concat == Some(true) {
             let audio = match (&self.loopback, &self.mic) {
@@ -216,10 +219,9 @@ impl Job {
                 (Some(only), None) | (None, Some(only)) => only.clone(),
                 (None, None) => unreachable!(),
             };
-            let mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output));
-            wrote_output = mux.is_some();
-            output_ok = mux == Some(true);
+            mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output));
         }
+        let (wrote_output, output_ok) = verdict(has_audio, concat, mux);
         let saved = wrote_output && output_ok && std::fs::metadata(&self.output).is_ok_and(|m| m.len() > 0);
         temp.extend(self.snapshots.iter().cloned());
         temp.extend(self.loopback.iter().chain(self.mic.iter()).cloned());
@@ -361,6 +363,46 @@ mod tests {
         )
     }
 
+    /// Only seg_*.ts files are segments: a stray file never becomes part of a clip, and an
+    /// output folder that cannot be made is an error.
+    #[test]
+    fn only_segment_files_are_snapshotted_and_an_unwritable_folder_is_an_error() {
+        let dir = temp("names");
+        let t = now();
+        segments(&dir, t);
+        for stray in ["seg_000.txt", "notes.ts", "x_seg_001.ts"] {
+            std::fs::write(dir.join(stray), "stray").unwrap();
+            let old = UNIX_EPOCH + Duration::from_secs_f64(t - 2.5);
+            std::fs::File::options()
+                .write(true)
+                .open(dir.join(stray))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let job = try_prepare(&dir, t - 60.0, t, &mut no_audio()).unwrap();
+        for snap in &job.snapshots {
+            assert_ne!(std::fs::read_to_string(snap).unwrap(), "stray");
+        }
+        std::fs::write(dir.join("blocked"), "a file where the folder should be").unwrap();
+        let blocked = Source {
+            dir: &dir,
+            clock_zero: None,
+            started_at: t - 60.0,
+        };
+        let result = prepare(
+            &blocked,
+            &mut no_audio(),
+            Path::new("ffmpeg.exe"),
+            3,
+            &dir.join("blocked").join("sub"),
+            t,
+            "u",
+        );
+        assert!(matches!(result, Err(GiveUp::Error)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_segment_folder_that_cannot_be_listed_is_an_error() {
         let missing = std::env::temp_dir().join(format!("crtest-save-missing-{}", crate::winutil::random_hex()));
@@ -439,6 +481,23 @@ mod tests {
             .collect();
         assert!(left.iter().all(|n| !n.starts_with("snap_")), "{left:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_the_ffmpeg_that_wrote_the_output_judges_it() {
+        // No audio: the concat writes the clip.
+        assert_eq!(verdict(false, Some(true), None), (true, true));
+        assert_eq!(verdict(false, Some(false), None), (true, false));
+        assert_eq!(
+            verdict(false, None, None),
+            (false, false),
+            "never started: wrote nothing"
+        );
+        // With audio: the mux writes it; a failed concat means it never ran.
+        assert_eq!(verdict(true, Some(true), Some(true)), (true, true));
+        assert_eq!(verdict(true, Some(true), Some(false)), (true, false));
+        assert_eq!(verdict(true, Some(false), None), (false, false));
+        assert_eq!(verdict(true, Some(true), None), (false, false));
     }
 
     #[test]

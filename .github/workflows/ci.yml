@@ -102,15 +102,15 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           SHARD: ${{ matrix.shard }}
         run: |
-          $tests = @('--', '--lib', '--bins', '--test', 'source')
+          # Which tests run comes from .cargo/mutants.toml.
           if ($env:EVENT -eq 'schedule' -or $env:EVENT -eq 'workflow_dispatch') {
-            cargo mutants --jobs 2 --shard "$env:SHARD/8" --timeout 300 @tests
+            cargo mutants --jobs 2 --shard "$env:SHARD/8" --timeout 300
           } elseif (-not $env:BASE -or $env:BASE -match '^0+$') {
             Write-Host 'No base commit to diff against: nothing to mutate.'
           } else {
             git diff "$env:BASE" HEAD -- '*.rs' > changes.diff
             if ((Get-Item changes.diff).Length -eq 0) { Write-Host 'No Rust change.'; exit 0 }
-            cargo mutants --jobs 2 --in-diff changes.diff --timeout 300 @tests
+            cargo mutants --jobs 2 --in-diff changes.diff --timeout 300
           }
           exit $LASTEXITCODE
 

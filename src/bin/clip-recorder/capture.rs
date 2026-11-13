@@ -446,8 +446,14 @@ mod tests {
                 writeln!(out, "[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:{i} pkt_pts_time:{} pkt_dts:{i}", i as f64 * 0.05).unwrap();
                 std::thread::sleep(Duration::from_millis(50));
             }
+            // -debug_ts traffic in both directions and the progress line are not last words.
             writeln!(out, "decoder -> ist_index:0:0 type:video frame_pts:1").unwrap();
-            writeln!(out, "Error opening output file: Permission denied").unwrap();
+            writeln!(out, "muxer <- type:video pkt_pts:1").unwrap();
+            writeln!(out, "frame=   10 fps=0.0 q=20.0 size=N/A").unwrap();
+            writeln!(out).unwrap();
+            for i in 0..8 {
+                writeln!(out, "Error {i}").unwrap();
+            }
         });
         let clock = Arc::new(Mutex::new(None));
         let words = Arc::new(Mutex::new(VecDeque::new()));
@@ -456,6 +462,10 @@ mod tests {
         let zero = clock.lock().unwrap().expect("no capture clock published");
         assert!((clock::now() - zero).abs() < 10.0, "zero={zero}");
         let words: Vec<String> = words.lock().unwrap().iter().cloned().collect();
-        assert_eq!(words, ["Error opening output file: Permission denied"]);
+        assert_eq!(
+            words,
+            ["Error 2", "Error 3", "Error 4", "Error 5", "Error 6", "Error 7"],
+            "the last six"
+        );
     }
 }

@@ -69,6 +69,16 @@ pub fn tick(capture_died: bool) -> Tick {
 mod tests {
     use super::*;
 
+    /// Silence after a reopen is not delivery: the backoff carries on if the stream dies again,
+    /// instead of starting over and reopening every tick.
+    #[test]
+    fn silence_after_a_reopen_does_not_reset_the_backoff() {
+        let mut r = Retry::default();
+        assert_eq!(r.decide(true, false, 0), Decision::Reopen);
+        assert_eq!(r.decide(true, true, 0), Decision::Keep, "open and silent");
+        assert_eq!(r.decide(true, false, 0), Decision::Keep, "dead again: still waiting");
+    }
+
     #[test]
     fn audio_heals_even_on_a_tick_that_restarts_the_capture() {
         assert_eq!(

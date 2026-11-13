@@ -500,6 +500,8 @@ mod tests {
         w.set_monitor(1);
         w.set_fps(2);
         w.set_loopback(2);
+        let monitors: Vec<String> = w.get_monitors().iter().map(String::from).collect();
+        assert_eq!(monitors, ["1: 2560×1440  (primary)", "2: 2560×1440"]);
         let new = read(&w, &config);
         assert_eq!(
             (new.monitor, new.fps, new.loopback_device.as_str()),

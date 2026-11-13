@@ -61,6 +61,18 @@ impl Estimator {
 mod tests {
     use super::*;
 
+    /// After the first 1 s window, each window lasts 10 s: a clock published on every line would
+    /// follow each line's scheduling jitter instead of the earliest arrival.
+    #[test]
+    fn later_windows_last_ten_seconds() {
+        let mut e = Estimator::default();
+        assert_eq!(e.observe(100.0, 0.0), None, "opens the first window");
+        assert!(e.observe(101.0, 1.0).is_some(), "the first window closes after 1 s");
+        assert_eq!(e.observe(102.0, 2.0), None, "the next one is still open");
+        assert_eq!(e.observe(110.9, 10.9), None);
+        assert!(e.observe(111.0, 11.0).is_some(), "and closes 10 s after it opened");
+    }
+
     #[test]
     fn only_capture_lines_carry_the_clock() {
         let capture = b"[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:0 pkt_pts_time:1.5 pkt_dts:0";

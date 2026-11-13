@@ -334,8 +334,48 @@ mod tests {
     fn the_breathing_dot_runs_from_the_accent_down_and_back() {
         assert_eq!(breath(0), ACCENT, "the cycle starts lit");
         assert_eq!(breath(PULSE_STEPS), ACCENT);
-        let dimmest = breath(PULSE_STEPS / 2);
-        assert!(dimmest != ACCENT && dimmest != BG, "{dimmest:06X}");
+        // At mid-cycle every channel sits at PULSE_FLOOR of the way from the pill to the accent.
+        let mix = |shift: u32| {
+            let (a, b) = (((ACCENT >> shift) & 0xFF) as f64, ((BG >> shift) & 0xFF) as f64);
+            ((b + (a - b) * PULSE_FLOOR).round() as u32) << shift
+        };
+        assert_eq!(breath(PULSE_STEPS / 2), mix(16) | mix(8) | mix(0));
+        // Dimming on the way down, brightening on the way back.
+        let red = |step| breath(step) >> 16;
+        assert!((1..=PULSE_STEPS / 2).all(|s| red(s) < red(s - 1)));
+        assert!((PULSE_STEPS / 2 + 1..=PULSE_STEPS).all(|s| red(s) > red(s - 1)));
+    }
+
+    #[test]
+    fn the_length_is_dimmed_while_provisional_and_full_once_saved() {
+        assert_eq!(seconds_colour(State::Saving), FG2);
+        assert_eq!(seconds_colour(State::Saved), FG);
+        assert_eq!(seconds_text(Some(30)).as_deref(), Some("30s"));
+        assert_eq!(seconds_text(None), None);
+    }
+
+    /// Top-right of the captured screen, a margin in from both edges, scaled to the DPI.
+    #[test]
+    fn the_banner_sits_in_the_top_right_corner_of_its_screen() {
+        let banner = Banner::new();
+        let screen = Monitor {
+            x: -6000,
+            y: -4000,
+            w: 1920,
+            h: 1080,
+        };
+        banner.show(State::Saved, "Clip saved", Some(30), 2000, screen);
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe { GetWindowRect(banner.hwnd, &mut r) };
+        let margin = MARGIN * unsafe { GetDpiForWindow(banner.hwnd) }.max(96) as i32 / 96;
+        assert_eq!((r.right, r.top), (screen.x + screen.w - margin, screen.y + margin));
+        assert!(r.right - r.left >= MIN_W && r.bottom - r.top >= MIN_H);
+        unsafe { ShowWindow(banner.hwnd, SW_HIDE) };
     }
 
     fn contrast(a: u32, b: u32) -> f64 {
@@ -398,6 +438,7 @@ mod tests {
     #[test]
     fn colorref_is_bgr() {
         assert_eq!(colorref(0x112233), 0x332211);
+        assert_eq!(colorref(0xFF4A3D), 0x3D4AFF);
     }
 
     /// The window must be click-through, never activated, and out of every screen capture

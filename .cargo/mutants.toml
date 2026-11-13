@@ -1,0 +1,42 @@
+# cargo-mutants: every mutant of code the tests can reach must be caught. What is excluded
+# below is either Win32/device glue that only the end-to-end tests (tests/app.rs, a screen, an
+# audio device, a real ffmpeg) or Windows Sandbox can reach, its deciding logic having been
+# moved into tested pure functions, or an equivalent mutant (same behaviour by construction).
+
+# The suites CI runs on every change: unit, GUI, real-process, source-level and the registry.
+additional_cargo_test_args = ["--lib", "--bins", "--test", "source"]
+
+exclude_globs = [
+    # Startup wiring, menu, settings apply: e2e (tests/app.rs). Decisions: settings.rs, heal.rs,
+    # main.rs feedback() (tested in its own module, see exclude_re for the rest).
+    "src/bin/clip-recorder/session.rs",   # WM_ENDSESSION window: e2e quits_when_windows_ends_the_session
+    "src/bin/clip-recorder/tray.rs",      # notification-area icon and menu
+    "src/bin/clip-recorder/monitors.rs",  # EnumDisplayMonitors
+    "src/bin/clip-recorder/folders.rs",   # known-folder API and the folder picker dialog
+    "src/bin/clip-recorder/logging.rs",   # silenced under test
+    "src/bin/clip-recorder/startup.rs",   # HKCU registry I/O; decisions in settings.rs
+    "src/bin/clip-recorder/audio.rs",     # cpal streams need devices; decisions in render.rs, heal.rs, settings.rs
+    "src/bin/clip-recorder/chimes.rs",    # PlaySoundW; the threading rule is checked in tests/source.rs
+]
+
+exclude_re = [
+    # main.rs: everything but feedback(), which its tests cover.
+    "src/bin/clip-recorder/main.rs:.*(replace|in) (main|with_app|App::notify|check_health|on_action|register_hotkey|open_settings|adopt_settings_window|browse_folder|apply_settings|tell|save_clip|on_saved|open|error_box)\\b",
+    # capture.rs: probing and driving a real ffmpeg process.
+    "src/bin/clip-recorder/capture.rs:.*(replace|in) (ffmpeg_path|works|pipeline|Capture::new|Capture::reprobe|Capture::started_at|Capture::clock_zero|Capture::is_running|Capture::stop|Capture::restart_video|Capture::cleanup|Capture::encoder|Capture::grabber)\\b",
+    # save.rs: the UI-thread entry, logging, the ffmpeg runner and the local clip name.
+    "src/bin/clip-recorder/save.rs:.*(replace|in) (start|Job::say|Job::ffmpeg|local_stamp)\\b",
+    # The native window behind Settings (icon, dark caption) and the banner's GDI painting.
+    "src/bin/clip-recorder/settings_window.rs:.*(replace|in) adopt\\b",
+    "src/bin/clip-recorder/banner.rs:.*(replace|in) (paint|measure|font|on_message)\\b",
+    # The real mutex; its name is tested through name_for().
+    "src/bin/clip-recorder/single_instance.rs:.*(replace|in) (acquire|name)\\b",
+    # Job creation's failure branches: the success path is proven by children_are_in_the_job
+    # and a_force_killed_parent_takes_its_children_along.
+    "src/bin/clip-recorder/job.rs:.*in ensure_kill_on_close\\b",
+    # Equivalent: | and ^ agree on flags with no bit in common.
+    "src/bin/clip-recorder/orphans.rs:.*replace \\| with \\^ in kill_orphan",
+    "src/hotkey.rs:.*replace \\| with \\^",
+    # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.
+    "src/ffmpeg_cmd.rs:.*replace \\* with / in capture_args",
+]
