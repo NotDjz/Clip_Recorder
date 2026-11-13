@@ -31,6 +31,12 @@ Rust (version pinned in `rust-toolchain.toml`) and WiX 7.
 
 Every bug fixed so far is listed with the tests that guard it in [tests/regressions.md](tests/regressions.md).
 
+## Acknowledgements
+
+- The Settings window is built with [Slint](https://slint.dev), under the Slint Royalty-free License 2.0; the
+  attribution badge is on the download page.
+- [FFmpeg](https://ffmpeg.org) does the encoding (`ffmpeg.exe`, GPL v3, gyan.dev build), bundled unmodified.
+
 ## License
 
 [MIT](LICENSE)
