@@ -58,13 +58,8 @@ fn works(ffmpeg: &Path, input: &str, encoder: &str) -> bool {
 /// DXGI capture straight into NVENC when both work. ddagrab hands over GPU frames, which x264
 /// cannot read, so without NVENC the capture goes through GDI (an AMD or Intel GPU today).
 fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
-    if works(ffmpeg, "ddagrab=output_idx=0", "h264_nvenc") {
-        (Encoder::Nvenc, Grabber::Ddagrab)
-    } else if works(ffmpeg, "color=c=black:s=256x256:d=1", "h264_nvenc") {
-        (Encoder::Nvenc, Grabber::Gdigrab)
-    } else {
-        (Encoder::X264, Grabber::Gdigrab)
-    }
+    let dda = works(ffmpeg, "ddagrab=output_idx=0", "h264_nvenc");
+    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, "color=c=black:s=256x256:d=1", "h264_nvenc"))
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process
@@ -92,17 +87,16 @@ pub struct Capture {
 impl Capture {
     /// Joins the kill-on-close job first: before any ffmpeg exists, the probes included.
     pub fn new(ffmpeg: PathBuf) -> std::io::Result<Capture> {
+        Capture::new_in(&clip_recorder::paths::segments_root(), ffmpeg)
+    }
+
+    fn new_in(root: &Path, ffmpeg: PathBuf) -> std::io::Result<Capture> {
         crate::job::ensure_kill_on_close();
-        let segment_dir = clip_recorder::paths::segments_root().join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), crate::winutil::random_hex()));
+        let segment_dir = root.join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), crate::winutil::random_hex()));
         std::fs::create_dir_all(&segment_dir)?;
         let (encoder, grabber) = pipeline(&ffmpeg);
         log(&format!("capture: encoder={encoder:?} grabber={grabber:?} dir={}", segment_dir.display()));
         Ok(Capture { ffmpeg, segment_dir, encoder, grabber, running: None, wanted: false, started_at: 0.0 })
-    }
-
-    /// GDI cannot keep up above 60 fps: a 120/240 saved while DXGI worked is capped.
-    fn fps(&self, config: &Config) -> u32 {
-        if self.grabber == Grabber::Gdigrab { config.fps.min(60) } else { config.fps }
     }
 
     /// Probes again when launch settled for less than DXGI + NVENC: at sign-in the driver or
@@ -113,7 +107,7 @@ impl Capture {
             return false;
         }
         let (encoder, grabber) = pipeline(&self.ffmpeg);
-        let better = (encoder, grabber) != (self.encoder, self.grabber) && (encoder == Encoder::Nvenc || grabber == Grabber::Ddagrab);
+        let better = ffmpeg_cmd::better((self.encoder, self.grabber), (encoder, grabber));
         if better {
             log(&format!("capture: pipeline now encoder={encoder:?} grabber={grabber:?}"));
             (self.encoder, self.grabber) = (encoder, grabber);
@@ -169,7 +163,7 @@ impl Capture {
         self.wipe_segments();
         let index = config.monitor.min(screens.len().saturating_sub(1));
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
-            fps: self.fps(config),
+            fps: config.fps,
             buffer_seconds: config.buffer_seconds,
             monitor_index: index,
             monitor: screens[index].rect,
@@ -182,7 +176,7 @@ impl Capture {
                 let pid = running.child.id();
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
-                log(&format!("capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}", crate::job::contains(&running.child), self.fps(config), config.buffer_seconds));
+                log(&format!("capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}", crate::job::contains(&running.child), ffmpeg_cmd::effective_fps(config.fps, self.grabber), config.buffer_seconds));
                 self.running = Some(running);
             }
             Err(e) => {
@@ -242,7 +236,7 @@ impl Capture {
         let Ok(entries) = std::fs::read_dir(&self.segment_dir) else { return };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if (name.starts_with("seg_") && name.ends_with(".ts")) || name == SEGMENT_LIST_FILE {
+            if ffmpeg_cmd::is_capture_file(&name) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -285,5 +279,100 @@ fn read_clock(stderr: std::fs::File, published: Arc<Mutex<Option<f64>>>, last_wo
             words.pop_front();
         }
         words.push_back(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clip_recorder::ffmpeg_cmd::Monitor;
+
+    #[test]
+    fn stderr_gets_a_pipe_large_enough_for_debug_ts() {
+        assert!(STDERR_PIPE_BYTES >= 1 << 20, "a small pipe stalls the capture at 240 fps");
+    }
+
+    fn root() -> PathBuf {
+        std::env::temp_dir().join(format!("crtest-capture-{}", crate::winutil::random_hex()))
+    }
+
+    fn screens() -> Vec<Screen> {
+        vec![Screen { name: String::new(), rect: Monitor { x: 0, y: 0, w: 640, h: 480 }, primary: true }]
+    }
+
+    /// ping.exe stands in for ffmpeg: it starts, refuses ffmpeg's arguments and exits.
+    fn fake_ffmpeg() -> PathBuf {
+        PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\ping.exe")
+    }
+
+    #[test]
+    fn without_a_working_encoder_the_capture_falls_back_to_x264_through_gdi() {
+        let root = root();
+        let capture = Capture::new_in(&root, fake_ffmpeg()).unwrap();
+        assert_eq!((capture.encoder(), capture.grabber()), (Encoder::X264, Grabber::Gdigrab));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The capture records its ffmpeg's pid (a later launch kills it if the job missed it), a
+    /// restart wipes the dead capture's segments and list but not a save's files, and a capture
+    /// that died is reported for restart.
+    #[test]
+    fn a_start_records_the_pid_wipes_the_old_segments_and_a_death_is_noticed() {
+        let root = root();
+        let mut capture = Capture::new_in(&root, fake_ffmpeg()).unwrap();
+        let dir = capture.segment_dir().to_path_buf();
+        for name in ["seg_000.ts", SEGMENT_LIST_FILE, "snap_ab_000.ts", "loopback_ab.wav"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        capture.start(&Config::default(), &screens());
+        let pid: u32 = std::fs::read_to_string(dir.join(PID_FILE)).unwrap().trim().parse().unwrap();
+        assert_eq!(Some(pid), capture.running.as_ref().map(|r| r.child.id()));
+        assert!(!dir.join("seg_000.ts").exists() && !dir.join(SEGMENT_LIST_FILE).exists());
+        assert!(dir.join("snap_ab_000.ts").exists() && dir.join("loopback_ab.wav").exists(), "a save's files were wiped");
+        let died = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(50));
+            capture.has_died()
+        });
+        assert!(died, "a dead capture was not noticed");
+        capture.cleanup();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A capture whose ffmpeg could not even be started is still one to restart: has_died used
+    /// to need a process, so a failed spawn stopped the capture for good.
+    #[test]
+    fn a_capture_that_failed_to_spawn_is_retried() {
+        let root = root();
+        let mut capture = Capture::new_in(&root, root.join("no-such-ffmpeg.exe")).unwrap();
+        capture.start(&Config::default(), &screens());
+        assert!(capture.has_died());
+        capture.stop();
+        assert!(!capture.has_died(), "a stopped capture is not a dead one");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// stderr is drained to its end: the capture clock comes from -debug_ts capture lines, and
+    /// the last other lines are kept to say why ffmpeg died.
+    #[test]
+    fn the_stderr_reader_publishes_the_clock_and_keeps_the_last_words() {
+        let (read, write) = stderr_pipe().unwrap();
+        // Capture lines spread over more than the first 1 s window, as ffmpeg prints them.
+        let writer = std::thread::spawn(move || {
+            let mut out = std::fs::File::from(write);
+            for i in 0..30 {
+                writeln!(out, "[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:{i} pkt_pts_time:{} pkt_dts:{i}", i as f64 * 0.05).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            writeln!(out, "decoder -> ist_index:0:0 type:video frame_pts:1").unwrap();
+            writeln!(out, "Error opening output file: Permission denied").unwrap();
+        });
+        let clock = Arc::new(Mutex::new(None));
+        let words = Arc::new(Mutex::new(VecDeque::new()));
+        read_clock(read, Arc::clone(&clock), Arc::clone(&words));
+        writer.join().unwrap();
+        let zero = clock.lock().unwrap().expect("no capture clock published");
+        assert!((clock::now() - zero).abs() < 10.0, "zero={zero}");
+        let words: Vec<String> = words.lock().unwrap().iter().cloned().collect();
+        assert_eq!(words, ["Error opening output file: Permission denied"]);
     }
 }

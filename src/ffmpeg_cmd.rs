@@ -52,9 +52,45 @@ pub fn segment_wrap(buffer_seconds: u32) -> u32 {
 }
 
 /// Arguments after the ffmpeg path.
+/// The capture pipeline from two real test encodes: DXGI into NVENC, else NVENC through GDI, else
+/// x264 through GDI. Never ddagrab with x264: ddagrab hands over GPU frames x264 cannot read.
+pub fn choose(ddagrab_into_nvenc: bool, nvenc: bool) -> (Encoder, Grabber) {
+    match (ddagrab_into_nvenc, nvenc) {
+        (true, _) => (Encoder::Nvenc, Grabber::Ddagrab),
+        (false, true) => (Encoder::Nvenc, Grabber::Gdigrab),
+        (false, false) => (Encoder::X264, Grabber::Gdigrab),
+    }
+}
+
+fn rank(p: (Encoder, Grabber)) -> u8 {
+    match p {
+        (Encoder::Nvenc, Grabber::Ddagrab) => 2,
+        (Encoder::Nvenc, Grabber::Gdigrab) => 1,
+        _ => 0,
+    }
+}
+
+/// Whether a later probe found a better pipeline than the launch one (a driver not ready at
+/// sign-in must not leave the whole session on the CPU).
+pub fn better(old: (Encoder, Grabber), new: (Encoder, Grabber)) -> bool {
+    rank(new) > rank(old)
+}
+
+/// GDI cannot keep up above 60 fps: a 120/240 saved while DXGI worked is capped.
+pub fn effective_fps(fps: u32, grabber: Grabber) -> u32 {
+    if grabber == Grabber::Gdigrab { fps.min(60) } else { fps }
+}
+
+/// The live capture's own files, which a restart wipes. Never a running save's snapshots, list,
+/// WAVs, video or mix, and never the PID file the orphan sweep needs.
+pub fn is_capture_file(name: &str) -> bool {
+    (name.starts_with("seg_") && name.ends_with(".ts")) || name == SEGMENT_LIST_FILE
+}
+
 pub fn capture_args(c: &Capture) -> Vec<String> {
-    let fps = c.fps.to_string();
-    let keyframes = (c.fps * SEGMENT_DURATION).to_string();
+    let rate = effective_fps(c.fps, c.grabber);
+    let keyframes = (rate * SEGMENT_DURATION).to_string();
+    let fps = rate.to_string();
     let wrap = segment_wrap(c.buffer_seconds).to_string();
     let m = c.monitor;
     let mut a: Vec<String> = vec!["-y".into(), "-debug_ts".into()];
@@ -72,7 +108,7 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
     match c.encoder {
         Encoder::Nvenc => {
             a.extend(["-c:v", "h264_nvenc", "-preset", "p1"].map(String::from));
-            if c.fps >= B_FRAMES_MIN_FPS {
+            if rate >= B_FRAMES_MIN_FPS {
                 a.extend(["-tune", "hq", "-bf", "3", "-delay", "0"].map(String::from));
             } else {
                 a.extend(["-tune", "ll"].map(String::from));
@@ -192,6 +228,45 @@ mod tests {
 
     fn value<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
         a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).map(String::as_str)
+    }
+
+    #[test]
+    fn the_pipeline_is_never_ddagrab_into_x264() {
+        assert_eq!(choose(true, true), (Encoder::Nvenc, Grabber::Ddagrab));
+        assert_eq!(choose(false, true), (Encoder::Nvenc, Grabber::Gdigrab));
+        assert_eq!(choose(false, false), (Encoder::X264, Grabber::Gdigrab));
+        for (a, b) in [(true, false), (false, false), (false, true), (true, true)] {
+            assert!(choose(a, b) != (Encoder::X264, Grabber::Ddagrab));
+        }
+    }
+
+    #[test]
+    fn a_later_probe_upgrades_only_to_a_better_pipeline() {
+        let (best, gdi, cpu) = ((Encoder::Nvenc, Grabber::Ddagrab), (Encoder::Nvenc, Grabber::Gdigrab), (Encoder::X264, Grabber::Gdigrab));
+        assert!(better(cpu, gdi) && better(cpu, best) && better(gdi, best));
+        assert!(!better(best, best) && !better(best, gdi) && !better(gdi, cpu) && !better(cpu, cpu));
+    }
+
+    /// GDI cannot hold 120/240: a config saved on a DXGI session is capped, keyframes and
+    /// B-frames follow the capped rate.
+    #[test]
+    fn gdigrab_never_captures_above_60_fps() {
+        let a = args(240, Grabber::Gdigrab, Encoder::Nvenc);
+        assert_eq!(value(&a, "-framerate"), Some("60"));
+        assert_eq!(value(&a, "-g"), Some("60"));
+        assert!(!a.contains(&"-bf".to_string()), "B-frames are for 120 fps and up");
+        assert_eq!(effective_fps(240, Grabber::Ddagrab), 240);
+        assert_eq!(effective_fps(30, Grabber::Gdigrab), 30);
+    }
+
+    #[test]
+    fn a_restart_wipes_only_the_live_captures_files() {
+        for name in ["seg_000.ts", "seg_121.ts", SEGMENT_LIST_FILE] {
+            assert!(is_capture_file(name), "{name}");
+        }
+        for name in ["snap_ab12_000.ts", "concat_ab12.txt", "loopback_ab12.wav", "mic_ab12.wav", "video_ab12.mp4", "mixed_ab12.wav", "ffmpeg.pid", "segments.csv.tmp"] {
+            assert!(!is_capture_file(name), "{name} belongs to a save or the orphan sweep");
+        }
     }
 
     #[test]
