@@ -239,3 +239,22 @@ fn the_code_signing_policy_is_published_where_signpath_requires_it() {
         "the MSI does not announce it"
     );
 }
+
+/// A panic in the windowed app (no console) must reach the log: the hook is installed before
+/// anything else in main(), and it never blocks on the log lock the panicking thread may hold.
+#[test]
+fn panics_are_logged_from_the_first_line_of_main() {
+    let main = code("src/bin/clip-recorder/main.rs", "//");
+    let body = between(&main, "fn main() {", "\n}");
+    let first = body.lines().nth(1).unwrap_or("").trim();
+    assert_eq!(
+        first, "logging::install_panic_hook();",
+        "not the first statement of main()"
+    );
+    let logging = code("src/bin/clip-recorder/logging.rs", "//");
+    assert!(between(&logging, "fn install_panic_hook()", "\n}").contains("write(&report, true)"));
+    assert!(
+        logging.contains("LOCK.try_lock()"),
+        "the panic path waits on the log lock"
+    );
+}
