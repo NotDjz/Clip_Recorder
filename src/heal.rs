@@ -49,9 +49,28 @@ impl Retry {
     }
 }
 
+/// What one health tick does.
+#[derive(Debug, PartialEq)]
+pub struct Tick {
+    pub restart_capture: bool,
+    pub heal_audio: bool,
+}
+
+/// Audio healing never waits on the capture: a tick that returned early for a dead ffmpeg let a
+/// capture stuck restarting stop the audio from ever coming back.
+pub fn tick(capture_died: bool) -> Tick {
+    Tick { restart_capture: capture_died, heal_audio: true }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_heals_even_on_a_tick_that_restarts_the_capture() {
+        assert_eq!(tick(true), Tick { restart_capture: true, heal_audio: true });
+        assert_eq!(tick(false), Tick { restart_capture: false, heal_audio: true });
+    }
 
     #[test]
     fn a_stream_that_dies_late_is_reopened_at_once() {

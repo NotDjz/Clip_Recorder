@@ -129,16 +129,17 @@ fn main() {
 
 /// A dead ffmpeg is started again a second later; a dead audio stream is reopened.
 fn check_health() {
-    let died = with_app(|app| app.capture.has_died()).unwrap_or(false);
-    if died {
+    let tick = clip_recorder::heal::tick(with_app(|app| app.capture.has_died()).unwrap_or(false));
+    if tick.restart_capture {
         log("capture ffmpeg died: restarting it");
         slint::Timer::single_shot(Duration::from_secs(1), || {
             with_app(|app| app.capture.start(&app.config, &app.screens));
         });
-        return;
     }
     with_app(|app| {
-        app.audio.heal();
+        if tick.heal_audio {
+            app.audio.heal();
+        }
         let recording = app.capture.is_running();
         if let Some(w) = &app.settings {
             w.set_recording(recording);
