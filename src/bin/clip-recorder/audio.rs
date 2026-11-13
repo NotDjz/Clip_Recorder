@@ -218,7 +218,8 @@ impl Side {
         let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else { return false };
         let spec = hound::WavSpec { channels: self.channels, sample_rate: self.rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
         let write = || -> hound::Result<()> {
-            let mut w = hound::WavWriter::create(path, spec)?;
+            let file = crate::winutil::create_new(path).map_err(hound::Error::IoError)?;
+            let mut w = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
             let mut s = w.get_i16_writer(samples.len() as u32);
             samples.iter().for_each(|&v| s.write_sample(v));
             s.flush()?;

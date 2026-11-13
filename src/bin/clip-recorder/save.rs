@@ -24,7 +24,7 @@ pub type Outcome = Result<u32, GiveUp>;
 /// Starts a save. `done` runs on the UI thread once, whatever happens.
 pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, folder: &Path, done: fn(Outcome)) {
     let save_time = clock::now();
-    let id = format!("{:08x}", (save_time.fract() * 1e9) as u64 ^ u64::from(std::process::id()));
+    let id = crate::winutil::random_hex();
     match prepare(capture, audio, ffmpeg, clip_seconds, folder, save_time, &id) {
         Ok(job) => {
             std::thread::spawn(move || {
@@ -97,7 +97,8 @@ fn prepare(
     let mut snapshots = Vec::new();
     for (i, s) in chosen.segments.iter().enumerate() {
         let snap = dir.join(format!("snap_{id}_{i:03}.ts"));
-        if let Err(e) = std::fs::copy(dir.join(&s.name), &snap) {
+        let copied = std::fs::File::open(dir.join(&s.name)).and_then(|mut from| std::io::copy(&mut from, &mut crate::winutil::create_new(&snap)?));
+        if let Err(e) = copied {
             say(format!("ABORT: snapshot of {} failed: {e}", s.name));
             snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
             return Err(GiveUp::Error);
@@ -105,7 +106,8 @@ fn prepare(
         snapshots.push(snap);
     }
     let list = dir.join(format!("concat_{id}.txt"));
-    if std::fs::write(&list, ffmpeg_cmd::concat_list(&snapshots)).is_err() || std::fs::create_dir_all(folder).is_err() {
+    let listed = crate::winutil::create_new(&list).and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
+    if listed.is_err() || std::fs::create_dir_all(folder).is_err() {
         say("ABORT: concat list or output folder not writable".into());
         snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
         return Err(GiveUp::Error);

@@ -93,7 +93,7 @@ impl Capture {
     /// Joins the kill-on-close job first: before any ffmpeg exists, the probes included.
     pub fn new(ffmpeg: PathBuf) -> std::io::Result<Capture> {
         crate::job::ensure_kill_on_close();
-        let segment_dir = clip_recorder::paths::segments_root().join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), clock::now() as u64));
+        let segment_dir = clip_recorder::paths::segments_root().join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), crate::winutil::random_hex()));
         std::fs::create_dir_all(&segment_dir)?;
         let (encoder, grabber) = pipeline(&ffmpeg);
         log(&format!("capture: encoder={encoder:?} grabber={grabber:?} dir={}", segment_dir.display()));
