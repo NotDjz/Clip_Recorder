@@ -221,7 +221,7 @@ impl Capture {
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
                 log(&format!(
                     "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}",
-                    crate::job::contains(&running.child),
+                    crate::job::contains(crate::job::handle(), &running.child),
                     ffmpeg_cmd::effective_fps(config.fps, self.grabber),
                     config.buffer_seconds
                 ));
