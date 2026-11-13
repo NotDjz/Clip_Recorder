@@ -171,3 +171,46 @@ fn a_second_launch_exits_and_the_first_keeps_running() {
     assert!(exit.is_some_and(|s| s.success()), "the second launch kept running");
     assert!(first_alive, "the first instance died");
 }
+
+fn press(keys: &[u16]) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput};
+    let key = |vk: u16, flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+    };
+    let mut inputs: Vec<INPUT> = keys.iter().map(|&k| key(k, 0)).collect();
+    inputs.extend(keys.iter().rev().map(|&k| key(k, KEYEVENTF_KEYUP)));
+    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// The whole path a user takes: a hotkey press ends as a decodable MP4 in the clips folder.
+/// It captures the second screen and plays the chimes, like the real thing. The hotkey is one
+/// nobody uses, so an installed Clip Recorder holding Ctrl+Alt+R is left alone.
+#[test]
+fn the_hotkey_saves_a_clip_that_decodes() {
+    let dir = data_dir("save");
+    let clips = dir.join("clips");
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = serde_json::json!({
+        "monitor": 1, "fps": 30, "buffer_seconds": 15,
+        "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12",
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    let log = || std::fs::read_to_string(dir.join("clip_recorder.log")).unwrap_or_default();
+    let _app = launch(&dir);
+    wait_until(Duration::from_secs(20), || ffmpeg_pid(&dir)).expect("the capture never started");
+    std::thread::sleep(Duration::from_secs(5)); // past "too soon", with a few complete segments
+    press(&[0x11, 0x12, 0x10, 0x7B]); // Ctrl, Alt, Shift, F12
+    let done = wait_until(Duration::from_secs(40), || log().lines().find(|l| l.contains("done: saved=")).map(String::from));
+    let done = done.unwrap_or_else(|| panic!("no save finished:\n{}", log()));
+    assert!(done.contains("saved=true"), "{}", log());
+    let clip = std::fs::read_dir(&clips).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "mp4"));
+    let clip = clip.expect("no MP4 in the clips folder");
+    let decode = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
+        .args(["-v", "error", "-i"])
+        .arg(&clip)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+}

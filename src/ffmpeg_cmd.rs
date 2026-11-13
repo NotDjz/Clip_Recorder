@@ -97,10 +97,83 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
     a
 }
 
+/// The concat demuxer's list. Only snapshot copies go in it, never the live segments (ffmpeg
+/// rewrites those under -segment_wrap). Quotes are escaped the concat way.
+pub fn concat_list(files: &[std::path::PathBuf]) -> String {
+    files
+        .iter()
+        .map(|f| format!("file '{}'\n", f.to_string_lossy().replace('\\', "/").replace('\'', r"'\''")))
+        .collect()
+}
+
+fn path(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+/// Joins the snapshots without re-encoding. No -ss, not even 0: with B-frames each segment's
+/// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
+pub fn concat_args(list: &Path, duration: f64, out: &Path) -> Vec<String> {
+    let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
+    a.extend([path(list), "-t".into(), duration.to_string()]);
+    a.extend(["-c", "copy", "-movflags", "+faststart"].map(String::from));
+    a.push(path(out));
+    a
+}
+
+/// Game sound + mic. Both resampled to 48 kHz stereo before amix, normalize off: otherwise the
+/// volume pumps or buzzes.
+pub fn mix_args(loopback: &Path, mic: &Path, out: &Path) -> Vec<String> {
+    vec![
+        "-y".into(), "-i".into(), path(loopback), "-i".into(), path(mic),
+        "-filter_complex".into(),
+        "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];\
+         [1:a]aresample=48000,aformat=channel_layouts=stereo[a1];\
+         [a0][a1]amix=inputs=2:duration=longest:normalize=0".into(),
+        "-ac".into(), "2".into(), "-ar".into(), "48000".into(), path(out),
+    ]
+}
+
+/// The clip: the video copied, the audio in AAC, cut to the shorter of the two.
+pub fn mux_args(video: &Path, audio: &Path, out: &Path) -> Vec<String> {
+    let mut a: Vec<String> = vec!["-y".into(), "-i".into(), path(video), "-i".into(), path(audio)];
+    a.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"].map(String::from));
+    a.push(path(out));
+    a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{BUFFER_OPTIONS, FPS_OPTIONS};
+
+    #[test]
+    fn the_concat_never_seeks_and_cuts_at_the_selected_duration() {
+        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"));
+        assert!(!a.contains(&"-ss".to_string()), "{a:?}");
+        assert_eq!(value(&a, "-t"), Some("15.25"));
+        assert_eq!(value(&a, "-c"), Some("copy"));
+        assert_eq!(a.last().map(String::as_str), Some("out.mp4"));
+    }
+
+    #[test]
+    fn the_mix_resamples_before_amix_with_normalize_off() {
+        let a = mix_args(Path::new("lb.wav"), Path::new("mic.wav"), Path::new("mixed.wav")).join(" ");
+        assert!(a.contains("aresample=48000") && a.contains("normalize=0"), "{a}");
+        assert!(a.find("aresample").unwrap() < a.find("amix").unwrap());
+    }
+
+    #[test]
+    fn the_mux_copies_the_video_and_stops_at_the_shorter_stream() {
+        let a = mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("clip.mp4"));
+        assert_eq!((value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")), (Some("copy"), Some("aac"), Some("192k")));
+        assert!(a.contains(&"-shortest".to_string()) && a.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn the_concat_list_escapes_quotes_and_uses_forward_slashes() {
+        let list = concat_list(&[r"C:\Users\O'Neil\snap_1.ts".into(), r"C:\t\snap_2.ts".into()]);
+        assert_eq!(list, "file 'C:/Users/O'\\''Neil/snap_1.ts'\nfile 'C:/t/snap_2.ts'\n");
+    }
 
     const PRIMARY: Monitor = Monitor { x: 0, y: 0, w: 1920, h: 1080 };
     const SECOND: Monitor = Monitor { x: 1920, y: 0, w: 2560, h: 1440 };
