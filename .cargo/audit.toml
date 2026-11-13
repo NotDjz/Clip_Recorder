@@ -1,0 +1,17 @@
+# cargo audit fails CI on any advisory (warnings denied), except these, each checked against the
+# Windows build with `cargo tree -i <crate> --target x86_64-pc-windows-msvc` on 2026-11-13.
+# None is a vulnerability and none has a fixed version. A new advisory still fails the build;
+# drop an entry once its crate leaves Cargo.lock or a fix ships.
+[advisories]
+ignore = [
+    # Not compiled for Windows: Linux-only branches of slint, tray-icon and accesskit (GTK, D-Bus).
+    "RUSTSEC-2024-0429", # glib: unsound VariantStrIter (GTK, Linux only)
+    "RUSTSEC-2025-0141", # bincode: unmaintained (Linux only)
+    "RUSTSEC-2024-0370", # proc-macro-error: unmaintained (Linux only)
+    "RUSTSEC-2026-0192", # ttf-parser: unmaintained (Linux only)
+    "RUSTSEC-2026-0371", # zbus_names: unmaintained (D-Bus, Linux only)
+    "RUSTSEC-2026-0370", # zvariant: unmaintained (D-Bus, Linux only)
+    "RUSTSEC-2026-0372", # zvariant_derive: unmaintained (D-Bus, Linux only)
+    # In the Windows build only at compile time: spin_on, used by the slint-macros proc-macro.
+    "RUSTSEC-2026-0441", # pin-utils: unmaintained, no runtime code
+]

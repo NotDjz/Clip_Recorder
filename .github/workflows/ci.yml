@@ -1,0 +1,187 @@
+name: CI
+
+# Every push and pull request: nothing reaches master with a fixed bug back, a guard that no
+# longer bites, a known-vulnerable dependency, a leaked secret or a free-form commit message.
+# No pull_request_target or workflow_run: a fork's code never runs with secrets or write access.
+on:
+  pull_request:
+    branches: [master, rust]
+  push:
+    branches: [master, rust]
+  schedule:
+    - cron: "0 3 * * 1" # Monday 03:00 UTC: the full mutation run and a fresh advisory audit
+  workflow_dispatch:
+
+# Read-only token for every job; nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Pinned tools, installed from crates.io (checksums verified by cargo).
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  CARGO_AUDIT_VERSION: "0.23.0"
+  # The pinned ffmpeg build-msi.ps1 verifies; the cache key follows its hash.
+  FFMPEG_SHA256: D1E2A156261ECC675081943197A85F08F2868784A0AF499171EDE89353EDAD31
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  tests:
+    name: tests
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: tests-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      # Unit, GUI (Slint testing backend), real-process and source-level tests, and the registry
+      # of fixed bugs (tests/regressions.md). No screen capture, no audio device needed.
+      - run: cargo test --locked --lib --bins --examples --test source
+
+  e2e:
+    name: e2e
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/ffmpeg/ffmpeg.exe
+          key: ffmpeg-${{ env.FFMPEG_SHA256 }}
+      # Downloads only if the cached exe is missing or its hash differs.
+      - run: ./build-msi.ps1 -FFmpegOnly
+      # The real exe: capture, hotkey save to a decodable MP4, job object, single instance,
+      # end of session. The runner has no GPU and no audio device: the x264 + GDI path.
+      - run: cargo test --locked --test app -- --test-threads=1
+
+  mutants-shard:
+    name: mutants shard ${{ matrix.shard }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Eight runners in parallel: a change touching the whole crate (577 mutants) took 3 h on one.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-mutants.exe
+          key: mutants-${{ runner.os }}-${{ env.CARGO_MUTANTS_VERSION }}-${{ hashFiles('Cargo.lock') }}
+      - run: if (-not (Get-Command cargo-mutants -ErrorAction SilentlyContinue)) { cargo install cargo-mutants --version $env:CARGO_MUTANTS_VERSION --locked }
+      - name: Mutate
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # Which tests run comes from .cargo/mutants.toml.
+          if ($env:EVENT -eq 'schedule' -or $env:EVENT -eq 'workflow_dispatch') {
+            cargo mutants --jobs 2 --shard "$env:SHARD/8" --timeout 300
+          } elseif (-not $env:BASE -or $env:BASE -match '^0+$') {
+            Write-Host 'No base commit to diff against: nothing to mutate.'
+          } else {
+            git diff "$env:BASE" HEAD -- '*.rs' > changes.diff
+            if ((Get-Item changes.diff).Length -eq 0) { Write-Host 'No Rust change.'; exit 0 }
+            cargo mutants --jobs 2 --shard "$env:SHARD/8" --in-diff changes.diff --timeout 300
+          }
+          exit $LASTEXITCODE
+
+  # The one check the master ruleset requires: green only if every shard is.
+  mutants:
+    name: mutants
+    needs: mutants-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.mutants-shard.result }}
+        shell: bash
+        run: |
+          echo "shards: $RESULT"
+          [ "$RESULT" = "success" ]
+
+  audit:
+    name: audit
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-audit.exe
+          key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
+      - run: if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) { cargo install cargo-audit --version $env:CARGO_AUDIT_VERSION --locked }
+      - run: cargo audit --deny warnings
+
+  secrets:
+    name: secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The whole history: a secret removed by a later commit is still in the earlier ones.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # gitleaks pinned by version and by the SHA-256 GitHub publishes for the asset.
+      - run: |
+          curl -fsSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --verbose .
+
+  commits:
+    name: commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      # Conventional Commits for every commit this push or pull request brings.
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "${BASE//0/}" ]; then echo "No range to check."; exit 0; fi
+          bad=0
+          while IFS= read -r subject; do
+            if ! printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9 ._/-]+\))?!?: .+'; then
+              echo "::error::Not a Conventional Commit: $subject"; bad=1
+            fi
+          done < <(git log --no-merges --format=%s "$BASE..$HEAD")
+          exit $bad

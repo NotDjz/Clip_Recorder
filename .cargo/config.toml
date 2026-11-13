@@ -1,0 +1,7 @@
+[env]
+# ElementHandle (GUI tests) needs Slint debug info in generated code.
+SLINT_EMIT_DEBUG_INFO = "1"
+
+# Bundle the C runtime into the exe: no VC++ redistributable needed on the target PC.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

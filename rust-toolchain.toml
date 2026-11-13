@@ -1,0 +1,4 @@
+# The exact compiler CI and every machine build with (rustup installs it on first use).
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

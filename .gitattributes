@@ -1,3 +1,12 @@
-# cmd.exe misparses a .bat with LF-only endings: REM reads as M and the
-# build dies before it starts. Force CRLF so a checkout cannot reintroduce it.
+# LF everywhere, whatever core.autocrlf says on the machine that commits.
+* text=auto eol=lf
+# cmd.exe misparses a .bat with LF-only endings: REM reads as M and the build dies before it
+# starts. These keep CRLF.
 *.bat text eol=crlf
+*.cmd text eol=crlf
+# Never touched as text.
+*.ico binary
+*.bmp binary
+*.png binary
+*.msi binary
+*.exe binary
