@@ -76,3 +76,4 @@ machine, CI included.
 | R65 | A Python-era " [Loopback]" name showed as a second, phantom device in Settings | `a_python_era_loopback_name_is_not_listed_twice` |
 | R66 | Ending the session while a dialog was open kept the app alive until the dialog closed | `the_session_handler_leaves_through_main` |
 | R67 | Snapshots copied through an 8 KiB loop on the UI thread instead of the system copy | `copy_new_copies_and_never_overwrites` |
+| R68 | A panic in the windowed app (any thread) vanished without a trace | `a_panic_report_names_the_thread_the_place_and_the_cause`, `panics_are_logged_from_the_first_line_of_main` |
