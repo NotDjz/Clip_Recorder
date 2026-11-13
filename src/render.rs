@@ -69,19 +69,6 @@ pub fn push_chunk<T>(history: &mut std::collections::VecDeque<(f64, T)>, arrival
     }
 }
 
-/// After a dead stream is detected again: the device found now, else the one it had. One
-/// missing for a moment (unplugged) must stay the one retried, or a re-plugged headset never
-/// comes back.
-pub fn device_after_reopen<D>(previous: Option<D>, found: Option<D>) -> Option<D> {
-    found.or(previous)
-}
-
-/// Whether a side keeps its history across a reopen or a device change: only in the same
-/// format, since render_window cannot mix two.
-pub fn keeps_history(before: (u32, u16), after: (u32, u16)) -> bool {
-    before == after
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,20 +82,6 @@ mod tests {
         assert_eq!(h.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [6, 7, 8, 9]);
         push_chunk(&mut h, 100.0, 100, 3.0);
         assert_eq!(h.len(), 1, "the newest chunk always stays");
-    }
-
-    #[test]
-    fn a_device_missing_at_a_reopen_stays_the_one_retried() {
-        assert_eq!(device_after_reopen(Some("headset"), None), Some("headset"));
-        assert_eq!(device_after_reopen(Some("headset"), Some("speakers")), Some("speakers"));
-        assert_eq!(device_after_reopen::<&str>(None, None), None);
-    }
-
-    #[test]
-    fn history_survives_only_an_unchanged_format() {
-        assert!(keeps_history((48000, 2), (48000, 2)));
-        assert!(!keeps_history((48000, 2), (44100, 2)));
-        assert!(!keeps_history((48000, 2), (48000, 6)));
     }
 
     const RATE: u32 = 48000;

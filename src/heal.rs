@@ -49,20 +49,18 @@ impl Retry {
     }
 }
 
-/// What one health tick does.
-#[derive(Debug, PartialEq)]
-pub struct Tick {
-    pub restart_capture: bool,
-    pub heal_audio: bool,
+/// The device a dead stream reopens on. A pinned device that is missing stays the one waited
+/// for: the default it fell back to keeps playing meanwhile, and a re-plugged headset is picked
+/// up again; switching to the default for good lost it until a restart. Auto follows the
+/// default. With nothing found, the device it had is retried.
+pub fn reopen_on<D>(pinned: bool, had: Option<D>, configured: Option<D>, default: Option<D>) -> Option<D> {
+    if pinned { configured.or(had) } else { default.or(had) }
 }
 
-/// Audio healing never waits on the capture: a tick that returned early for a dead ffmpeg let a
-/// capture stuck restarting stop the audio from ever coming back.
-pub fn tick(capture_died: bool) -> Tick {
-    Tick {
-        restart_capture: capture_died,
-        heal_audio: true,
-    }
+/// Whether a side keeps its history across a reopen or a device change: only in the same
+/// format, since render_window cannot mix two.
+pub fn keeps_history(before: (u32, u16), after: (u32, u16)) -> bool {
+    before == after
 }
 
 #[cfg(test)]
@@ -80,21 +78,37 @@ mod tests {
     }
 
     #[test]
-    fn audio_heals_even_on_a_tick_that_restarts_the_capture() {
+    fn a_pinned_device_unplugged_is_waited_for_not_replaced() {
+        // Unplugged: the default it fell back to stays; replugged: back on the headset.
         assert_eq!(
-            tick(true),
-            Tick {
-                restart_capture: true,
-                heal_audio: true
-            }
+            reopen_on(true, Some("speakers"), None, Some("speakers")),
+            Some("speakers")
         );
         assert_eq!(
-            tick(false),
-            Tick {
-                restart_capture: false,
-                heal_audio: true
-            }
+            reopen_on(true, Some("speakers"), Some("headset"), Some("speakers")),
+            Some("headset")
         );
+        assert_eq!(
+            reopen_on(true, Some("headset"), None, None),
+            Some("headset"),
+            "nothing found: retry it"
+        );
+    }
+
+    #[test]
+    fn auto_follows_the_default_device() {
+        assert_eq!(
+            reopen_on(false, Some("old"), None, Some("new default")),
+            Some("new default")
+        );
+        assert_eq!(reopen_on(false, Some("old"), None, None), Some("old"));
+    }
+
+    #[test]
+    fn history_survives_only_an_unchanged_format() {
+        assert!(keeps_history((48000, 2), (48000, 2)));
+        assert!(!keeps_history((48000, 2), (44100, 2)));
+        assert!(!keeps_history((48000, 2), (48000, 6)));
     }
 
     #[test]

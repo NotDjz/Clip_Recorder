@@ -6,7 +6,7 @@
 
 use crate::logging::log;
 use clip_recorder::clock;
-use clip_recorder::heal::{Decision, Retry};
+use clip_recorder::heal::{self, Decision, Retry};
 use clip_recorder::render::{self, Chunk, render_window};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
@@ -70,6 +70,12 @@ impl Side {
 
     /// The configured device if it is there, else the Windows default (as the Python app did).
     fn detect(&mut self) {
+        let (configured, default) = self.candidates();
+        self.adopt(configured.or(default));
+    }
+
+    /// The configured device if it is listed now, and the Windows default (cpal re-enumerates).
+    fn candidates(&self) -> (Option<cpal::Device>, Option<cpal::Device>) {
         let host = cpal::default_host();
         let devices = match self.kind {
             Kind::Loopback => host.output_devices(),
@@ -77,11 +83,16 @@ impl Side {
         };
         let mut listed: Vec<cpal::Device> = devices.map(|ds| ds.collect()).unwrap_or_default();
         let names: Vec<String> = listed.iter().map(device_name).collect();
-        let wanted = clip_recorder::settings::pick_device(&names, &self.configured).map(|i| listed.swap_remove(i));
-        let device = wanted.or_else(|| match self.kind {
+        let configured = clip_recorder::settings::pick_device(&names, &self.configured).map(|i| listed.swap_remove(i));
+        let default = match self.kind {
             Kind::Loopback => host.default_output_device(),
             Kind::Mic => host.default_input_device(),
-        });
+        };
+        (configured, default)
+    }
+
+    /// Takes `device` with its current format, or none.
+    fn adopt(&mut self, device: Option<cpal::Device>) {
         let config = device.as_ref().and_then(|d| match self.kind {
             Kind::Loopback => d.default_output_config().ok(),
             Kind::Mic => d.default_input_config().ok(),
@@ -202,10 +213,10 @@ impl Side {
                     "{} stream not alive (frames={frames}), reopening",
                     self.kind.label()
                 ));
-                let (format, previous) = ((self.rate, self.channels), self.device.take());
-                self.detect(); // found afresh: cpal re-enumerates
-                self.device = render::device_after_reopen(previous, self.device.take());
-                if !render::keeps_history(format, (self.rate, self.channels)) {
+                let (format, had) = ((self.rate, self.channels), self.device.take());
+                let (configured, default) = self.candidates();
+                self.adopt(heal::reopen_on(!self.configured.is_empty(), had, configured, default));
+                if !heal::keeps_history(format, (self.rate, self.channels)) {
                     self.clear();
                 }
                 self.open();
@@ -325,7 +336,7 @@ impl Audio {
                 ..Side::new(side.kind, wanted)
             };
             side.detect();
-            if !render::keeps_history(before, (side.rate, side.channels)) {
+            if !heal::keeps_history(before, (side.rate, side.channels)) {
                 side.clear();
             }
         }
