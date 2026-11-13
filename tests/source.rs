@@ -252,3 +252,25 @@ fn the_download_page_shows_the_made_with_slint_badge() {
         assert!(read(badge).contains("<svg"), "{badge} missing");
     }
 }
+
+/// Dependencies come from crates.io only, with no wildcard versions, and WiX, the one tool the
+/// release installs from outside crates.io, is used only after its packages' published hashes match.
+#[test]
+fn the_supply_chain_is_pinned_and_verified() {
+    let deny = code("deny.toml", "#");
+    assert!(deny.contains("allow-git = []") && deny.contains("unknown-git = \"deny\""));
+    assert!(deny.contains("wildcards = \"deny\""));
+    let wix = code("scripts/install-wix.ps1", "#");
+    assert!(
+        position(&wix, "HashData") < position(&wix, "Expand-Archive"),
+        "WiX unpacked before its hash was checked"
+    );
+    let release = code(".github/workflows/release.yml", "#");
+    assert!(release.contains("./scripts/install-wix.ps1"));
+    assert!(
+        !release.contains("dotnet tool install"),
+        "WiX installed unchecked from NuGet"
+    );
+    assert!(release.contains("actions/attest-sbom@"), "the SBOM is not attested");
+    assert!(code(".github/workflows/ci.yml", "#").contains("cargo deny --locked check"));
+}
