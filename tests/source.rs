@@ -112,3 +112,28 @@ fn settings_lists_devices_on_every_open() {
     let open = between(&main, "fn open_settings()", "\n}");
     assert!(open.contains("audio::list_devices()"));
 }
+
+/// tests/regressions.md lists every fixed bug and its tests. A test it names must still exist:
+/// deleting or renaming a guard has to update the registry in the same commit.
+#[test]
+fn every_fixed_bug_still_has_its_tests() {
+    let registry = read("tests/regressions.md");
+    let mut sources = String::new();
+    for dir in ["src", "src/bin/clip-recorder", "tests"] {
+        for entry in std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir)).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "rs") {
+                sources.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+    }
+    let rows: Vec<&str> = registry.lines().filter(|l| l.starts_with("| R")).collect();
+    assert!(rows.len() >= 60, "the registry lost rows: {}", rows.len());
+    for row in rows {
+        let column = row.trim_end_matches('|').rsplit('|').next().unwrap_or("");
+        let tests: Vec<&str> = column.split('`').skip(1).step_by(2).collect();
+        assert!(!tests.is_empty(), "no test for {row}");
+        for test in tests {
+            assert!(sources.contains(&format!("fn {test}()")), "{test} (registry row {}) no longer exists", &row[..5]);
+        }
+    }
+}
