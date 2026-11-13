@@ -25,14 +25,21 @@ pub type Outcome = Result<u32, GiveUp>;
 pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, folder: &Path, done: fn(Outcome)) {
     let save_time = clock::now();
     let id = crate::winutil::random_hex();
-    let source = Source { dir: capture.segment_dir(), clock_zero: capture.clock_zero(), started_at: capture.started_at() };
+    let source = Source {
+        dir: capture.segment_dir(),
+        clock_zero: capture.clock_zero(),
+        started_at: capture.started_at(),
+    };
     let dir = source.dir.to_path_buf();
     let mut wav = |kind: Kind, end: f64, duration: f64| -> Option<PathBuf> {
         if !audio.has(kind) {
             return None;
         }
         log(&format!("[{id}] {}", audio.describe(kind)));
-        let path = dir.join(format!("{}_{id}.wav", if kind == Kind::Loopback { "loopback" } else { "mic" }));
+        let path = dir.join(format!(
+            "{}_{id}.wav",
+            if kind == Kind::Loopback { "loopback" } else { "mic" }
+        ));
         let ok = audio.save_wav(kind, &path, end, duration);
         log(&format!("[{id}] save_wav({kind:?}) ok={ok}"));
         ok.then_some(path)
@@ -96,16 +103,26 @@ fn prepare(
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let mtime = e.metadata().ok()?.modified().ok()?;
-            (name.starts_with("seg_") && name.ends_with(".ts")).then(|| Segment { name, mtime: clock::seconds(mtime) })
+            (name.starts_with("seg_") && name.ends_with(".ts")).then(|| Segment {
+                name,
+                mtime: clock::seconds(mtime),
+            })
         })
         .collect();
     let listed = match source.clock_zero {
-        Some(zero) => selection::parse_segment_list(&std::fs::read_to_string(dir.join(SEGMENT_LIST_FILE)).unwrap_or_default(), zero),
+        Some(zero) => selection::parse_segment_list(
+            &std::fs::read_to_string(dir.join(SEGMENT_LIST_FILE)).unwrap_or_default(),
+            zero,
+        ),
         None => Default::default(),
     };
     let age = save_time - source.started_at;
-    let chosen = selection::select(&segments, &listed, save_time, clip_seconds, age)
-        .inspect_err(|r| say(format!("ABORT: {r:?} ({} segments, capture started {age:.1}s ago)", segments.len())))?;
+    let chosen = selection::select(&segments, &listed, save_time, clip_seconds, age).inspect_err(|r| {
+        say(format!(
+            "ABORT: {r:?} ({} segments, capture started {age:.1}s ago)",
+            segments.len()
+        ))
+    })?;
     say(format!(
         "selected {} segments, duration={:.3}s (requested {clip_seconds}s), anchor={} mtime_lag={:+.0}ms",
         chosen.segments.len(),
@@ -119,7 +136,8 @@ fn prepare(
     let mut snapshots = Vec::new();
     for (i, s) in chosen.segments.iter().enumerate() {
         let snap = dir.join(format!("snap_{id}_{i:03}.ts"));
-        let copied = std::fs::File::open(dir.join(&s.name)).and_then(|mut from| std::io::copy(&mut from, &mut crate::winutil::create_new(&snap)?));
+        let copied = std::fs::File::open(dir.join(&s.name))
+            .and_then(|mut from| std::io::copy(&mut from, &mut crate::winutil::create_new(&snap)?));
         if let Err(e) = copied {
             say(format!("ABORT: snapshot of {} failed: {e}", s.name));
             let _ = std::fs::remove_file(&snap);
@@ -129,7 +147,8 @@ fn prepare(
         snapshots.push(snap);
     }
     let list = dir.join(format!("concat_{id}.txt"));
-    let listed = crate::winutil::create_new(&list).and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
+    let listed = crate::winutil::create_new(&list)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
     if listed.is_err() || std::fs::create_dir_all(folder).is_err() {
         say("ABORT: concat list or output folder not writable".into());
         snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
@@ -157,7 +176,11 @@ fn prepare(
 /// The audio track to mux. Both sides: the mix, but a failed or timed-out mix keeps the game
 /// sound rather than losing the clip, and a mixed WAV that is not there is never trusted.
 fn pick_audio(loopback: &Path, mixed: &Path, mix_ok: bool, mixed_exists: bool) -> PathBuf {
-    if mix_ok && mixed_exists { mixed.into() } else { loopback.into() }
+    if mix_ok && mixed_exists {
+        mixed.into()
+    } else {
+        loopback.into()
+    }
 }
 
 impl Job {
@@ -167,7 +190,11 @@ impl Job {
 
     fn run(self) -> Outcome {
         let has_audio = self.loopback.is_some() || self.mic.is_some();
-        let video = if has_audio { self.work.join(format!("video_{}.mp4", self.id)) } else { self.output.clone() };
+        let video = if has_audio {
+            self.work.join(format!("video_{}.mp4", self.id))
+        } else {
+            self.output.clone()
+        };
         // Two saves in the same second share the output name: only the run whose ffmpeg
         // actually wrote it may judge or delete it.
         let mut wrote_output = false;
@@ -203,8 +230,16 @@ impl Job {
         if !saved && wrote_output {
             let _ = std::fs::remove_file(&self.output);
         }
-        self.say(&format!("done: saved={saved} output={} took={:.1}s", self.output.display(), self.started.elapsed().as_secs_f64()));
-        if saved { Ok(self.duration.round() as u32) } else { Err(GiveUp::Error) }
+        self.say(&format!(
+            "done: saved={saved} output={} took={:.1}s",
+            self.output.display(),
+            self.started.elapsed().as_secs_f64()
+        ));
+        if saved {
+            Ok(self.duration.round() as u32)
+        } else {
+            Err(GiveUp::Error)
+        }
     }
 
     /// Runs one ffmpeg with a timeout; logs its exit and, on failure, its stderr's tail.
@@ -246,8 +281,18 @@ impl Job {
         if ok {
             self.say(&format!("{what}: ok"));
         } else {
-            let tail: String = text.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
-            self.say(&format!("{what}: FAILED ({}): {tail}", status.map_or("timed out".into(), |s| s.to_string())));
+            let tail: String = text
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            self.say(&format!(
+                "{what}: FAILED ({}): {tail}",
+                status.map_or("timed out".into(), |s| s.to_string())
+            ));
         }
         Some(ok)
     }
@@ -259,7 +304,10 @@ fn local_stamp() -> String {
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     let mut t = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut t) };
-    format!("{:04}{:02}{:02}_{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
 }
 
 #[cfg(test)]
@@ -279,7 +327,12 @@ mod tests {
             let path = dir.join(format!("seg_{i:03}.ts"));
             std::fs::write(&path, format!("segment {i}")).unwrap();
             let mtime = UNIX_EPOCH + Duration::from_secs_f64(now - (5 - i) as f64);
-            std::fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
         }
     }
 
@@ -292,22 +345,43 @@ mod tests {
     }
 
     fn try_prepare(dir: &Path, started_at: f64, save_time: f64, wav: &mut WavWriter) -> Result<Job, GiveUp> {
-        let source = Source { dir, clock_zero: None, started_at };
-        prepare(&source, wav, Path::new("ffmpeg.exe"), 3, &dir.join("clips"), save_time, "t")
+        let source = Source {
+            dir,
+            clock_zero: None,
+            started_at,
+        };
+        prepare(
+            &source,
+            wav,
+            Path::new("ffmpeg.exe"),
+            3,
+            &dir.join("clips"),
+            save_time,
+            "t",
+        )
     }
 
     #[test]
     fn a_segment_folder_that_cannot_be_listed_is_an_error() {
         let missing = std::env::temp_dir().join(format!("crtest-save-missing-{}", crate::winutil::random_hex()));
-        assert!(matches!(try_prepare(&missing, 0.0, now(), &mut no_audio()), Err(GiveUp::Error)));
+        assert!(matches!(
+            try_prepare(&missing, 0.0, now(), &mut no_audio()),
+            Err(GiveUp::Error)
+        ));
     }
 
     #[test]
     fn a_press_right_after_the_capture_started_is_too_soon_not_an_error() {
         let dir = temp("soon");
         let t = now();
-        assert!(matches!(try_prepare(&dir, t - 1.0, t, &mut no_audio()), Err(GiveUp::TooSoon)));
-        assert!(matches!(try_prepare(&dir, t - 30.0, t, &mut no_audio()), Err(GiveUp::Error)));
+        assert!(matches!(
+            try_prepare(&dir, t - 1.0, t, &mut no_audio()),
+            Err(GiveUp::TooSoon)
+        ));
+        assert!(matches!(
+            try_prepare(&dir, t - 30.0, t, &mut no_audio()),
+            Err(GiveUp::Error)
+        ));
     }
 
     /// The concat reads only copies made at the press (the live ffmpeg rewrites its own names
@@ -329,8 +403,15 @@ mod tests {
         for line in list.lines() {
             assert!(line.contains("/snap_t_"), "{line}");
         }
-        let copied: Vec<String> = job.snapshots.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
-        assert!(!copied.contains(&"segment 5".to_string()), "the in-progress segment was copied: {copied:?}");
+        let copied: Vec<String> = job
+            .snapshots
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
+        assert!(
+            !copied.contains(&"segment 5".to_string()),
+            "the in-progress segment was copied: {copied:?}"
+        );
         assert_eq!(calls, [(Kind::Loopback, t, job.duration), (Kind::Mic, t, job.duration)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -343,11 +424,19 @@ mod tests {
         // A segment held open with no sharing, as an antivirus scan can: listed and dated, but
         // it cannot be read while the others can.
         use std::os::windows::fs::OpenOptionsExt;
-        let lock = std::fs::File::options().read(true).share_mode(0).open(dir.join("seg_004.ts")).unwrap();
+        let lock = std::fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("seg_004.ts"))
+            .unwrap();
         let result = try_prepare(&dir, t - 60.0, t, &mut no_audio());
         drop(lock);
         assert!(matches!(result, Err(GiveUp::Error)));
-        let left: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
         assert!(left.iter().all(|n| !n.starts_with("snap_")), "{left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }

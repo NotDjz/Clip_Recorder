@@ -12,8 +12,12 @@ pub enum Action {
     Quit,
 }
 
-const IDS: [(&str, Action); 4] =
-    [("save", Action::Save), ("settings", Action::Settings), ("folder", Action::OpenFolder), ("quit", Action::Quit)];
+const IDS: [(&str, Action); 4] = [
+    ("save", Action::Save),
+    ("settings", Action::Settings),
+    ("folder", Action::OpenFolder),
+    ("quit", Action::Quit),
+];
 
 pub struct Tray {
     _icon: TrayIcon,

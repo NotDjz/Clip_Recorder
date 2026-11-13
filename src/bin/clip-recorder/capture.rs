@@ -7,12 +7,12 @@ use crate::orphans::{PID_FILE, SEGMENT_DIR_PREFIX};
 use clip_recorder::clock::{self, Estimator, capture_pts};
 use clip_recorder::config::Config;
 use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,10 @@ pub fn ffmpeg_path() -> PathBuf {
     if let Some(p) = std::env::var_os("CLIPREC_FFMPEG").filter(|p| !p.is_empty()) {
         return p.into();
     }
-    std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("ffmpeg.exe"))).unwrap_or_else(|| "ffmpeg.exe".into())
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("ffmpeg.exe")))
+        .unwrap_or_else(|| "ffmpeg.exe".into())
 }
 
 /// Whether ffmpeg really encodes one frame from `input`. Listing h264_nvenc or ddagrab only says
@@ -34,7 +37,22 @@ pub fn ffmpeg_path() -> PathBuf {
 /// and restarted every two seconds (seen in Windows Sandbox).
 fn works(ffmpeg: &Path, input: &str, encoder: &str) -> bool {
     let child = Command::new(ffmpeg)
-        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", input, "-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            input,
+            "-frames:v",
+            "1",
+            "-c:v",
+            encoder,
+            "-f",
+            "null",
+            "-",
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -92,11 +110,26 @@ impl Capture {
 
     fn new_in(root: &Path, ffmpeg: PathBuf) -> std::io::Result<Capture> {
         crate::job::ensure_kill_on_close();
-        let segment_dir = root.join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), crate::winutil::random_hex()));
+        let segment_dir = root.join(format!(
+            "{SEGMENT_DIR_PREFIX}{}_{}",
+            std::process::id(),
+            crate::winutil::random_hex()
+        ));
         std::fs::create_dir_all(&segment_dir)?;
         let (encoder, grabber) = pipeline(&ffmpeg);
-        log(&format!("capture: encoder={encoder:?} grabber={grabber:?} dir={}", segment_dir.display()));
-        Ok(Capture { ffmpeg, segment_dir, encoder, grabber, running: None, wanted: false, started_at: 0.0 })
+        log(&format!(
+            "capture: encoder={encoder:?} grabber={grabber:?} dir={}",
+            segment_dir.display()
+        ));
+        Ok(Capture {
+            ffmpeg,
+            segment_dir,
+            encoder,
+            grabber,
+            running: None,
+            wanted: false,
+            started_at: 0.0,
+        })
     }
 
     /// Probes again when launch settled for less than DXGI + NVENC: at sign-in the driver or
@@ -109,7 +142,9 @@ impl Capture {
         let (encoder, grabber) = pipeline(&self.ffmpeg);
         let better = ffmpeg_cmd::better((self.encoder, self.grabber), (encoder, grabber));
         if better {
-            log(&format!("capture: pipeline now encoder={encoder:?} grabber={grabber:?}"));
+            log(&format!(
+                "capture: pipeline now encoder={encoder:?} grabber={grabber:?}"
+            ));
             (self.encoder, self.grabber) = (encoder, grabber);
         }
         better
@@ -134,11 +169,15 @@ impl Capture {
 
     /// The capture clock's zero, once the current ffmpeg has printed enough frames.
     pub fn clock_zero(&self) -> Option<f64> {
-        self.running.as_ref().and_then(|r| *r.clock.lock().unwrap_or_else(|e| e.into_inner()))
+        self.running
+            .as_ref()
+            .and_then(|r| *r.clock.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub fn is_running(&mut self) -> bool {
-        self.running.as_mut().is_some_and(|r| matches!(r.child.try_wait(), Ok(None)))
+        self.running
+            .as_mut()
+            .is_some_and(|r| matches!(r.child.try_wait(), Ok(None)))
     }
 
     /// True if ffmpeg had been started and has since died (the health check restarts it).
@@ -146,7 +185,11 @@ impl Capture {
         let died = self.wanted && !self.is_running();
         if died && let Some(r) = &self.running {
             let words = r.last_words.lock().unwrap_or_else(|e| e.into_inner());
-            log(&format!("capture ffmpeg exited ({:?}): {}", r.child.id(), words.iter().cloned().collect::<Vec<_>>().join(" | ")));
+            log(&format!(
+                "capture ffmpeg exited ({:?}): {}",
+                r.child.id(),
+                words.iter().cloned().collect::<Vec<_>>().join(" | ")
+            ));
         }
         died
     }
@@ -176,7 +219,12 @@ impl Capture {
                 let pid = running.child.id();
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
-                log(&format!("capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}", crate::job::contains(&running.child), ffmpeg_cmd::effective_fps(config.fps, self.grabber), config.buffer_seconds));
+                log(&format!(
+                    "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}",
+                    crate::job::contains(&running.child),
+                    ffmpeg_cmd::effective_fps(config.fps, self.grabber),
+                    config.buffer_seconds
+                ));
                 self.running = Some(running);
             }
             Err(e) => {
@@ -201,7 +249,11 @@ impl Capture {
         let last_words = Arc::new(Mutex::new(VecDeque::new()));
         let (published, said) = (Arc::clone(&clock), Arc::clone(&last_words));
         std::thread::spawn(move || read_clock(read, published, said));
-        Ok(Running { child, clock, last_words })
+        Ok(Running {
+            child,
+            clock,
+            last_words,
+        })
     }
 
     /// Stops ffmpeg cleanly ("q" lets it close the segment), then harder.
@@ -233,7 +285,9 @@ impl Capture {
     /// Only the live capture's files. Never a running save's snapshots, lists, WAVs or video,
     /// and never the PID file.
     fn wipe_segments(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.segment_dir) else { return };
+        let Ok(entries) = std::fs::read_dir(&self.segment_dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if ffmpeg_cmd::is_capture_file(&name) {
@@ -254,7 +308,12 @@ fn stderr_pipe() -> std::io::Result<(std::fs::File, OwnedHandle)> {
     if unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), STDERR_PIPE_BYTES) } == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    unsafe { Ok((std::fs::File::from_raw_handle(read), OwnedHandle::from_raw_handle(write))) }
+    unsafe {
+        Ok((
+            std::fs::File::from_raw_handle(read),
+            OwnedHandle::from_raw_handle(write),
+        ))
+    }
 }
 
 /// Drains ffmpeg's stderr to EOF (a full pipe would stall the capture) and publishes the capture
@@ -289,7 +348,12 @@ mod tests {
 
     #[test]
     fn stderr_gets_a_pipe_large_enough_for_debug_ts() {
-        assert!(STDERR_PIPE_BYTES >= 1 << 20, "a small pipe stalls the capture at 240 fps");
+        const {
+            assert!(
+                STDERR_PIPE_BYTES >= 1 << 20,
+                "a small pipe stalls the capture at 240 fps"
+            )
+        };
     }
 
     fn root() -> PathBuf {
@@ -297,7 +361,16 @@ mod tests {
     }
 
     fn screens() -> Vec<Screen> {
-        vec![Screen { name: String::new(), rect: Monitor { x: 0, y: 0, w: 640, h: 480 }, primary: true }]
+        vec![Screen {
+            name: String::new(),
+            rect: Monitor {
+                x: 0,
+                y: 0,
+                w: 640,
+                h: 480,
+            },
+            primary: true,
+        }]
     }
 
     /// ping.exe stands in for ffmpeg: it starts, refuses ffmpeg's arguments and exits.
@@ -309,7 +382,10 @@ mod tests {
     fn without_a_working_encoder_the_capture_falls_back_to_x264_through_gdi() {
         let root = root();
         let capture = Capture::new_in(&root, fake_ffmpeg()).unwrap();
-        assert_eq!((capture.encoder(), capture.grabber()), (Encoder::X264, Grabber::Gdigrab));
+        assert_eq!(
+            (capture.encoder(), capture.grabber()),
+            (Encoder::X264, Grabber::Gdigrab)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -325,10 +401,17 @@ mod tests {
             std::fs::write(dir.join(name), "x").unwrap();
         }
         capture.start(&Config::default(), &screens());
-        let pid: u32 = std::fs::read_to_string(dir.join(PID_FILE)).unwrap().trim().parse().unwrap();
+        let pid: u32 = std::fs::read_to_string(dir.join(PID_FILE))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         assert_eq!(Some(pid), capture.running.as_ref().map(|r| r.child.id()));
         assert!(!dir.join("seg_000.ts").exists() && !dir.join(SEGMENT_LIST_FILE).exists());
-        assert!(dir.join("snap_ab_000.ts").exists() && dir.join("loopback_ab.wav").exists(), "a save's files were wiped");
+        assert!(
+            dir.join("snap_ab_000.ts").exists() && dir.join("loopback_ab.wav").exists(),
+            "a save's files were wiped"
+        );
         let died = (0..100).any(|_| {
             std::thread::sleep(Duration::from_millis(50));
             capture.has_died()

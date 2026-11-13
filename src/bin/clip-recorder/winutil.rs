@@ -9,7 +9,14 @@ pub fn wide(s: &str) -> Vec<u16> {
 pub fn random_hex() -> String {
     use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
     let mut bytes = [0u8; 16];
-    let status = unsafe { BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            16,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
     assert!(status >= 0, "BCryptGenRandom failed: {status:#x}");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

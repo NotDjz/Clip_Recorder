@@ -96,13 +96,26 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-debug_ts".into()];
     match c.grabber {
         Grabber::Ddagrab => a.extend([
-            "-f".into(), "lavfi".into(),
-            "-i".into(), format!("ddagrab=framerate={fps}:output_idx={}:draw_mouse=0", c.monitor_index),
+            "-f".into(),
+            "lavfi".into(),
+            "-i".into(),
+            format!("ddagrab=framerate={fps}:output_idx={}:draw_mouse=0", c.monitor_index),
         ]),
         Grabber::Gdigrab => a.extend([
-            "-f".into(), "gdigrab".into(), "-framerate".into(), fps.clone(), "-draw_mouse".into(), "0".into(),
-            "-offset_x".into(), m.x.to_string(), "-offset_y".into(), m.y.to_string(),
-            "-video_size".into(), format!("{}x{}", m.w, m.h), "-i".into(), "desktop".into(),
+            "-f".into(),
+            "gdigrab".into(),
+            "-framerate".into(),
+            fps.clone(),
+            "-draw_mouse".into(),
+            "0".into(),
+            "-offset_x".into(),
+            m.x.to_string(),
+            "-offset_y".into(),
+            m.y.to_string(),
+            "-video_size".into(),
+            format!("{}x{}", m.w, m.h),
+            "-i".into(),
+            "desktop".into(),
         ]),
     }
     match c.encoder {
@@ -115,19 +128,40 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
             }
             a.extend(["-rc", "constqp", "-qp", "20"].map(String::from));
         }
-        Encoder::X264 => a.extend(["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "18"].map(String::from)),
+        Encoder::X264 => a.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-tune",
+                "zerolatency",
+                "-crf",
+                "18",
+            ]
+            .map(String::from),
+        ),
     }
     a.extend(["-g".into(), keyframes]);
     a.extend([
-        "-flush_packets".into(), "1".into(),
-        "-f".into(), "segment".into(),
-        "-segment_time".into(), SEGMENT_DURATION.to_string(),
-        "-segment_wrap".into(), wrap.clone(),
-        "-reset_timestamps".into(), "1".into(),
-        "-segment_list".into(), c.segment_dir.join(SEGMENT_LIST_FILE).to_string_lossy().into_owned(),
-        "-segment_list_type".into(), "csv".into(),
-        "-segment_list_size".into(), wrap,
-        "-segment_format".into(), "mpegts".into(),
+        "-flush_packets".into(),
+        "1".into(),
+        "-f".into(),
+        "segment".into(),
+        "-segment_time".into(),
+        SEGMENT_DURATION.to_string(),
+        "-segment_wrap".into(),
+        wrap.clone(),
+        "-reset_timestamps".into(),
+        "1".into(),
+        "-segment_list".into(),
+        c.segment_dir.join(SEGMENT_LIST_FILE).to_string_lossy().into_owned(),
+        "-segment_list_type".into(),
+        "csv".into(),
+        "-segment_list_size".into(),
+        wrap,
+        "-segment_format".into(),
+        "mpegts".into(),
         c.segment_dir.join(SEGMENT_PATTERN).to_string_lossy().into_owned(),
     ]);
     a
@@ -138,7 +172,12 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
 pub fn concat_list(files: &[std::path::PathBuf]) -> String {
     files
         .iter()
-        .map(|f| format!("file '{}'\n", f.to_string_lossy().replace('\\', "/").replace('\'', r"'\''")))
+        .map(|f| {
+            format!(
+                "file '{}'\n",
+                f.to_string_lossy().replace('\\', "/").replace('\'', r"'\''")
+            )
+        })
         .collect()
 }
 
@@ -160,19 +199,41 @@ pub fn concat_args(list: &Path, duration: f64, out: &Path) -> Vec<String> {
 /// volume pumps or buzzes.
 pub fn mix_args(loopback: &Path, mic: &Path, out: &Path) -> Vec<String> {
     vec![
-        "-y".into(), "-i".into(), path(loopback), "-i".into(), path(mic),
+        "-y".into(),
+        "-i".into(),
+        path(loopback),
+        "-i".into(),
+        path(mic),
         "-filter_complex".into(),
         "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];\
          [1:a]aresample=48000,aformat=channel_layouts=stereo[a1];\
-         [a0][a1]amix=inputs=2:duration=longest:normalize=0".into(),
-        "-ac".into(), "2".into(), "-ar".into(), "48000".into(), path(out),
+         [a0][a1]amix=inputs=2:duration=longest:normalize=0"
+            .into(),
+        "-ac".into(),
+        "2".into(),
+        "-ar".into(),
+        "48000".into(),
+        path(out),
     ]
 }
 
 /// The clip: the video copied, the audio in AAC, cut to the shorter of the two.
 pub fn mux_args(video: &Path, audio: &Path, out: &Path) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-i".into(), path(video), "-i".into(), path(audio)];
-    a.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart"].map(String::from));
+    a.extend(
+        [
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+        ]
+        .map(String::from),
+    );
     a.push(path(out));
     a
 }
@@ -201,7 +262,10 @@ mod tests {
     #[test]
     fn the_mux_copies_the_video_and_stops_at_the_shorter_stream() {
         let a = mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("clip.mp4"));
-        assert_eq!((value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")), (Some("copy"), Some("aac"), Some("192k")));
+        assert_eq!(
+            (value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")),
+            (Some("copy"), Some("aac"), Some("192k"))
+        );
         assert!(a.contains(&"-shortest".to_string()) && a.contains(&"+faststart".to_string()));
     }
 
@@ -211,8 +275,18 @@ mod tests {
         assert_eq!(list, "file 'C:/Users/O'\\''Neil/snap_1.ts'\nfile 'C:/t/snap_2.ts'\n");
     }
 
-    const PRIMARY: Monitor = Monitor { x: 0, y: 0, w: 1920, h: 1080 };
-    const SECOND: Monitor = Monitor { x: 1920, y: 0, w: 2560, h: 1440 };
+    const PRIMARY: Monitor = Monitor {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1080,
+    };
+    const SECOND: Monitor = Monitor {
+        x: 1920,
+        y: 0,
+        w: 2560,
+        h: 1440,
+    };
 
     fn args(fps: u32, grabber: Grabber, encoder: Encoder) -> Vec<String> {
         capture_args(&Capture {
@@ -227,7 +301,10 @@ mod tests {
     }
 
     fn value<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
-        a.iter().position(|x| x == flag).and_then(|i| a.get(i + 1)).map(String::as_str)
+        a.iter()
+            .position(|x| x == flag)
+            .and_then(|i| a.get(i + 1))
+            .map(String::as_str)
     }
 
     #[test]
@@ -242,7 +319,11 @@ mod tests {
 
     #[test]
     fn a_later_probe_upgrades_only_to_a_better_pipeline() {
-        let (best, gdi, cpu) = ((Encoder::Nvenc, Grabber::Ddagrab), (Encoder::Nvenc, Grabber::Gdigrab), (Encoder::X264, Grabber::Gdigrab));
+        let (best, gdi, cpu) = (
+            (Encoder::Nvenc, Grabber::Ddagrab),
+            (Encoder::Nvenc, Grabber::Gdigrab),
+            (Encoder::X264, Grabber::Gdigrab),
+        );
         assert!(better(cpu, gdi) && better(cpu, best) && better(gdi, best));
         assert!(!better(best, best) && !better(best, gdi) && !better(gdi, cpu) && !better(cpu, cpu));
     }
@@ -264,7 +345,16 @@ mod tests {
         for name in ["seg_000.ts", "seg_121.ts", SEGMENT_LIST_FILE] {
             assert!(is_capture_file(name), "{name}");
         }
-        for name in ["snap_ab12_000.ts", "concat_ab12.txt", "loopback_ab12.wav", "mic_ab12.wav", "video_ab12.mp4", "mixed_ab12.wav", "ffmpeg.pid", "segments.csv.tmp"] {
+        for name in [
+            "snap_ab12_000.ts",
+            "concat_ab12.txt",
+            "loopback_ab12.wav",
+            "mic_ab12.wav",
+            "video_ab12.mp4",
+            "mixed_ab12.wav",
+            "ffmpeg.pid",
+            "segments.csv.tmp",
+        ] {
             assert!(!is_capture_file(name), "{name} belongs to a save or the orphan sweep");
         }
     }
@@ -275,7 +365,11 @@ mod tests {
         for fps in FPS_OPTIONS {
             for encoder in [Encoder::Nvenc, Encoder::X264] {
                 let a = args(fps, Grabber::Ddagrab, encoder);
-                assert_eq!(value(&a, "-g"), Some((fps * SEGMENT_DURATION).to_string().as_str()), "{fps} fps");
+                assert_eq!(
+                    value(&a, "-g"),
+                    Some((fps * SEGMENT_DURATION).to_string().as_str()),
+                    "{fps} fps"
+                );
                 assert_eq!(value(&a, "-segment_time"), Some(SEGMENT_DURATION.to_string().as_str()));
             }
         }
@@ -283,7 +377,10 @@ mod tests {
 
     #[test]
     fn packets_are_flushed_so_snapshots_are_current() {
-        assert_eq!(value(&args(60, Grabber::Ddagrab, Encoder::Nvenc), "-flush_packets"), Some("1"));
+        assert_eq!(
+            value(&args(60, Grabber::Ddagrab, Encoder::Nvenc), "-flush_packets"),
+            Some("1")
+        );
     }
 
     #[test]
@@ -308,7 +405,10 @@ mod tests {
             let a = args(fps, Grabber::Ddagrab, Encoder::Nvenc);
             if fps >= B_FRAMES_MIN_FPS {
                 // Without -delay 0 NVENC holds ~15 frames: +70 ms of A/V offset, measured.
-                assert_eq!((value(&a, "-bf"), value(&a, "-delay"), value(&a, "-tune")), (Some("3"), Some("0"), Some("hq")));
+                assert_eq!(
+                    (value(&a, "-bf"), value(&a, "-delay"), value(&a, "-tune")),
+                    (Some("3"), Some("0"), Some("hq"))
+                );
             } else {
                 assert_eq!((value(&a, "-bf"), value(&a, "-tune")), (None, Some("ll")), "{fps} fps");
             }
@@ -325,7 +425,10 @@ mod tests {
     #[test]
     fn gdigrab_selects_the_monitor_by_its_rectangle() {
         let a = args(60, Grabber::Gdigrab, Encoder::X264);
-        assert_eq!((value(&a, "-offset_x"), value(&a, "-offset_y"), value(&a, "-video_size")), (Some("1920"), Some("0"), Some("2560x1440")));
+        assert_eq!(
+            (value(&a, "-offset_x"), value(&a, "-offset_y"), value(&a, "-video_size")),
+            (Some("1920"), Some("0"), Some("2560x1440"))
+        );
         assert_eq!(value(&a, "-i"), Some("desktop"));
         let _ = PRIMARY;
     }
@@ -336,7 +439,10 @@ mod tests {
         assert!(a.contains(&"-debug_ts".to_string()));
         assert_eq!(value(&a, "-segment_list"), Some(r"C:\tmp\cliprec_x\segments.csv"));
         assert_eq!(value(&a, "-segment_list_type"), Some("csv"));
-        assert_eq!(value(&a, "-segment_list_size"), Some(segment_wrap(30).to_string().as_str()));
+        assert_eq!(
+            value(&a, "-segment_list_size"),
+            Some(segment_wrap(30).to_string().as_str())
+        );
         assert_eq!(a.last().map(String::as_str), Some(r"C:\tmp\cliprec_x\seg_%03d.ts"));
     }
 }

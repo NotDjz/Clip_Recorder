@@ -23,7 +23,14 @@ pub fn play(chime: Chime) {
         Chime::Failed => &wavs[2],
     };
     std::thread::spawn(move || {
-        if unsafe { PlaySoundW(wav.as_ptr() as *const u16, std::ptr::null_mut(), SND_MEMORY | SND_NODEFAULT) } == 0 {
+        if unsafe {
+            PlaySoundW(
+                wav.as_ptr() as *const u16,
+                std::ptr::null_mut(),
+                SND_MEMORY | SND_NODEFAULT,
+            )
+        } == 0
+        {
             log("chime not played");
         }
     });

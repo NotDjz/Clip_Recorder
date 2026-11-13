@@ -59,7 +59,10 @@ pub struct Tick {
 /// Audio healing never waits on the capture: a tick that returned early for a dead ffmpeg let a
 /// capture stuck restarting stop the audio from ever coming back.
 pub fn tick(capture_died: bool) -> Tick {
-    Tick { restart_capture: capture_died, heal_audio: true }
+    Tick {
+        restart_capture: capture_died,
+        heal_audio: true,
+    }
 }
 
 #[cfg(test)]
@@ -68,8 +71,20 @@ mod tests {
 
     #[test]
     fn audio_heals_even_on_a_tick_that_restarts_the_capture() {
-        assert_eq!(tick(true), Tick { restart_capture: true, heal_audio: true });
-        assert_eq!(tick(false), Tick { restart_capture: false, heal_audio: true });
+        assert_eq!(
+            tick(true),
+            Tick {
+                restart_capture: true,
+                heal_audio: true
+            }
+        );
+        assert_eq!(
+            tick(false),
+            Tick {
+                restart_capture: false,
+                heal_audio: true
+            }
+        );
     }
 
     #[test]
@@ -85,7 +100,11 @@ mod tests {
     fn an_open_stream_with_no_frame_yet_is_left_alone() {
         let mut r = Retry::default();
         for _ in 0..100 {
-            assert_eq!(r.decide(true, true, 0), Decision::Keep, "silence was taken for a dead stream");
+            assert_eq!(
+                r.decide(true, true, 0),
+                Decision::Keep,
+                "silence was taken for a dead stream"
+            );
         }
     }
 
@@ -116,6 +135,10 @@ mod tests {
         let mut r = Retry::default();
         assert_eq!(r.decide(true, false, 0), Decision::Reopen);
         assert_eq!(r.decide(true, true, 500), Decision::Keep); // the reopen worked
-        assert_eq!(r.decide(true, false, 500), Decision::Reopen, "the next death waited for an old backoff");
+        assert_eq!(
+            r.decide(true, false, 500),
+            Decision::Reopen,
+            "the next death waited for an old backoff"
+        );
     }
 }

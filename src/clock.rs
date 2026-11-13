@@ -77,7 +77,15 @@ mod tests {
         let feed = [(100.05, 0.0), (101.02, 1.0), (101.80, 1.5), (112.60, 12.0)];
         let published: Vec<Option<f64>> = feed.iter().map(|&(t, pts)| e.observe(t, pts)).collect();
         assert_eq!(published[..2], [None, None], "published before the first window closed");
-        assert!((published[2].unwrap() - 100.02).abs() < 1e-9, "first window gave {:?}", published[2]);
-        assert!((published[3].unwrap() - 100.60).abs() < 1e-9, "did not follow the step: {:?}", published[3]);
+        assert!(
+            (published[2].unwrap() - 100.02).abs() < 1e-9,
+            "first window gave {:?}",
+            published[2]
+        );
+        assert!(
+            (published[3].unwrap() - 100.60).abs() < 1e-9,
+            "did not follow the step: {:?}",
+            published[3]
+        );
     }
 }

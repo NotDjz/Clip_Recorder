@@ -13,7 +13,10 @@ pub struct Hotkey {
 }
 
 /// Ctrl+Alt+R: the default, and the answer to anything unusable (no key, or no modifier).
-pub const DEFAULT: Hotkey = Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_ALT, vk: 0x52 };
+pub const DEFAULT: Hotkey = Hotkey {
+    modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_ALT,
+    vk: 0x52,
+};
 
 /// Keys: A-Z, 0-9, F1-F12. Modifiers: Ctrl, Alt, Shift. Case and spaces don't matter.
 pub fn parse(text: &str) -> Hotkey {
@@ -38,7 +41,11 @@ pub fn parse(text: &str) -> Hotkey {
 pub fn format(ctrl: bool, alt: bool, shift: bool, key: &str) -> Option<String> {
     let key = key.to_ascii_uppercase();
     key_code(&key)?;
-    let mods: Vec<&str> = [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift")].into_iter().filter(|m| m.0).map(|m| m.1).collect();
+    let mods: Vec<&str> = [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift")]
+        .into_iter()
+        .filter(|m| m.0)
+        .map(|m| m.1)
+        .collect();
     (!mods.is_empty()).then(|| format!("{}+{key}", mods.join("+")))
 }
 
@@ -65,8 +72,20 @@ mod tests {
 
     #[test]
     fn letters_digits_and_function_keys() {
-        assert_eq!(parse("Ctrl+Shift+F9"), Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, vk: 0x78 });
-        assert_eq!(parse(" alt + 5 "), Hotkey { modifiers: MOD_NOREPEAT | MOD_ALT, vk: 0x35 });
+        assert_eq!(
+            parse("Ctrl+Shift+F9"),
+            Hotkey {
+                modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT,
+                vk: 0x78
+            }
+        );
+        assert_eq!(
+            parse(" alt + 5 "),
+            Hotkey {
+                modifiers: MOD_NOREPEAT | MOD_ALT,
+                vk: 0x35
+            }
+        );
         assert_eq!(parse("Ctrl+F12").vk, 0x7B);
     }
 
@@ -74,7 +93,13 @@ mod tests {
     fn a_captured_combination_parses_back_to_itself() {
         let text = format(true, false, true, "f9").unwrap();
         assert_eq!(text, "Ctrl+Shift+F9");
-        assert_eq!(parse(&text), Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, vk: 0x78 });
+        assert_eq!(
+            parse(&text),
+            Hotkey {
+                modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT,
+                vk: 0x78
+            }
+        );
         assert_eq!(format(true, true, false, "r").as_deref(), Some("Ctrl+Alt+R"));
     }
 

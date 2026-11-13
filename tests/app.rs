@@ -4,8 +4,8 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ENDSESSION_CLOSEAPP, EnumWindows, GetClassNameW, GetWindowTextW, IsWindowVisible, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
-    WM_ENDSESSION, WM_QUERYENDSESSION,
+    ENDSESSION_CLOSEAPP, EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_ENDSESSION, WM_QUERYENDSESSION,
 };
 
 /// The hidden top-level window the app keeps so Restart Manager and logoff can reach it.
@@ -36,7 +36,12 @@ unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> i32 {
 }
 
 fn find_window(pid: u32, class: Option<&'static str>, title: Option<&'static str>) -> Option<HWND> {
-    let mut search = Search { pid, class, title, found: std::ptr::null_mut() };
+    let mut search = Search {
+        pid,
+        class,
+        title,
+        found: std::ptr::null_mut(),
+    };
     unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
     (!search.found.is_null()).then_some(search.found)
 }
@@ -47,7 +52,17 @@ fn session_window(pid: u32) -> Option<HWND> {
 
 fn send(hwnd: HWND, msg: u32, wparam: usize) {
     let mut result = 0;
-    unsafe { SendMessageTimeoutW(hwnd, msg, wparam, ENDSESSION_CLOSEAPP as LPARAM, SMTO_ABORTIFHUNG, 1000, &mut result) };
+    unsafe {
+        SendMessageTimeoutW(
+            hwnd,
+            msg,
+            wparam,
+            ENDSESSION_CLOSEAPP as LPARAM,
+            SMTO_ABORTIFHUNG,
+            1000,
+            &mut result,
+        )
+    };
 }
 
 fn wait_until<T>(limit: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
@@ -95,7 +110,10 @@ fn launch(dir: &std::path::Path) -> App {
     use std::process::Stdio;
     App(Command::new(env!("CARGO_BIN_EXE_clip-recorder"))
         .env("CLIPREC_DATA_DIR", dir)
-        .env("CLIPREC_FFMPEG", concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
+        .env(
+            "CLIPREC_FFMPEG",
+            concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -132,7 +150,10 @@ fn a_force_killed_app_takes_its_ffmpeg_along() {
     let dir = data_dir("job");
     let mut app = launch(&dir);
     let pid = wait_until(Duration::from_secs(20), || ffmpeg_pid(&dir)).expect("the capture never started");
-    assert!(!process_exits_within(pid, 500), "ffmpeg died on its own: the test proves nothing");
+    assert!(
+        !process_exits_within(pid, 500),
+        "ffmpeg died on its own: the test proves nothing"
+    );
     app.kill().unwrap(); // TerminateProcess, no cleanup at all
     let _ = app.wait();
     let died = process_exits_within(pid, 3000);
@@ -166,7 +187,10 @@ fn quits_when_windows_ends_the_session() {
         send(hwnd, WM_ENDSESSION, 1);
         app.try_wait().unwrap()
     });
-    assert!(exit.is_some_and(|status| status.success()), "clip-recorder ignored WM_ENDSESSION");
+    assert!(
+        exit.is_some_and(|status| status.success()),
+        "clip-recorder ignored WM_ENDSESSION"
+    );
 }
 
 /// Two instances would fight over the capture, the hotkey and NVENC sessions.
@@ -191,19 +215,37 @@ fn a_second_launch_opens_settings_in_the_first() {
     wait_until(Duration::from_secs(10), || session_window(first.id())).expect("first instance never started");
     assert!(find_window(first.id(), None, Some("Clip Recorder Settings")).is_none());
     let _second = launch(&dir);
-    let shown = wait_until(Duration::from_secs(10), || find_window(first.id(), None, Some("Clip Recorder Settings")));
+    let shown = wait_until(Duration::from_secs(10), || {
+        find_window(first.id(), None, Some("Clip Recorder Settings"))
+    });
     assert!(shown.is_some(), "no Settings window");
 }
 
 fn press(keys: &[u16]) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    };
     let key = |vk: u16, flags| INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     };
     let mut inputs: Vec<INPUT> = keys.iter().map(|&k| key(k, 0)).collect();
     inputs.extend(keys.iter().rev().map(|&k| key(k, KEYEVENTF_KEYUP)));
-    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
 }
 
 /// The whole path a user takes: a hotkey press ends as a decodable MP4 in the clips folder.
@@ -224,13 +266,19 @@ fn the_hotkey_saves_a_clip_that_decodes() {
     wait_until(Duration::from_secs(20), || ffmpeg_pid(&dir)).expect("the capture never started");
     std::thread::sleep(Duration::from_secs(5)); // past "too soon", with a few complete segments
     press(&[0x11, 0x12, 0x10, 0x7B]); // Ctrl, Alt, Shift, F12
-    let done = wait_until(Duration::from_secs(40), || log().lines().find(|l| l.contains("done: saved=")).map(String::from));
+    let done = wait_until(Duration::from_secs(40), || {
+        log().lines().find(|l| l.contains("done: saved=")).map(String::from)
+    });
     let done = done.unwrap_or_else(|| panic!("no save finished:\n{}", log()));
     assert!(done.contains("saved=true"), "{}", log());
     // The clip is placed by ffmpeg's capture clock, parsed from -debug_ts text: an ffmpeg
     // upgrade that rewords it would silently put every clip back on file times.
     assert!(log().contains("anchor=capture"), "{}", log());
-    let clip = std::fs::read_dir(&clips).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "mp4"));
+    let clip = std::fs::read_dir(&clips)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "mp4"));
     let clip = clip.expect("no MP4 in the clips folder");
     let decode = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
         .args(["-v", "error", "-i"])
@@ -238,5 +286,9 @@ fn the_hotkey_saves_a_clip_that_decodes() {
         .args(["-f", "null", "-"])
         .output()
         .unwrap();
-    assert!(decode.status.success() && decode.stderr.is_empty(), "{}", String::from_utf8_lossy(&decode.stderr));
+    assert!(
+        decode.status.success() && decode.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
 }

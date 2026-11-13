@@ -12,7 +12,9 @@ pub fn log(msg: &str) {
     if cfg!(test) {
         return;
     }
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
     let line = format!("[{}] {msg}", log::rfc3339(ms));
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = paths::log_file();

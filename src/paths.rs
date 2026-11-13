@@ -44,9 +44,16 @@ mod tests {
 
         unsafe { std::env::set_var("CLIPREC_DATA_DIR", r"C:\somewhere") };
         assert_eq!(config_file(), PathBuf::from(r"C:\somewhere\config.json"));
-        assert_eq!(segments_root(), PathBuf::from(r"C:\somewhere\temp"), "a test run would sweep the real %TEMP%");
+        assert_eq!(
+            segments_root(),
+            PathBuf::from(r"C:\somewhere\temp"),
+            "a test run would sweep the real %TEMP%"
+        );
         unsafe { std::env::set_var("CLIPREC_DATA_DIR", "") };
-        assert!(data_dir().ends_with("ClipRecorder"), "an empty override must fall back to %APPDATA%");
+        assert!(
+            data_dir().ends_with("ClipRecorder"),
+            "an empty override must fall back to %APPDATA%"
+        );
         unsafe { std::env::remove_var("CLIPREC_DATA_DIR") };
     }
 }

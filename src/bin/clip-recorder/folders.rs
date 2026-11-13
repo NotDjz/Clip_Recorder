@@ -21,14 +21,20 @@ pub fn videos() -> PathBuf {
 
 /// Where clips go: the configured folder, else Videos\ClipRecorder.
 pub fn clips(configured: &str) -> PathBuf {
-    if configured.trim().is_empty() { videos().join("ClipRecorder") } else { PathBuf::from(configured) }
+    if configured.trim().is_empty() {
+        videos().join("ClipRecorder")
+    } else {
+        PathBuf::from(configured)
+    }
 }
 
 /// The folder picker. ponytail: the classic SHBrowseForFolder tree; IFileOpenDialog with
 /// FOS_PICKFOLDERS looks newer but needs COM vtables windows-sys does not have.
 pub fn pick(owner: windows_sys::Win32::Foundation::HWND, title: &str) -> Option<String> {
     use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
-    use windows_sys::Win32::UI::Shell::{BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW};
+    use windows_sys::Win32::UI::Shell::{
+        BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW, SHGetPathFromIDListW,
+    };
     let title = crate::winutil::wide(title);
     unsafe {
         // The new-style dialog needs an STA; already initialised is fine.

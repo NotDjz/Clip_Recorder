@@ -37,12 +37,19 @@ pub fn sweep(temp: &Path) {
 /// Terminates the process in `dir`'s PID file, but only if it still is an ffmpeg.exe: PIDs are
 /// reused, and killing a stranger's process is worse than leaving an orphan.
 pub fn kill_orphan(dir: &Path, deadline: Instant) {
-    let Some(pid) = std::fs::read_to_string(dir.join(PID_FILE)).ok().and_then(|s| s.trim().parse::<u32>().ok()) else {
+    let Some(pid) = std::fs::read_to_string(dir.join(PID_FILE))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    else {
         return;
     };
     unsafe {
         // SYNCHRONIZE, or the wait below silently does nothing.
-        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid);
+        let h = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
+            0,
+            pid,
+        );
         if h.is_null() {
             return;
         }
@@ -50,7 +57,9 @@ pub fn kill_orphan(dir: &Path, deadline: Instant) {
         let mut size = buf.len() as u32;
         if QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut size) != 0 {
             let image = String::from_utf16_lossy(&buf[..size as usize]);
-            let name = Path::new(&image).file_name().map(|n| n.to_string_lossy().to_lowercase());
+            let name = Path::new(&image)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase());
             if name.as_deref() == Some("ffmpeg.exe") {
                 TerminateProcess(h, 1);
                 // TerminateProcess is asynchronous.
@@ -78,8 +87,11 @@ mod tests {
     #[test]
     fn a_reused_pid_that_is_not_ffmpeg_is_never_killed() {
         let dir = temp_dir("foreign");
-        let mut stranger = std::process::Command::new("ping").args(["-n", "30", "127.0.0.1"])
-            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        let mut stranger = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         std::fs::write(dir.join(PID_FILE), stranger.id().to_string()).unwrap();
         kill_orphan(&dir, Instant::now());
         let alive = stranger.try_wait().unwrap().is_none();
@@ -101,7 +113,8 @@ mod tests {
     }
 
     fn ping() -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\ping.exe")
+        std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+            .join(r"System32\ping.exe")
     }
 
     /// The kill path itself: an orphan named ffmpeg.exe is terminated, and the sweep waits for
@@ -111,8 +124,11 @@ mod tests {
         let dir = temp_dir("orphan");
         let fake = dir.join("ffmpeg.exe");
         std::fs::copy(ping(), &fake).unwrap();
-        let mut orphan = std::process::Command::new(&fake).args(["-n", "60", "127.0.0.1"])
-            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        let mut orphan = std::process::Command::new(&fake)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
         std::fs::write(dir.join(PID_FILE), orphan.id().to_string()).unwrap();
         kill_orphan(&dir, Instant::now());
         let gone = orphan.try_wait().unwrap().is_some();
@@ -138,7 +154,10 @@ mod tests {
         std::fs::write(root.join("cliprec_not_a_folder.txt"), "x").unwrap();
         sweep(&root);
         assert!(!root.join("cliprec_1_a").exists() && !root.join("cliprec_2_b").exists());
-        assert!(root.join("someone_else").exists(), "a folder that is not a capture's was removed");
+        assert!(
+            root.join("someone_else").exists(),
+            "a folder that is not a capture's was removed"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

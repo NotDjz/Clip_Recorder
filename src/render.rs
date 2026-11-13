@@ -122,7 +122,13 @@ mod tests {
     }
 
     fn render(chunks: &[(f64, Vec<i16>)], end: f64, duration: f64) -> Option<Vec<i16>> {
-        let chunks: Vec<Chunk> = chunks.iter().map(|(t, s)| Chunk { arrival: *t, samples: s }).collect();
+        let chunks: Vec<Chunk> = chunks
+            .iter()
+            .map(|(t, s)| Chunk {
+                arrival: *t,
+                samples: s,
+            })
+            .collect();
         render_window(&chunks, RATE, 1, end, duration)
     }
 
@@ -160,7 +166,9 @@ mod tests {
         // The crackling regression: not a single silent sample may be punched into a run.
         let n = RATE as usize / 10;
         let jitter = [0.0, 0.004, -0.003, 0.005, -0.002, 0.003, -0.004, 0.002, 0.0, -0.001];
-        let chunks: Vec<(f64, Vec<i16>)> = (0..10).map(|k| ((k + 1) as f64 / 10.0 + jitter[k], chunk(7, n))).collect();
+        let chunks: Vec<(f64, Vec<i16>)> = (0..10)
+            .map(|k| ((k + 1) as f64 / 10.0 + jitter[k], chunk(7, n)))
+            .collect();
         let out = render(&chunks, 1.0 + jitter[9], 1.0).unwrap();
         assert_eq!(out.len(), RATE as usize);
         let holes = out[n / 2..RATE as usize - n / 2].iter().filter(|&&v| v == 0).count();
@@ -169,7 +177,9 @@ mod tests {
 
     #[test]
     fn contiguous_chunks_land_in_their_slots() {
-        let chunks: Vec<(f64, Vec<i16>)> = (1..=10).map(|t| (t as f64 / 10.0, chunk(t as i16, RATE as usize / 10))).collect();
+        let chunks: Vec<(f64, Vec<i16>)> = (1..=10)
+            .map(|t| (t as f64 / 10.0, chunk(t as i16, RATE as usize / 10)))
+            .collect();
         let out = render(&chunks, 1.0, 1.0).unwrap();
         for k in 1..=10 {
             assert_eq!(at(&out, (k as f64 - 0.5) * 0.1), k as i16, "chunk {k}");
@@ -180,7 +190,17 @@ mod tests {
     fn stereo_frames_are_placed_as_frames() {
         // 0.5 s of stereo frames ending at 1.0 in a [0, 1] window: the second half, both channels.
         let samples = vec![9i16; 2 * 24000];
-        let out = render_window(&[Chunk { arrival: 1.0, samples: &samples }], RATE, 2, 1.0, 1.0).unwrap();
+        let out = render_window(
+            &[Chunk {
+                arrival: 1.0,
+                samples: &samples,
+            }],
+            RATE,
+            2,
+            1.0,
+            1.0,
+        )
+        .unwrap();
         assert_eq!(out.len(), 2 * RATE as usize);
         assert_eq!((out[2 * 12000], out[2 * 36000], out[2 * 36000 + 1]), (0, 9, 9));
     }

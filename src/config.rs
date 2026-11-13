@@ -43,7 +43,9 @@ impl Config {
     /// Any text in, a valid Config out: a missing, broken or hand-edited file never stops the app.
     pub fn parse(json: &str) -> Config {
         let d = Config::default();
-        let Ok(serde_json::Value::Object(v)) = serde_json::from_str(json) else { return d };
+        let Ok(serde_json::Value::Object(v)) = serde_json::from_str(json) else {
+            return d;
+        };
         let number = |key: &str| match v.get(key) {
             Some(serde_json::Value::Number(n)) => n.as_u64(),
             Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
@@ -51,7 +53,10 @@ impl Config {
         };
         let text = |key: &str| v.get(key).and_then(|s| s.as_str()).map(str::to_owned);
         let pick = |key: &str, options: &[u32], default: u32| {
-            number(key).and_then(|n| u32::try_from(n).ok()).filter(|n| options.contains(n)).unwrap_or(default)
+            number(key)
+                .and_then(|n| u32::try_from(n).ok())
+                .filter(|n| options.contains(n))
+                .unwrap_or(default)
         };
         Config {
             monitor: number("monitor").map_or(d.monitor, |n| n as usize),
@@ -66,7 +71,9 @@ impl Config {
 
     /// Missing or unreadable file: the defaults.
     pub fn load(path: &Path) -> Config {
-        std::fs::read_to_string(path).map(|s| Config::parse(&s)).unwrap_or_default()
+        std::fs::read_to_string(path)
+            .map(|s| Config::parse(&s))
+            .unwrap_or_default()
     }
 
     /// Written aside then renamed over, so a crash mid-write never leaves half a config.
@@ -95,7 +102,10 @@ mod tests {
     #[test]
     fn missing_keys_take_defaults_and_present_ones_are_kept() {
         let c = Config::parse(r#"{"fps": 240, "hotkey": "Ctrl+Shift+F9", "mic_device": "Microphone (USB)"}"#);
-        assert_eq!((c.fps, c.hotkey.as_str(), c.mic_device.as_str()), (240, "Ctrl+Shift+F9", "Microphone (USB)"));
+        assert_eq!(
+            (c.fps, c.hotkey.as_str(), c.mic_device.as_str()),
+            (240, "Ctrl+Shift+F9", "Microphone (USB)")
+        );
         assert_eq!((c.buffer_seconds, c.monitor), (30, 0));
     }
 
@@ -117,10 +127,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("crtest_config_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("config.json");
-        let c = Config { fps: 240, buffer_seconds: 90, loopback_device: "Haut-parleurs (Realtek(R) Audio)".into(), ..Config::default() };
+        let c = Config {
+            fps: 240,
+            buffer_seconds: 90,
+            loopback_device: "Haut-parleurs (Realtek(R) Audio)".into(),
+            ..Config::default()
+        };
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path), c);
-        assert!(!dir.join("config.json.tmp").exists(), "the temporary file was left behind");
+        assert!(
+            !dir.join("config.json.tmp").exists(),
+            "the temporary file was left behind"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

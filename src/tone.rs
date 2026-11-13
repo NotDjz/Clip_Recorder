@@ -13,7 +13,13 @@ pub struct Note {
 }
 
 const fn note(start_ms: u32, freq: f64, amp: f64, dur_ms: u32, harm: f64) -> Note {
-    Note { start_ms, freq, amp, dur_ms, harm }
+    Note {
+        start_ms,
+        freq,
+        amp,
+        dur_ms,
+        harm,
+    }
 }
 
 pub const SAVE: [Note; 2] = [note(0, 220.0, 0.34, 200, 0.5), note(0, 330.0, 0.18, 200, 0.0)];
@@ -37,11 +43,15 @@ pub fn wav(notes: &[Note]) -> Vec<u8> {
         for i in 0..len.min(mix.len().saturating_sub(start)) {
             let t = i as f64 / rate;
             let envelope = (i as f64 / attack as f64).min(1.0) * (-5.0 * i as f64 / len as f64).exp();
-            let wave = (std::f64::consts::TAU * n.freq * t).sin() + n.harm * (2.0 * std::f64::consts::TAU * n.freq * t).sin();
+            let wave =
+                (std::f64::consts::TAU * n.freq * t).sin() + n.harm * (2.0 * std::f64::consts::TAU * n.freq * t).sin();
             mix[start + i] += n.amp * envelope * wave;
         }
     }
-    let data: Vec<u8> = mix.iter().flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes()).collect();
+    let data: Vec<u8> = mix
+        .iter()
+        .flat_map(|v| ((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+        .collect();
     let mut out = Vec::with_capacity(44 + data.len());
     out.extend_from_slice(b"RIFF");
     out.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
@@ -64,7 +74,12 @@ mod tests {
     use super::*;
 
     fn samples(wav: &[u8]) -> Vec<i16> {
-        wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+        wav[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect()
     }
 
     /// Same two pitches throughout, so the chimes read as one gesture: the press ascends, the
@@ -76,7 +91,10 @@ mod tests {
         reversed.reverse();
         assert_eq!(pitches(&FAIL), reversed);
         assert!(START[0].freq < START[1].freq, "the press ascends");
-        assert!(SAVE.iter().all(|n| n.start_ms == 0), "the save sounds both notes together");
+        assert!(
+            SAVE.iter().all(|n| n.start_ms == 0),
+            "the save sounds both notes together"
+        );
     }
 
     #[test]

@@ -55,7 +55,7 @@ struct View {
 }
 
 thread_local! {
-    static VIEW: RefCell<View> = RefCell::new(View { state: State::Saved, text: String::new(), seconds: None, step: 0 });
+    static VIEW: RefCell<View> = const { RefCell::new(View { state: State::Saved, text: String::new(), seconds: None, step: 0 }) };
 }
 
 pub struct Banner {
@@ -68,7 +68,8 @@ fn colorref(rgb: u32) -> COLORREF {
 
 /// The dot's colour while saving: ACCENT breathing down towards BG and back.
 fn breath(step: u32) -> u32 {
-    let level = PULSE_FLOOR + (1.0 - PULSE_FLOOR) * (0.5 + 0.5 * (std::f64::consts::TAU * step as f64 / PULSE_STEPS as f64).cos());
+    let level = PULSE_FLOOR
+        + (1.0 - PULSE_FLOOR) * (0.5 + 0.5 * (std::f64::consts::TAU * step as f64 / PULSE_STEPS as f64).cos());
     let mix = |shift: u32| {
         let (a, b) = ((ACCENT >> shift) & 0xFF, (BG >> shift) & 0xFF);
         ((b as f64 + (a as f64 - b as f64) * level).round() as u32) << shift
@@ -92,8 +93,17 @@ impl Banner {
             RegisterClassW(&class);
             let hwnd = CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-                class_name.as_ptr(), class_name.as_ptr(), WS_POPUP,
-                0, 0, MIN_W, MIN_H, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null(),
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                MIN_W,
+                MIN_H,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                instance,
+                std::ptr::null(),
             );
             SetLayeredWindowAttributes(hwnd, colorref(KEY), 0, LWA_COLORKEY);
             SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
@@ -103,7 +113,14 @@ impl Banner {
 
     /// Replaces whatever is showing. Hides itself after `duration_ms`.
     pub fn show(&self, state: State, text: &str, seconds: Option<u32>, duration_ms: u32, screen: Monitor) {
-        VIEW.with(|v| *v.borrow_mut() = View { state, text: text.into(), seconds, step: 0 });
+        VIEW.with(|v| {
+            *v.borrow_mut() = View {
+                state,
+                text: text.into(),
+                seconds,
+                step: 0,
+            }
+        });
         unsafe {
             // A replaced banner's timers go with it: its pulse must not drive the new one's dot.
             KillTimer(self.hwnd, TIMER_HIDE);
@@ -112,8 +129,12 @@ impl Banner {
             let (w, h) = measure(self.hwnd, text, seconds, scale);
             let px = |v: i32| v * scale / 96;
             SetWindowPos(
-                self.hwnd, HWND_TOPMOST,
-                screen.x + screen.w - w - px(MARGIN), screen.y + px(MARGIN), w, h,
+                self.hwnd,
+                HWND_TOPMOST,
+                screen.x + screen.w - w - px(MARGIN),
+                screen.y + px(MARGIN),
+                w,
+                h,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
             InvalidateRect(self.hwnd, std::ptr::null(), 1);
@@ -130,9 +151,22 @@ impl Banner {
 unsafe fn font(dpi: i32, points: i32, bold: bool, face: &str) -> HFONT {
     let height = -(points * dpi / 72);
     unsafe {
-        CreateFontW(height, 0, 0, 0, if bold { FW_BOLD as i32 } else { FW_NORMAL as i32 }, 0, 0, 0,
-            DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32,
-            DEFAULT_PITCH as u32, wide(face).as_ptr())
+        CreateFontW(
+            height,
+            0,
+            0,
+            0,
+            if bold { FW_BOLD as i32 } else { FW_NORMAL as i32 },
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            wide(face).as_ptr(),
+        )
     }
 }
 
@@ -166,7 +200,10 @@ unsafe fn measure(hwnd: HWND, text: &str, seconds: Option<u32>, dpi: i32) -> (i3
         DeleteObject(status as _);
         DeleteObject(mono as _);
         ReleaseDC(hwnd, dc);
-        ((px(TEXT_X) + main.cx + px(PAD) + secs).max(px(MIN_W)), (main.cy + px(18)).max(px(MIN_H)))
+        (
+            (px(TEXT_X) + main.cx + px(PAD) + secs).max(px(MIN_W)),
+            (main.cy + px(18)).max(px(MIN_H)),
+        )
     }
 }
 
@@ -174,7 +211,12 @@ unsafe fn paint(hwnd: HWND) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let dc = BeginPaint(hwnd, &mut ps);
-        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         GetClientRect(hwnd, &mut r);
         let dpi = GetDpiForWindow(hwnd).max(96) as i32;
         let px = |v: i32| v * dpi / 96;
@@ -197,7 +239,11 @@ unsafe fn paint(hwnd: HWND) {
                 SelectObject(dc, GetStockObject(NULL_PEN));
                 DeleteObject(ring as _);
             } else {
-                let colour = if v.state == State::Saving { breath(v.step) } else { ACCENT };
+                let colour = if v.state == State::Saving {
+                    breath(v.step)
+                } else {
+                    ACCENT
+                };
                 let dot = CreateSolidBrush(colorref(colour));
                 SelectObject(dc, dot as _);
                 Ellipse(dc, cx - rr, cy - rr, cx + rr + 1, cy + rr + 1);
@@ -208,16 +254,38 @@ unsafe fn paint(hwnd: HWND) {
             let status = font(dpi, 11, true, "Segoe UI");
             let old_font = SelectObject(dc, status as _);
             SetTextColor(dc, colorref(FG));
-            let mut text_rect = RECT { left: px(TEXT_X), top: 0, right: r.right, bottom: r.bottom };
+            let mut text_rect = RECT {
+                left: px(TEXT_X),
+                top: 0,
+                right: r.right,
+                bottom: r.bottom,
+            };
             let mut t = wide(&v.text);
-            DrawTextW(dc, t.as_mut_ptr(), -1, &mut text_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                dc,
+                t.as_mut_ptr(),
+                -1,
+                &mut text_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
             if let Some(s) = seconds_text(v.seconds) {
                 let mono = font(dpi, 10, false, "Consolas");
                 SelectObject(dc, mono as _);
                 SetTextColor(dc, colorref(seconds_colour(v.state)));
-                let mut secs_rect = RECT { left: 0, top: 0, right: r.right - px(PAD), bottom: r.bottom };
+                let mut secs_rect = RECT {
+                    left: 0,
+                    top: 0,
+                    right: r.right - px(PAD),
+                    bottom: r.bottom,
+                };
                 let mut s = wide(&s);
-                DrawTextW(dc, s.as_mut_ptr(), -1, &mut secs_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                DrawTextW(
+                    dc,
+                    s.as_mut_ptr(),
+                    -1,
+                    &mut secs_rect,
+                    DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                );
                 SelectObject(dc, status as _);
                 DeleteObject(mono as _);
             }
@@ -274,7 +342,11 @@ mod tests {
         let lum = |c: u32| {
             let ch = |v: u32| {
                 let v = v as f64 / 255.0;
-                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
             };
             0.2126 * ch(c >> 16 & 0xFF) + 0.7152 * ch(c >> 8 & 0xFF) + 0.0722 * ch(c & 0xFF)
         };
@@ -308,7 +380,12 @@ mod tests {
     #[test]
     fn a_replaced_banner_stops_breathing() {
         let banner = Banner::new();
-        let screen = Monitor { x: -5000, y: -5000, w: 800, h: 600 }; // off every screen
+        let screen = Monitor {
+            x: -5000,
+            y: -5000,
+            w: 800,
+            h: 600,
+        }; // off every screen
         banner.show(State::Saving, "Saving clip", Some(30), 2000, screen);
         pump(300);
         assert!(VIEW.with(|v| v.borrow().step) > 0, "the saving dot does not breathe");
@@ -327,12 +404,20 @@ mod tests {
     /// from the start: styles set after showing let the first frame into a clip.
     #[test]
     fn the_banner_is_styled_before_it_is_ever_shown() {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GWL_EXSTYLE, GetWindowDisplayAffinity, GetWindowLongPtrW, IsWindowVisible};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GWL_EXSTYLE, GetWindowDisplayAffinity, GetWindowLongPtrW, IsWindowVisible,
+        };
         let banner = Banner::new();
         unsafe {
             assert_eq!(IsWindowVisible(banner.hwnd), 0);
             let ex = GetWindowLongPtrW(banner.hwnd, GWL_EXSTYLE) as u32;
-            for flag in [WS_EX_TRANSPARENT, WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_EX_LAYERED] {
+            for flag in [
+                WS_EX_TRANSPARENT,
+                WS_EX_TOOLWINDOW,
+                WS_EX_NOACTIVATE,
+                WS_EX_TOPMOST,
+                WS_EX_LAYERED,
+            ] {
                 assert_ne!(ex & flag, 0, "missing extended style {flag:#x}");
             }
             let mut affinity = 0;

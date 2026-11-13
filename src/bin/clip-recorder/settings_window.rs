@@ -256,11 +256,19 @@ slint::slint! {
 }
 
 fn strings(items: impl IntoIterator<Item = String>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(items.into_iter().map(SharedString::from).collect::<Vec<_>>()))
+    ModelRc::new(VecModel::from(
+        items.into_iter().map(SharedString::from).collect::<Vec<_>>(),
+    ))
 }
 
 fn label(i: usize, s: &Screen) -> String {
-    format!("{}: {}×{}{}", i + 1, s.rect.w, s.rect.h, if s.primary { "  (primary)" } else { "" })
+    format!(
+        "{}: {}×{}{}",
+        i + 1,
+        s.rect.w,
+        s.rect.h,
+        if s.primary { "  (primary)" } else { "" }
+    )
 }
 
 pub struct Hardware {
@@ -270,7 +278,14 @@ pub struct Hardware {
 
 /// Fills the form from the config. Device lists are read live, so one plugged in since launch
 /// is offered.
-pub fn fill(w: &SettingsWindow, config: &Config, screens: &[Screen], hw: &Hardware, devices: (Vec<String>, Vec<String>), startup: Option<bool>) {
+pub fn fill(
+    w: &SettingsWindow,
+    config: &Config,
+    screens: &[Screen],
+    hw: &Hardware,
+    devices: (Vec<String>, Vec<String>),
+    startup: Option<bool>,
+) {
     w.set_hardware(
         format!(
             "{}     {}",
@@ -292,7 +307,12 @@ pub fn fill(w: &SettingsWindow, config: &Config, screens: &[Screen], hw: &Hardwa
     let (mics, mic) = device_choices(devices.1, &config.mic_device);
     w.set_mics(strings(mics));
     w.set_mic(mic as i32);
-    w.set_folder(crate::folders::clips(&config.output_folder).display().to_string().into());
+    w.set_folder(
+        crate::folders::clips(&config.output_folder)
+            .display()
+            .to_string()
+            .into(),
+    );
     w.set_hotkey(config.hotkey.as_str().into());
     w.set_capturing(false);
     w.set_startup_available(startup.is_some());
@@ -309,7 +329,10 @@ fn picked(model: ModelRc<SharedString>, index: i32) -> String {
 /// default keeps following a relocated Videos folder.
 pub fn read(w: &SettingsWindow, config: &Config) -> Config {
     let number = |model: ModelRc<SharedString>, index: i32, fallback: u32| {
-        model.row_data(index.max(0) as usize).and_then(|s| s.parse().ok()).unwrap_or(fallback)
+        model
+            .row_data(index.max(0) as usize)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(fallback)
     };
     let folder = w.get_folder().trim().to_string();
     let default = crate::folders::clips("").display().to_string();
@@ -317,7 +340,11 @@ pub fn read(w: &SettingsWindow, config: &Config) -> Config {
         monitor: w.get_monitor().max(0) as usize,
         fps: number(w.get_fps_options(), w.get_fps(), config.fps),
         buffer_seconds: number(w.get_buffer_options(), w.get_buffer(), config.buffer_seconds),
-        output_folder: if folder == default || folder.is_empty() { String::new() } else { folder },
+        output_folder: if folder == default || folder.is_empty() {
+            String::new()
+        } else {
+            folder
+        },
         loopback_device: picked(w.get_loopbacks(), w.get_loopback()),
         mic_device: picked(w.get_mics(), w.get_mic()),
         hotkey: w.get_hotkey().to_string(),
@@ -327,11 +354,76 @@ pub fn read(w: &SettingsWindow, config: &Config) -> Config {
 /// Slint's key text for the key part of a combination: letters, digits, F1-F12.
 pub fn key_name(text: &str) -> String {
     use slint::platform::Key;
-    let fkeys = [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12];
+    let fkeys = [
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+    ];
     match fkeys.iter().position(|k| SharedString::from(*k) == text) {
         Some(i) => format!("F{}", i + 1),
         None => text.to_string(),
     }
+}
+
+/// The native window, once winit has made it: the exe's icon, and a dark title bar. Dark mode
+/// alone is not enough: with "accent colour on title bars" on, the active bar takes the accent
+/// and sits across the dark window like a stripe, so the caption colour is set too (Win11).
+pub fn adopt(w: &SettingsWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+    let handle = w.window().window_handle();
+    let RawWindowHandle::Win32(win32) = handle.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+    unsafe {
+        let dark: i32 = 1;
+        let caption: u32 = 0x001B1C19; // Ink.bg as COLORREF (BGR)
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&dark as *const i32).cast(),
+            4,
+        );
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, (&caption as *const u32).cast(), 4);
+        // A form of fixed size: no maximize box.
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE,
+            GetWindowLongPtrW(hwnd, GWL_STYLE) & !(WS_MAXIMIZEBOX as isize),
+        );
+        // The ICO has a frame per size: load the ones this DPI needs.
+        let dpi = GetDpiForWindow(hwnd);
+        let module = GetModuleHandleW(std::ptr::null());
+        for (which, cx, cy) in [(ICON_SMALL, SM_CXSMICON, SM_CYSMICON), (ICON_BIG, SM_CXICON, SM_CYICON)] {
+            let icon = LoadImageW(
+                module,
+                1 as _,
+                IMAGE_ICON,
+                GetSystemMetricsForDpi(cx, dpi),
+                GetSystemMetricsForDpi(cy, dpi),
+                LR_DEFAULTCOLOR,
+            );
+            if !icon.is_null() {
+                SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+            }
+        }
+    }
+    Some(hwnd)
 }
 
 #[cfg(test)]
@@ -342,18 +434,35 @@ mod tests {
     use slint::platform::{Key, WindowEvent};
 
     fn screens() -> Vec<Screen> {
-        let s = |x, primary| Screen { name: String::new(), rect: Monitor { x, y: 0, w: 2560, h: 1440 }, primary };
+        let s = |x, primary| Screen {
+            name: String::new(),
+            rect: Monitor {
+                x,
+                y: 0,
+                w: 2560,
+                h: 1440,
+            },
+            primary,
+        };
         vec![s(0, true), s(2560, false)]
     }
 
     /// The testing platform is set once per thread: call this once per test.
     fn window(config: &Config) -> SettingsWindow {
         let w = SettingsWindow::new().unwrap();
-        let hw = Hardware { encoder: Encoder::Nvenc, grabber: Grabber::Ddagrab };
-        let devices = (vec!["Speakers (Realtek)".into(), "Headphones (USB)".into()], vec!["Microphone (Realtek)".into()]);
+        let hw = Hardware {
+            encoder: Encoder::Nvenc,
+            grabber: Grabber::Ddagrab,
+        };
+        let devices = (
+            vec!["Speakers (Realtek)".into(), "Headphones (USB)".into()],
+            vec!["Microphone (Realtek)".into()],
+        );
         fill(&w, config, &screens(), &hw, devices, Some(true));
         w.on_key_combination(|text, ctrl, alt, shift| {
-            clip_recorder::hotkey::format(ctrl, alt, shift, &key_name(&text)).unwrap_or_default().into()
+            clip_recorder::hotkey::format(ctrl, alt, shift, &key_name(&text))
+                .unwrap_or_default()
+                .into()
         });
         w
     }
@@ -365,8 +474,19 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         for config in [
             Config::default(),
-            Config { monitor: 1, fps: 240, buffer_seconds: 90, mic_device: "Microphone (Realtek)".into(), hotkey: "Ctrl+Shift+F9".into(), ..Config::default() },
-            Config { loopback_device: "Unplugged (USB)".into(), output_folder: r"D:\Clips".into(), ..Config::default() },
+            Config {
+                monitor: 1,
+                fps: 240,
+                buffer_seconds: 90,
+                mic_device: "Microphone (Realtek)".into(),
+                hotkey: "Ctrl+Shift+F9".into(),
+                ..Config::default()
+            },
+            Config {
+                loopback_device: "Unplugged (USB)".into(),
+                output_folder: r"D:\Clips".into(),
+                ..Config::default()
+            },
         ] {
             assert_eq!(read(&window(&config), &config), config);
         }
@@ -381,7 +501,10 @@ mod tests {
         w.set_fps(2);
         w.set_loopback(2);
         let new = read(&w, &config);
-        assert_eq!((new.monitor, new.fps, new.loopback_device.as_str()), (1, 120, "Headphones (USB)"));
+        assert_eq!(
+            (new.monitor, new.fps, new.loopback_device.as_str()),
+            (1, 120, "Headphones (USB)")
+        );
     }
 
     fn press(w: &SettingsWindow, keys: &[SharedString]) {
@@ -398,7 +521,9 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let w = window(&Config::default());
         w.show().unwrap();
-        let button = ElementHandle::find_by_accessible_label(&w, "Ctrl+Alt+R").next().expect("hotkey button");
+        let button = ElementHandle::find_by_accessible_label(&w, "Ctrl+Alt+R")
+            .next()
+            .expect("hotkey button");
         button.invoke_accessible_default_action();
         assert!(w.get_capturing());
         press(&w, &["r".into()]); // no modifier: ignored, still waiting
@@ -412,7 +537,10 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let w = window(&Config::default());
         w.show().unwrap();
-        ElementHandle::find_by_accessible_label(&w, "Ctrl+Alt+R").next().unwrap().invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&w, "Ctrl+Alt+R")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
         press(&w, &[Key::Escape.into()]);
         assert_eq!((w.get_capturing(), w.get_hotkey().as_str()), (false, "Ctrl+Alt+R"));
     }
@@ -437,7 +565,11 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let w = window(&Config::default());
         assert!(ElementHandle::find_by_accessible_label(&w, "Apply").next().is_none());
-        assert!(ElementHandle::find_by_accessible_label(&w, "Save changes").next().is_some());
+        assert!(
+            ElementHandle::find_by_accessible_label(&w, "Save changes")
+                .next()
+                .is_some()
+        );
     }
 
     #[test]
@@ -447,39 +579,10 @@ mod tests {
         let saved = std::rc::Rc::new(std::cell::Cell::new(false));
         let s = saved.clone();
         w.on_save(move || s.set(true));
-        ElementHandle::find_by_accessible_label(&w, "Save changes").next().unwrap().invoke_accessible_default_action();
+        ElementHandle::find_by_accessible_label(&w, "Save changes")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
         assert!(saved.get());
     }
-}
-
-/// The native window, once winit has made it: the exe's icon, and a dark title bar. Dark mode
-/// alone is not enough: with "accent colour on title bars" on, the active bar takes the accent
-/// and sits across the dark window like a stripe, so the caption colour is set too (Win11).
-pub fn adopt(w: &SettingsWindow) -> Option<windows_sys::Win32::Foundation::HWND> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::Graphics::Dwm::{DWMWA_CAPTION_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
-    use windows_sys::Win32::UI::WindowsAndMessaging::*;
-    let handle = w.window().window_handle();
-    let RawWindowHandle::Win32(win32) = handle.window_handle().ok()?.as_raw() else { return None };
-    let hwnd = win32.hwnd.get() as windows_sys::Win32::Foundation::HWND;
-    unsafe {
-        let dark: i32 = 1;
-        let caption: u32 = 0x001B1C19; // Ink.bg as COLORREF (BGR)
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, (&dark as *const i32).cast(), 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, (&caption as *const u32).cast(), 4);
-        // A form of fixed size: no maximize box.
-        SetWindowLongPtrW(hwnd, GWL_STYLE, GetWindowLongPtrW(hwnd, GWL_STYLE) & !(WS_MAXIMIZEBOX as isize));
-        // The ICO has a frame per size: load the ones this DPI needs.
-        let dpi = GetDpiForWindow(hwnd);
-        let module = GetModuleHandleW(std::ptr::null());
-        for (which, cx, cy) in [(ICON_SMALL, SM_CXSMICON, SM_CYSMICON), (ICON_BIG, SM_CXICON, SM_CYICON)] {
-            let icon = LoadImageW(module, 1 as _, IMAGE_ICON, GetSystemMetricsForDpi(cx, dpi), GetSystemMetricsForDpi(cy, dpi), LR_DEFAULTCOLOR);
-            if !icon.is_null() {
-                SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
-            }
-        }
-    }
-    Some(hwnd)
 }

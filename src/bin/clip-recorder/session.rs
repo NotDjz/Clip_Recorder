@@ -52,8 +52,18 @@ pub fn listen(on_open: fn()) {
         RegisterClassW(&class);
         // Top-level and never shown: a message-only window (HWND_MESSAGE) gets no session broadcast.
         let hwnd = CreateWindowExW(
-            0, class_name.as_ptr(), wide(&crate::single_instance::name()).as_ptr(), WS_OVERLAPPED,
-            0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), instance, std::ptr::null(),
+            0,
+            class_name.as_ptr(),
+            wide(&crate::single_instance::name()).as_ptr(),
+            WS_OVERLAPPED,
+            0,
+            0,
+            0,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null(),
         );
         if hwnd.is_null() {
             log("session window not created: an upgrade with the app running will ask for a reboot");

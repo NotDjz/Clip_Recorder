@@ -21,15 +21,15 @@ mod winutil;
 use banner::Banner;
 use capture::Capture;
 use chimes::Chime;
-use clip_recorder::hotkey;
-use clip_recorder::selection::GiveUp;
 use clip_recorder::config::Config;
+use clip_recorder::hotkey;
 use clip_recorder::paths;
+use clip_recorder::selection::GiveUp;
 use logging::log;
 use monitors::Screen;
+use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use slint::ComponentHandle;
 use std::time::Duration;
 use tray::{Action, Tray};
 use winutil::wide;
@@ -59,7 +59,8 @@ impl App {
     /// The banner goes on the captured screen: that is where the user is looking.
     fn notify(&self, state: banner::State, text: &str, seconds: Option<u32>, duration_ms: u32) {
         let index = self.config.monitor.min(self.screens.len().saturating_sub(1));
-        self.banner.show(state, text, seconds, duration_ms, self.screens[index].rect);
+        self.banner
+            .show(state, text, seconds, duration_ms, self.screens[index].rect);
     }
 }
 
@@ -69,7 +70,9 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 
 fn main() {
     unsafe {
-        use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+        use windows_sys::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+        };
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     if !single_instance::acquire() {
@@ -116,7 +119,20 @@ fn main() {
     let health = slint::Timer::default();
     health.start(slint::TimerMode::Repeated, HEALTH_TICK, check_health);
     let banner = Banner::new();
-    APP.with(|app| *app.borrow_mut() = Some(App { config, screens, capture, audio, ffmpeg, banner, tray, hotkey, settings: None, _health: health }));
+    APP.with(|app| {
+        *app.borrow_mut() = Some(App {
+            config,
+            screens,
+            capture,
+            audio,
+            ffmpeg,
+            banner,
+            tray,
+            hotkey,
+            settings: None,
+            _health: health,
+        })
+    });
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
@@ -200,12 +216,17 @@ fn open_settings() {
             w.on_save(apply_settings);
             w.on_browse(browse_folder);
             w.on_key_combination(|text, ctrl, alt, shift| {
-                hotkey::format(ctrl, alt, shift, &settings_window::key_name(&text)).unwrap_or_default().into()
+                hotkey::format(ctrl, alt, shift, &settings_window::key_name(&text))
+                    .unwrap_or_default()
+                    .into()
             });
             app.settings = Some(w);
         }
         let w = app.settings.as_ref().expect("just made");
-        let hw = settings_window::Hardware { encoder: app.capture.encoder(), grabber: app.capture.grabber() };
+        let hw = settings_window::Hardware {
+            encoder: app.capture.encoder(),
+            grabber: app.capture.grabber(),
+        };
         // From a dev build the Run value would start target\debug: only the installed app offers it.
         let startup = (!cfg!(debug_assertions)).then(startup::enabled);
         settings_window::fill(w, &app.config, &app.screens, &hw, audio::list_devices(), startup);
@@ -224,7 +245,9 @@ fn adopt_settings_window(tries: u32) {
         Some(hwnd) => unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
         },
-        None if tries > 0 => slint::Timer::single_shot(Duration::from_millis(50), move || adopt_settings_window(tries - 1)),
+        None if tries > 0 => {
+            slint::Timer::single_shot(Duration::from_millis(50), move || adopt_settings_window(tries - 1))
+        }
         None => {}
     }
 }
@@ -243,7 +266,9 @@ fn browse_folder() {
 /// monitor/fps/buffer, the hotkey only if it registers (else config.json keeps the old one).
 fn apply_settings() {
     with_app(|app| {
-        let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else { return };
+        let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else {
+            return;
+        };
         let mut new = settings_window::read(&w, &app.config);
         let changes = clip_recorder::settings::changes(&app.config, &new);
         let mut problems = Vec::new();
@@ -252,9 +277,14 @@ fn apply_settings() {
             let registered = hotkey_thread::register(hotkey::parse(&new.hotkey), save_clip);
             if let Err(e) = &registered {
                 log(&format!("hotkey {} not registered (error {e})", new.hotkey));
-                problems.push(format!("{} is taken by another app: the hotkey stays {}.", new.hotkey, app.config.hotkey));
+                problems.push(format!(
+                    "{} is taken by another app: the hotkey stays {}.",
+                    new.hotkey, app.config.hotkey
+                ));
             }
-            new.hotkey = clip_recorder::settings::hotkey_after_save(&app.config.hotkey, &new.hotkey, registered.is_ok()).to_string();
+            new.hotkey =
+                clip_recorder::settings::hotkey_after_save(&app.config.hotkey, &new.hotkey, registered.is_ok())
+                    .to_string();
             w.set_hotkey(new.hotkey.as_str().into());
             app.tray.set_hotkey(&new.hotkey);
             app.hotkey = match registered {
@@ -270,7 +300,8 @@ fn apply_settings() {
             app.capture.restart_video(&app.config, &app.screens);
         }
         // Re-pointed whenever it is ticked: an older install's path would start nothing.
-        let startup = clip_recorder::settings::startup_change(w.get_startup_available(), w.get_startup(), startup::enabled());
+        let startup =
+            clip_recorder::settings::startup_change(w.get_startup_available(), w.get_startup(), startup::enabled());
         if let Some(on) = startup
             && !startup::set(on)
         {
@@ -297,7 +328,9 @@ struct Feedback {
 
 enum SaveEvent {
     /// The press: acknowledged at once, the length being saved shown as provisional.
-    Pressed { buffer_seconds: u32 },
+    Pressed {
+        buffer_seconds: u32,
+    },
     Ended(save::Outcome),
 }
 
@@ -305,12 +338,42 @@ enum SaveEvent {
 /// made too soon is told apart from a clip that was lost.
 fn feedback(event: SaveEvent) -> Feedback {
     let (chime, state, text, seconds, hold_ms) = match event {
-        SaveEvent::Pressed { buffer_seconds } => (Chime::Start, banner::State::Saving, "Saving clip", Some(buffer_seconds), banner::SAVING_MS),
-        SaveEvent::Ended(Ok(seconds)) => (Chime::Saved, banner::State::Saved, "Clip saved", Some(seconds), banner::HOLD_MS),
-        SaveEvent::Ended(Err(GiveUp::TooSoon)) => (Chime::Failed, banner::State::Failed, "Not enough footage yet", None, banner::HOLD_MS),
-        SaveEvent::Ended(Err(GiveUp::Error)) => (Chime::Failed, banner::State::Failed, "Clip not saved", None, banner::HOLD_MS),
+        SaveEvent::Pressed { buffer_seconds } => (
+            Chime::Start,
+            banner::State::Saving,
+            "Saving clip",
+            Some(buffer_seconds),
+            banner::SAVING_MS,
+        ),
+        SaveEvent::Ended(Ok(seconds)) => (
+            Chime::Saved,
+            banner::State::Saved,
+            "Clip saved",
+            Some(seconds),
+            banner::HOLD_MS,
+        ),
+        SaveEvent::Ended(Err(GiveUp::TooSoon)) => (
+            Chime::Failed,
+            banner::State::Failed,
+            "Not enough footage yet",
+            None,
+            banner::HOLD_MS,
+        ),
+        SaveEvent::Ended(Err(GiveUp::Error)) => (
+            Chime::Failed,
+            banner::State::Failed,
+            "Clip not saved",
+            None,
+            banner::HOLD_MS,
+        ),
     };
-    Feedback { chime, state, text, seconds, hold_ms }
+    Feedback {
+        chime,
+        state,
+        text,
+        seconds,
+        hold_ms,
+    }
 }
 
 fn tell(app: &App, f: Feedback) {
@@ -320,9 +383,21 @@ fn tell(app: &App, f: Feedback) {
 
 fn save_clip() {
     with_app(|app| {
-        tell(app, feedback(SaveEvent::Pressed { buffer_seconds: app.config.buffer_seconds }));
+        tell(
+            app,
+            feedback(SaveEvent::Pressed {
+                buffer_seconds: app.config.buffer_seconds,
+            }),
+        );
         let folder = folders::clips(&app.config.output_folder);
-        save::start(&app.capture, &app.audio, &app.ffmpeg, app.config.buffer_seconds, &folder, on_saved);
+        save::start(
+            &app.capture,
+            &app.audio,
+            &app.ffmpeg,
+            app.config.buffer_seconds,
+            &folder,
+            on_saved,
+        );
     });
 }
 
@@ -334,13 +409,27 @@ fn open(target: &str) {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
     unsafe {
-        ShellExecuteW(std::ptr::null_mut(), wide("open").as_ptr(), wide(target).as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            wide("open").as_ptr(),
+            wide(target).as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
 fn error_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-    unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Clip Recorder").as_ptr(), MB_OK | MB_ICONERROR) };
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            wide(text).as_ptr(),
+            wide("Clip Recorder").as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
 }
 
 #[cfg(test)]
@@ -350,13 +439,23 @@ mod tests {
     #[test]
     fn every_end_of_a_save_is_heard_and_seen() {
         let pressed = feedback(SaveEvent::Pressed { buffer_seconds: 30 });
-        assert_eq!((pressed.chime, pressed.state, pressed.seconds), (Chime::Start, banner::State::Saving, Some(30)));
+        assert_eq!(
+            (pressed.chime, pressed.state, pressed.seconds),
+            (Chime::Start, banner::State::Saving, Some(30))
+        );
         let saved = feedback(SaveEvent::Ended(Ok(31)));
-        assert_eq!((saved.chime, saved.state, saved.seconds), (Chime::Saved, banner::State::Saved, Some(31)));
+        assert_eq!(
+            (saved.chime, saved.state, saved.seconds),
+            (Chime::Saved, banner::State::Saved, Some(31))
+        );
         let soon = feedback(SaveEvent::Ended(Err(GiveUp::TooSoon)));
         let lost = feedback(SaveEvent::Ended(Err(GiveUp::Error)));
         for f in [&soon, &lost] {
-            assert_eq!((f.chime, f.state), (Chime::Failed, banner::State::Failed), "a lost clip must not look saved");
+            assert_eq!(
+                (f.chime, f.state),
+                (Chime::Failed, banner::State::Failed),
+                "a lost clip must not look saved"
+            );
         }
         assert_ne!(soon.text, lost.text, "too soon must read differently from a lost clip");
     }

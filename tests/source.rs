@@ -32,7 +32,9 @@ fn xml(path: &str) -> String {
 /// The text between `from` and the first `to` after it.
 fn between<'a>(text: &'a str, from: &str, to: &str) -> &'a str {
     let start = text.find(from).unwrap_or_else(|| panic!("{from:?} not found"));
-    let len = text[start..].find(to).unwrap_or_else(|| panic!("{to:?} not found after {from:?}"));
+    let len = text[start..]
+        .find(to)
+        .unwrap_or_else(|| panic!("{to:?} not found after {from:?}"));
     &text[start..start + len]
 }
 
@@ -46,8 +48,14 @@ fn position(text: &str, needle: &str) -> usize {
 fn the_msi_writes_the_run_value_in_hkcu_and_never_closes_the_app_itself() {
     let wxs = xml("installer/main.wxs");
     let run = between(&wxs, "<RegistryValue", "/>");
-    assert!(run.contains(r#"Root="HKCU""#) && run.contains(r"CurrentVersion\Run"), "{run}");
-    assert!(!wxs.contains("CloseApplication"), "util:CloseApplication blocks upgrades");
+    assert!(
+        run.contains(r#"Root="HKCU""#) && run.contains(r"CurrentVersion\Run"),
+        "{run}"
+    );
+    assert!(
+        !wxs.contains("CloseApplication"),
+        "util:CloseApplication blocks upgrades"
+    );
     assert!(wxs.contains("<MajorUpgrade"), "an upgrade must replace the old install");
 }
 
@@ -57,13 +65,25 @@ fn the_msi_writes_the_run_value_in_hkcu_and_never_closes_the_app_itself() {
 #[test]
 fn the_build_ships_only_a_verified_ffmpeg_and_a_fresh_exe() {
     let ps = code("build-msi.ps1", "#");
-    assert!(read("build-msi.ps1").starts_with("#Requires -Version 7"), "PowerShell 5 stops before building");
+    assert!(
+        read("build-msi.ps1").starts_with("#Requires -Version 7"),
+        "PowerShell 5 stops before building"
+    );
     let check = position(&ps, "if (-not (Test-Pinned $part))");
-    assert!(check < position(&ps, "Move-Item $part $ffmpeg"), "moved before its hash was checked");
-    assert!(position(&ps, "Remove-Item $ffmpeg") < position(&ps, "Invoke-WebRequest"), "a stale exe stays where the build looks");
+    assert!(
+        check < position(&ps, "Move-Item $part $ffmpeg"),
+        "moved before its hash was checked"
+    );
+    assert!(
+        position(&ps, "Remove-Item $ffmpeg") < position(&ps, "Invoke-WebRequest"),
+        "a stale exe stays where the build looks"
+    );
     let built = position(&ps, "cargo build --release --locked");
     let stop = position(&ps, "if ($LASTEXITCODE) { exit $LASTEXITCODE }");
-    assert!(built < stop && stop < position(&ps, "wix build"), "wix runs after a failed cargo build");
+    assert!(
+        built < stop && stop < position(&ps, "wix build"),
+        "wix runs after a failed cargo build"
+    );
 }
 
 /// Real-time code: no logging and no file access in the audio data callback, or WASAPI
@@ -120,7 +140,10 @@ fn every_fixed_bug_still_has_its_tests() {
     let registry = read("tests/regressions.md");
     let mut sources = String::new();
     for dir in ["src", "src/bin/clip-recorder", "tests"] {
-        for entry in std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir)).unwrap().flatten() {
+        for entry in std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir))
+            .unwrap()
+            .flatten()
+        {
             if entry.path().extension().is_some_and(|e| e == "rs") {
                 sources.push_str(&std::fs::read_to_string(entry.path()).unwrap());
             }
@@ -133,7 +156,11 @@ fn every_fixed_bug_still_has_its_tests() {
         let tests: Vec<&str> = column.split('`').skip(1).step_by(2).collect();
         assert!(!tests.is_empty(), "no test for {row}");
         for test in tests {
-            assert!(sources.contains(&format!("fn {test}()")), "{test} (registry row {}) no longer exists", &row[..5]);
+            assert!(
+                sources.contains(&format!("fn {test}()")),
+                "{test} (registry row {}) no longer exists",
+                &row[..5]
+            );
         }
     }
 }

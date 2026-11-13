@@ -38,7 +38,12 @@ pub fn rfc3339(unix_ms: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + u64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -50,7 +55,11 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(rfc3339(1_794_536_301_123), "2026-11-13T02:18:21.123Z");
         assert_eq!(rfc3339(951_782_400_000), "2000-02-29T00:00:00.000Z", "leap day");
-        assert_eq!(rfc3339(4_107_542_399_999), "2100-02-28T23:59:59.999Z", "2100 is not a leap year");
+        assert_eq!(
+            rfc3339(4_107_542_399_999),
+            "2100-02-28T23:59:59.999Z",
+            "2100 is not a leap year"
+        );
     }
 
     #[test]
@@ -59,14 +68,23 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let cap = 64 * 1024;
         for i in 0..4000 {
-            append_capped(&path, &format!("[2026-11-13 01:00:00] line {i:05} padding padding"), cap).unwrap();
+            append_capped(
+                &path,
+                &format!("[2026-11-13 01:00:00] line {i:05} padding padding"),
+                cap,
+            )
+            .unwrap();
         }
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
         assert!(text.len() as u64 <= cap, "{} bytes over a {cap} cap", text.len());
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "[log truncated]");
-        assert!(lines[1].starts_with("[20"), "the cut left a partial line: {:?}", lines[1]);
+        assert!(
+            lines[1].starts_with("[20"),
+            "the cut left a partial line: {:?}",
+            lines[1]
+        );
         assert!(lines.last().unwrap().contains("line 03999"), "the newest line is gone");
     }
 }

@@ -36,7 +36,11 @@ pub fn device_choices(mut live: Vec<String>, configured: &str) -> (Vec<String>, 
 
 /// The config value for a picked entry.
 pub fn device_at(choices: &[String], index: usize) -> String {
-    if index == 0 { String::new() } else { choices.get(index).cloned().unwrap_or_default() }
+    if index == 0 {
+        String::new()
+    } else {
+        choices.get(index).cloned().unwrap_or_default()
+    }
 }
 
 /// The hotkey a Save leaves in config.json: the new one only if it registered. Writing an
@@ -77,7 +81,10 @@ pub fn pick_device(names: &[String], configured: &str) -> Option<usize> {
     if configured.is_empty() {
         return None;
     }
-    names.iter().position(|n| n == configured).or_else(|| names.iter().position(|n| n.contains(configured)))
+    names
+        .iter()
+        .position(|n| n == configured)
+        .or_else(|| names.iter().position(|n| n.contains(configured)))
 }
 
 /// Above 60 fps only DXGI capture keeps up.
@@ -87,7 +94,10 @@ pub fn fps_choices(ddagrab: bool) -> Vec<u32> {
 
 /// Index in `options` of `value`, else the last one (an fps the hardware cannot do).
 pub fn index_of(options: &[u32], value: u32) -> usize {
-    options.iter().position(|&o| o == value).unwrap_or(options.len().saturating_sub(1))
+    options
+        .iter()
+        .position(|&o| o == value)
+        .unwrap_or(options.len().saturating_sub(1))
 }
 
 /// Explorer's StartupApproved entry: absent is enabled; an odd first byte is "disabled in Task
@@ -103,12 +113,42 @@ mod tests {
     #[test]
     fn only_a_device_change_restarts_the_audio() {
         let old = Config::default();
-        let video = Config { fps: 120, buffer_seconds: 90, monitor: 1, ..old.clone() };
-        assert_eq!(changes(&old, &video), Changes { video: true, ..Default::default() });
-        let mic = Config { mic_device: "Microphone (USB)".into(), ..old.clone() };
-        assert_eq!(changes(&old, &mic), Changes { audio: true, ..Default::default() });
-        let key = Config { hotkey: "Ctrl+F9".into(), output_folder: "D:\\Clips".into(), ..old.clone() };
-        assert_eq!(changes(&old, &key), Changes { hotkey: true, ..Default::default() });
+        let video = Config {
+            fps: 120,
+            buffer_seconds: 90,
+            monitor: 1,
+            ..old.clone()
+        };
+        assert_eq!(
+            changes(&old, &video),
+            Changes {
+                video: true,
+                ..Default::default()
+            }
+        );
+        let mic = Config {
+            mic_device: "Microphone (USB)".into(),
+            ..old.clone()
+        };
+        assert_eq!(
+            changes(&old, &mic),
+            Changes {
+                audio: true,
+                ..Default::default()
+            }
+        );
+        let key = Config {
+            hotkey: "Ctrl+F9".into(),
+            output_folder: "D:\\Clips".into(),
+            ..old.clone()
+        };
+        assert_eq!(
+            changes(&old, &key),
+            Changes {
+                hotkey: true,
+                ..Default::default()
+            }
+        );
     }
 
     fn live() -> Vec<String> {
@@ -143,7 +183,11 @@ mod tests {
 
     #[test]
     fn start_with_windows_is_rewritten_when_ticked_and_switched_off_only_when_on() {
-        assert_eq!(startup_change(true, true, true), Some(true), "ticked: re-pointed every time");
+        assert_eq!(
+            startup_change(true, true, true),
+            Some(true),
+            "ticked: re-pointed every time"
+        );
         assert_eq!(startup_change(true, true, false), Some(true));
         assert_eq!(startup_change(true, false, true), Some(false));
         assert_eq!(startup_change(true, false, false), None);
@@ -160,7 +204,10 @@ mod tests {
 
     #[test]
     fn a_python_era_loopback_name_still_finds_its_device() {
-        assert_eq!(configured_device("Haut-parleurs (Realtek(R) Audio) [Loopback]"), "Haut-parleurs (Realtek(R) Audio)");
+        assert_eq!(
+            configured_device("Haut-parleurs (Realtek(R) Audio) [Loopback]"),
+            "Haut-parleurs (Realtek(R) Audio)"
+        );
         assert_eq!(configured_device("Microphone (USB)"), "Microphone (USB)");
     }
 
@@ -168,7 +215,11 @@ mod tests {
     fn the_exact_device_name_wins_over_a_longer_one_listed_first() {
         let names: Vec<String> = vec!["USB Headphones (Realtek)".into(), "Headphones (Realtek)".into()];
         assert_eq!(pick_device(&names, "Headphones (Realtek)"), Some(1));
-        assert_eq!(pick_device(&names, "USB Headphones"), Some(0), "a partial name still finds its device");
+        assert_eq!(
+            pick_device(&names, "USB Headphones"),
+            Some(0),
+            "a partial name still finds its device"
+        );
         assert_eq!(pick_device(&names, "Speakers"), None);
         assert_eq!(pick_device(&names, ""), None, "empty is Auto");
     }
@@ -177,7 +228,11 @@ mod tests {
     fn above_60_fps_needs_ddagrab() {
         assert_eq!(fps_choices(true), [30, 60, 120, 240]);
         assert_eq!(fps_choices(false), [30, 60]);
-        assert_eq!(index_of(&fps_choices(false), 240), 1, "falls back to the highest offered");
+        assert_eq!(
+            index_of(&fps_choices(false), 240),
+            1,
+            "falls back to the highest offered"
+        );
         assert_eq!(index_of(&fps_choices(true), 120), 2);
     }
 

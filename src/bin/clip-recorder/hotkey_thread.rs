@@ -28,7 +28,11 @@ pub fn register(hotkey: Hotkey, on_press: fn()) -> Result<HotkeyThread, u32> {
             std::thread::sleep(Duration::from_millis(150));
             ok = RegisterHotKey(std::ptr::null_mut(), ID, hotkey.modifiers, hotkey.vk) != 0;
         }
-        let _ = tx.send(if ok { Ok(GetCurrentThreadId()) } else { Err(GetLastError()) });
+        let _ = tx.send(if ok {
+            Ok(GetCurrentThreadId())
+        } else {
+            Err(GetLastError())
+        });
         if !ok {
             return;
         }
@@ -43,7 +47,10 @@ pub fn register(hotkey: Hotkey, on_press: fn()) -> Result<HotkeyThread, u32> {
     // The thread answers before anything else: a timeout here once left a detached thread
     // holding a hotkey nobody could unregister.
     match rx.recv() {
-        Ok(Ok(thread_id)) => Ok(HotkeyThread { thread_id, handle: Some(handle) }),
+        Ok(Ok(thread_id)) => Ok(HotkeyThread {
+            thread_id,
+            handle: Some(handle),
+        }),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(0),
     }
@@ -65,9 +72,16 @@ mod tests {
 
     #[test]
     fn a_taken_hotkey_is_refused_with_its_error_and_freed_on_drop() {
-        let key = Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_ALT | MOD_SHIFT, vk: 0x7A }; // F11
+        let key = Hotkey {
+            modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_ALT | MOD_SHIFT,
+            vk: 0x7A,
+        }; // F11
         let first = register(key, || {}).expect("an unused combination registers");
-        assert_eq!(register(key, || {}).err(), Some(1409), "ERROR_HOTKEY_ALREADY_REGISTERED");
+        assert_eq!(
+            register(key, || {}).err(),
+            Some(1409),
+            "ERROR_HOTKEY_ALREADY_REGISTERED"
+        );
         drop(first);
         assert!(register(key, || {}).is_ok(), "the dropped thread did not unregister it");
     }

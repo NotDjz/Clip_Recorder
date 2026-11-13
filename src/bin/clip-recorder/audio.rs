@@ -112,7 +112,11 @@ impl Side {
             Kind::Mic => device.default_input_config(),
         };
         let Ok(config) = config else {
-            log(&format!("{} stream OPEN FAILED: no config for {}", self.kind.label(), self.name));
+            log(&format!(
+                "{} stream OPEN FAILED: no config for {}",
+                self.kind.label(),
+                self.name
+            ));
             return;
         };
         self.dead = Arc::new(AtomicBool::new(false));
@@ -123,16 +127,29 @@ impl Side {
             SampleFormat::I32 => self.build::<i32>(&device, config.config()),
             SampleFormat::U16 => self.build::<u16>(&device, config.config()),
             other => {
-                log(&format!("{} stream OPEN FAILED: sample format {other:?} not supported", self.kind.label()));
+                log(&format!(
+                    "{} stream OPEN FAILED: sample format {other:?} not supported",
+                    self.kind.label()
+                ));
                 return;
             }
         };
         match built.and_then(|s| s.play().map(|_| s)) {
             Ok(stream) => {
-                log(&format!("{} stream opened: device={:?} rate={} channels={}", self.kind.label(), self.name, self.rate, self.channels));
+                log(&format!(
+                    "{} stream opened: device={:?} rate={} channels={}",
+                    self.kind.label(),
+                    self.name,
+                    self.rate,
+                    self.channels
+                ));
                 self.stream = Some(stream);
             }
-            Err(e) => log(&format!("{} stream OPEN FAILED: device={:?}: {e}", self.kind.label(), self.name)),
+            Err(e) => log(&format!(
+                "{} stream OPEN FAILED: device={:?}: {e}",
+                self.kind.label(),
+                self.name
+            )),
         }
     }
 
@@ -160,7 +177,10 @@ impl Side {
             // reroutes here, and the stream carries on through those.
             move |err: cpal::Error| {
                 use cpal::ErrorKind::*;
-                if matches!(err.kind(), DeviceNotAvailable | StreamInvalidated | HostUnavailable | BackendError) {
+                if matches!(
+                    err.kind(),
+                    DeviceNotAvailable | StreamInvalidated | HostUnavailable | BackendError
+                ) {
                     dead.store(true, Ordering::Relaxed);
                 }
             },
@@ -178,7 +198,10 @@ impl Side {
         match self.retry.decide(self.device.is_some(), self.alive(), frames) {
             Decision::Keep => {}
             Decision::Reopen => {
-                log(&format!("{} stream not alive (frames={frames}), reopening", self.kind.label()));
+                log(&format!(
+                    "{} stream not alive (frames={frames}), reopening",
+                    self.kind.label()
+                ));
                 let (format, previous) = ((self.rate, self.channels), self.device.take());
                 self.detect(); // found afresh: cpal re-enumerates
                 self.device = render::device_after_reopen(previous, self.device.take());
@@ -203,9 +226,22 @@ impl Side {
             let all = self.history.lock().unwrap_or_else(|e| e.into_inner());
             all.iter().filter(|(t, _)| *t > end - duration - 1.0).cloned().collect()
         };
-        let chunks: Vec<Chunk> = history.iter().map(|(t, s)| Chunk { arrival: *t, samples: s }).collect();
-        let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else { return false };
-        let spec = hound::WavSpec { channels: self.channels, sample_rate: self.rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+        let chunks: Vec<Chunk> = history
+            .iter()
+            .map(|(t, s)| Chunk {
+                arrival: *t,
+                samples: s,
+            })
+            .collect();
+        let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else {
+            return false;
+        };
+        let spec = hound::WavSpec {
+            channels: self.channels,
+            sample_rate: self.rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
         let write = || -> hound::Result<()> {
             let file = crate::winutil::create_new(path).map_err(hound::Error::IoError)?;
             let mut w = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
@@ -220,10 +256,17 @@ impl Side {
     /// One line for the save log: enough to tell silence, a stall and a dead stream apart.
     fn describe(&self) -> String {
         let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
-        let newest = history.back().map_or("none".to_owned(), |(t, _)| format!("{:.1}s", clock::now() - t));
+        let newest = history
+            .back()
+            .map_or("none".to_owned(), |(t, _)| format!("{:.1}s", clock::now() - t));
         format!(
             "{}: device={:?} rate={} alive={} frames_received={} chunks={} newest_age={newest}",
-            self.kind.label(), self.name, self.rate, self.alive(), self.frames.load(Ordering::Relaxed), history.len()
+            self.kind.label(),
+            self.name,
+            self.rate,
+            self.alive(),
+            self.frames.load(Ordering::Relaxed),
+            history.len()
         )
     }
 }
@@ -240,7 +283,11 @@ pub struct Audio {
 
 impl Audio {
     pub fn new(loopback: &str, mic: &str) -> Audio {
-        let mut audio = Audio { loopback: Side::new(Kind::Loopback, loopback), mic: Side::new(Kind::Mic, mic), running: false };
+        let mut audio = Audio {
+            loopback: Side::new(Kind::Loopback, loopback),
+            mic: Side::new(Kind::Mic, mic),
+            running: false,
+        };
         audio.loopback.detect();
         audio.mic.detect();
         audio
@@ -273,7 +320,10 @@ impl Audio {
         self.stop();
         for (side, wanted) in [(&mut self.loopback, loopback), (&mut self.mic, mic)] {
             let before = (side.rate, side.channels);
-            *side = Side { history: Arc::clone(&side.history), ..Side::new(side.kind, wanted) };
+            *side = Side {
+                history: Arc::clone(&side.history),
+                ..Side::new(side.kind, wanted)
+            };
             side.detect();
             if !render::keeps_history(before, (side.rate, side.channels)) {
                 side.clear();
@@ -307,7 +357,9 @@ impl Audio {
 /// (output devices, input devices) for Settings, listed afresh.
 pub fn list_devices() -> (Vec<String>, Vec<String>) {
     fn names(devices: Result<impl Iterator<Item = cpal::Device>, cpal::Error>) -> Vec<String> {
-        devices.map(|ds| ds.map(|d| device_name(&d)).filter(|n| !n.is_empty()).collect()).unwrap_or_default()
+        devices
+            .map(|ds| ds.map(|d| device_name(&d)).filter(|n| !n.is_empty()).collect())
+            .unwrap_or_default()
     }
     let host = cpal::default_host();
     (names(host.output_devices()), names(host.input_devices()))
