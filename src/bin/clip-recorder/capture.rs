@@ -6,7 +6,7 @@ use crate::monitors::Screen;
 use crate::orphans::{PID_FILE, SEGMENT_DIR_PREFIX};
 use clip_recorder::clock::{self, Estimator, capture_pts};
 use clip_recorder::config::Config;
-use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber, SEGMENT_LIST_FILE};
+use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber};
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
@@ -285,7 +285,7 @@ fn read_clock(stderr: std::fs::File, published: Arc<Mutex<Option<f64>>>, last_wo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clip_recorder::ffmpeg_cmd::Monitor;
+    use clip_recorder::ffmpeg_cmd::{Monitor, SEGMENT_LIST_FILE};
 
     #[test]
     fn stderr_gets_a_pipe_large_enough_for_debug_ts() {
