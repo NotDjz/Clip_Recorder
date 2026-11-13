@@ -257,6 +257,7 @@ fn panics_are_logged_from_the_first_line_of_main() {
         logging.contains("LOCK.try_lock()"),
         "the panic path waits on the log lock"
     );
+}
 
 /// Slint is used under its Royalty-free License 2.0, whose condition (section 2) is the
 /// "Made with Slint" badge on a public page, preferably the download page: removing it breaks the
