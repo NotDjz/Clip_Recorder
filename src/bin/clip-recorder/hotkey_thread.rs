@@ -82,7 +82,16 @@ mod tests {
             Some(1409),
             "ERROR_HOTKEY_ALREADY_REGISTERED"
         );
-        drop(first);
+        // Dropping must end the thread promptly: a message loop that ignores WM_QUIT would hang.
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(first);
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "the hotkey thread did not stop on drop"
+        );
         assert!(register(key, || {}).is_ok(), "the dropped thread did not unregister it");
     }
 }

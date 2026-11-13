@@ -75,15 +75,15 @@ jobs:
       # end of session. The runner has no GPU and no audio device: the x264 + GDI path.
       - run: cargo test --locked --test app -- --test-threads=1
 
-  mutants:
-    name: mutants
+  mutants-shard:
+    name: mutants shard ${{ matrix.shard }}
     runs-on: windows-latest
-    timeout-minutes: 240
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        # Pushes and pull requests mutate only the changed lines; the weekly run shards it all.
-        shard: ${{ github.event_name == 'schedule' && fromJSON('[0,1,2,3,4,5,6,7]') || fromJSON('[0]') }}
+        # Eight runners in parallel: a change touching the whole crate (577 mutants) took 3 h on one.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -110,9 +110,24 @@ jobs:
           } else {
             git diff "$env:BASE" HEAD -- '*.rs' > changes.diff
             if ((Get-Item changes.diff).Length -eq 0) { Write-Host 'No Rust change.'; exit 0 }
-            cargo mutants --jobs 2 --in-diff changes.diff --timeout 300
+            cargo mutants --jobs 2 --shard "$env:SHARD/8" --in-diff changes.diff --timeout 300
           }
           exit $LASTEXITCODE
+
+  # The one check the master ruleset requires: green only if every shard is.
+  mutants:
+    name: mutants
+    needs: mutants-shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULT: ${{ needs.mutants-shard.result }}
+        shell: bash
+        run: |
+          echo "shards: $RESULT"
+          [ "$RESULT" = "success" ]
 
   audit:
     name: audit

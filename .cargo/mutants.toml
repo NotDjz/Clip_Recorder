@@ -40,6 +40,9 @@ exclude_re = [
     "src/bin/clip-recorder/banner.rs:.*replace \\| with \\^ in (colorref|breath|Banner::show)",
     # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.
     "src/ffmpeg_cmd.rs:.*replace \\* with / in capture_args",
+    # The sweep's shared 3 s budget: TerminateProcess is near-instant, so only the 250 ms floor
+    # per orphan is observable (tested by an_orphan_ffmpeg_is_killed_and_waited_for).
+    "src/bin/clip-recorder/orphans.rs:.*replace \\+ with - in sweep",
     # Equivalent: the stale-row screen's 2.0 * seg with seg = 1.
     "src/selection.rs:.*replace \\* with / in select",
 ]
