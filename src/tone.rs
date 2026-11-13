@@ -97,6 +97,70 @@ mod tests {
         );
     }
 
+    /// Sign changes over a pure note: two per period.
+    fn crossings(s: &[i16]) -> usize {
+        s.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count()
+    }
+
+    #[test]
+    fn a_note_sounds_at_its_pitch_with_its_level() {
+        let s = samples(&wav(&[note(0, 440.0, 0.5, 500, 0.0)]));
+        let c = crossings(&s);
+        assert!((436..=444).contains(&c), "{c} crossings for 440 Hz over 0.5 s");
+        let peak = s.iter().map(|v| v.unsigned_abs()).max().unwrap() as f64;
+        assert!(peak > 0.85 * 0.5 * 32767.0 && peak <= 0.5 * 32767.0, "peak {peak}");
+        assert!(s[20] > 0, "a sine starts upwards");
+    }
+
+    /// The attack rises, then the note decays: louder at the start than at the end.
+    #[test]
+    fn a_note_decays_after_its_attack() {
+        let s = samples(&wav(&[note(0, 440.0, 0.5, 500, 0.0)]));
+        let level = |from: usize, to: usize| s[from..to].iter().map(|v| v.unsigned_abs()).max().unwrap();
+        let ms = |m: usize| m * RATE as usize / 1000;
+        assert!(level(0, ms(1)) < level(ms(4), ms(14)), "no attack");
+        assert!(level(ms(480), ms(500)) < level(ms(4), ms(14)) / 20, "no decay");
+    }
+
+    /// A note starts at its own offset and lasts its own length; the harmonic adds a second pitch.
+    #[test]
+    fn notes_start_where_they_are_placed() {
+        let s = samples(&wav(&[note(0, 440.0, 0.5, 10, 0.0), note(100, 440.0, 0.5, 50, 0.0)]));
+        let ms = |m: usize| m * RATE as usize / 1000;
+        assert_eq!(s.len(), ms(150));
+        assert!(s[ms(20)..ms(99)].iter().all(|&v| v == 0), "sound between the notes");
+        assert!(
+            s[ms(101)..ms(110)].iter().any(|&v| v.abs() > 1000),
+            "the second note is missing"
+        );
+        let plain = samples(&wav(&[note(0, 220.0, 0.3, 100, 0.0)]));
+        let rich = samples(&wav(&[note(0, 220.0, 0.3, 100, 0.5)]));
+        // Energy at twice the pitch: none in a pure note, plenty with its harmonic.
+        let at = |s: &[i16], f: f64| {
+            let (mut re, mut im) = (0.0, 0.0);
+            for (i, &v) in s.iter().enumerate() {
+                let phase = std::f64::consts::TAU * f * i as f64 / RATE as f64;
+                re += v as f64 * phase.cos();
+                im += v as f64 * phase.sin();
+            }
+            re.hypot(im)
+        };
+        assert!(
+            at(&rich, 440.0) > 10.0 * at(&plain, 440.0),
+            "the second harmonic is missing"
+        );
+        assert!(at(&rich, 220.0) > at(&rich, 440.0), "the fundamental leads");
+    }
+
+    #[test]
+    fn the_header_describes_the_data() {
+        let w = wav(&SAVE);
+        let u32_at = |i: usize| u32::from_le_bytes([w[i], w[i + 1], w[i + 2], w[i + 3]]);
+        assert_eq!(u32_at(4) as usize, w.len() - 8, "RIFF size");
+        assert_eq!((u32_at(24), u32_at(28)), (RATE, RATE * 2), "rate, bytes per second");
+        assert_eq!(u32_at(40) as usize, w.len() - 44, "data size");
+    }
+
     #[test]
     fn a_valid_wav_as_long_as_its_last_note() {
         let w = wav(&FAIL);

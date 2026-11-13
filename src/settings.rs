@@ -110,6 +110,76 @@ pub fn startup_approved(entry: Option<&[u8]>) -> bool {
 mod tests {
     use super::*;
 
+    /// Each field on its own: every one of them restarts what it should, and only that.
+    #[test]
+    fn each_setting_restarts_only_its_own_part() {
+        let old = Config::default();
+        let audio = Changes {
+            audio: true,
+            ..Default::default()
+        };
+        let video = Changes {
+            video: true,
+            ..Default::default()
+        };
+        let cases = [
+            (
+                Config {
+                    loopback_device: "Speakers".into(),
+                    ..old.clone()
+                },
+                audio,
+            ),
+            (
+                Config {
+                    mic_device: "Mic".into(),
+                    ..old.clone()
+                },
+                Changes {
+                    audio: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Config {
+                    monitor: 1,
+                    ..old.clone()
+                },
+                video,
+            ),
+            (
+                Config {
+                    fps: 120,
+                    ..old.clone()
+                },
+                Changes {
+                    video: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Config {
+                    buffer_seconds: 90,
+                    ..old.clone()
+                },
+                Changes {
+                    video: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                Config {
+                    output_folder: "D:\\Clips".into(),
+                    ..old.clone()
+                },
+                Changes::default(),
+            ),
+        ];
+        for (new, expected) in cases {
+            assert_eq!(changes(&old, &new), expected, "{new:?}");
+        }
+    }
+
     #[test]
     fn only_a_device_change_restarts_the_audio() {
         let old = Config::default();

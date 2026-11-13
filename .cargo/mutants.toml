@@ -40,4 +40,6 @@ exclude_re = [
     "src/bin/clip-recorder/banner.rs:.*replace \\| with \\^ in (colorref|breath|Banner::show)",
     # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.
     "src/ffmpeg_cmd.rs:.*replace \\* with / in capture_args",
+    # Equivalent: the stale-row screen's 2.0 * seg with seg = 1.
+    "src/selection.rs:.*replace \\* with / in select",
 ]

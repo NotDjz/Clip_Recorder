@@ -217,6 +217,25 @@ mod tests {
         assert!(!s.captured);
     }
 
+    /// Too soon means under three segments since the capture (re)started, not one moment more.
+    #[test]
+    fn too_soon_ends_three_segments_after_the_start() {
+        assert_eq!(TOO_SOON_S, 3.0);
+        assert_eq!(select(&[], &HashMap::new(), SAVE, 30, 2.99), Err(GiveUp::TooSoon));
+        assert_eq!(select(&[], &HashMap::new(), SAVE, 30, 3.0), Err(GiveUp::Error));
+    }
+
+    /// The stale-row screen's edge: a listed start exactly two segments before the file's mtime
+    /// is already stale; just inside it is trusted.
+    #[test]
+    fn a_listed_start_two_segments_old_is_already_stale() {
+        let segs = segments(8, 0.3);
+        let at =
+            |back: f64| -> HashMap<String, f64> { segs.iter().map(|x| (x.name.clone(), x.mtime - back)).collect() };
+        assert!(!select(&segs, &at(2.0), SAVE, 5, 60.0).unwrap().captured);
+        assert!(select(&segs, &at(1.99), SAVE, 5, 60.0).unwrap().captured);
+    }
+
     #[test]
     fn giving_up_says_why() {
         assert_eq!(select(&[], &HashMap::new(), SAVE, 30, 1.0), Err(GiveUp::TooSoon));

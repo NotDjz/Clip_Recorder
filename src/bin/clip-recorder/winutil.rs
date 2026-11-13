@@ -31,6 +31,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wide_strings_are_utf16_and_nul_terminated() {
+        assert_eq!(wide("Aé"), [0x41, 0xE9, 0]);
+        assert_eq!(wide(""), [0]);
+    }
+
+    #[test]
     fn random_names_are_128_bits_of_hex_and_never_repeat() {
         let (a, b) = (random_hex(), random_hex());
         assert_eq!(a.len(), 32);
