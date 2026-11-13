@@ -187,7 +187,7 @@
   <header class="masthead">
     <p class="mark"><span class="rec-dot"></span>Clip Recorder</p>
     <span class="spacer"></span>
-    <span class="ver">v1.7</span>
+    <span class="ver">v2.0.1</span>
     <a class="ver" href="https://github.com/NotDjz/Clip_Recorder">Source</a>
   </header>
 
@@ -234,11 +234,11 @@
       </div>
       <div>
         <dt>The GPU does the encoding</dt>
-        <dd>Frames come off the desktop through DXGI Desktop Duplication and go straight into NVENC, up to 240 frames per second.</dd>
+        <dd>Frames come off the desktop through DXGI Desktop Duplication and go straight into NVENC, up to 240 frames per second. Without an NVIDIA GPU it records on the CPU, at up to 60.</dd>
       </div>
       <div>
-        <dt>Windows never learns it is there</dt>
-        <dd>No installer service, no registry keys, no administrator rights. Settings sit in a config.json next to the executable.</dd>
+        <dt>A plain Windows install</dt>
+        <dd>An MSI puts it in Program Files and starts it with Windows, which one switch in Settings turns off. No service, nothing running but the app. Uninstall it from Settings &gt; Apps; your clips stay.</dd>
       </div>
     </dl>
   </section>
@@ -250,8 +250,8 @@
         <tbody>
           <tr><th scope="row">Buffer length</th><td>15, 30, 60, 90 or 120 seconds</td></tr>
           <tr><th scope="row">Frame rate</th><td>30, 60, 120 or 240 fps</td></tr>
-          <tr><th scope="row">Screen capture</th><td>DXGI Desktop Duplication at 120 and 240 fps; GDI at 30 and 60</td></tr>
-          <tr><th scope="row">Encoder</th><td>NVENC, hardware H.264</td></tr>
+          <tr><th scope="row">Screen capture</th><td>DXGI Desktop Duplication with NVENC; GDI otherwise, up to 60 fps</td></tr>
+          <tr><th scope="row">Encoder</th><td>NVENC hardware H.264, or x264 on the CPU without an NVIDIA GPU</td></tr>
           <tr><th scope="row">Audio</th><td>System output and microphone, mixed to one track</td></tr>
           <tr><th scope="row">Output</th><td>MP4 written to Videos\ClipRecorder</td></tr>
           <tr><th scope="row">Hotkey</th><td>Ctrl+Alt+R, reassignable</td></tr>
@@ -266,7 +266,7 @@
     <h2>Get it</h2>
     <div class="get">
       <a class="btn" href="https://github.com/NotDjz/Clip_Recorder/releases">Download for Windows</a>
-      <span class="meta">ClipRecorderSetup.exe — pick a folder, it launches, that is the whole setup.</span>
+      <span class="meta">clip-recorder-2.0.1-x64.msi — run it, accept the licence, it launches.</span>
     </div>
   </section>
 
