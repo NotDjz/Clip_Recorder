@@ -24,7 +24,7 @@ env:
   CARGO_TERM_COLOR: always
   # Pinned tools, installed from crates.io (checksums verified by cargo).
   CARGO_MUTANTS_VERSION: "27.1.0"
-  CARGO_AUDIT_VERSION: "0.23.0"
+  CARGO_DENY_VERSION: "0.20.2"
   # The pinned ffmpeg build-msi.ps1 verifies; the cache key follows its hash.
   FFMPEG_SHA256: D1E2A156261ECC675081943197A85F08F2868784A0AF499171EDE89353EDAD31
 
@@ -137,10 +137,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.cargo/bin/cargo-audit.exe
-          key: cargo-audit-${{ env.CARGO_AUDIT_VERSION }}
-      - run: if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) { cargo install cargo-audit --version $env:CARGO_AUDIT_VERSION --locked }
-      - run: cargo audit --deny warnings
+          path: ~/.cargo/bin/cargo-deny.exe
+          key: cargo-deny-${{ env.CARGO_DENY_VERSION }}
+      - run: if (-not (Get-Command cargo-deny -ErrorAction SilentlyContinue)) { cargo install cargo-deny --version $env:CARGO_DENY_VERSION --locked }
+      # Advisories, licences (permissive only, Slint under its royalty-free licence), bans and sources: deny.toml.
+      - run: cargo deny --locked check
 
   secrets:
     name: secrets

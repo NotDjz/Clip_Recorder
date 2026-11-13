@@ -1,0 +1,52 @@
+# cargo-deny: advisories, licences, bans and sources of every dependency of the Windows build.
+# CI's `audit` job runs `cargo deny check`; anything new it reports fails the build.
+
+[graph]
+# Only what the shipped exe is built from: Linux-only branches of slint, tray-icon and accesskit do not count.
+targets = ["x86_64-pc-windows-msvc"]
+
+[advisories]
+# Advisories in Linux-only crates do not reach the Windows graph (targets above). Each ignore says why it is safe;
+# drop it once its crate leaves Cargo.lock or a fix ships.
+ignore = [
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils: unmaintained, no fix; compile time only, inside the slint-macros proc-macro" },
+]
+
+[licenses]
+# Permissive licences only, so the app can stay MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+exceptions = [
+    # Slint is used under its Royalty-free License 2.0. Its condition (section 2), the "Made with Slint" badge on the
+    # download page, is met in docs/index.html and guarded by tests/source.rs.
+    { crate = "slint", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "slint-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-selector", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-backend-winit", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-common", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-compiler", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-core-macros", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-renderer-femtovg", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+    { crate = "i-slint-renderer-software", allow = ["LicenseRef-Slint-Royalty-free-2.0"] },
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
