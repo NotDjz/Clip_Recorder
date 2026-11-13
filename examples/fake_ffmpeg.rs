@@ -19,9 +19,8 @@ fn main() {
     };
     // No arguments: `cargo test --examples` running it as a test. Nothing to do.
     let Some(out) = args.last() else { return };
-    let fail = (name.ends_with("failmix") && step == "mix") || (name.ends_with("failmux") && step == "mux");
     if name.ends_with("failmix") && step == "mix" {
-        std::process::exit(1);
+        std::process::exit(1); // nothing written
     }
     let content = if name.ends_with("empty") {
         String::new()
@@ -29,5 +28,10 @@ fn main() {
         format!("{step}: {}", args.join(" "))
     };
     std::fs::write(out, content).unwrap();
-    std::process::exit(if fail { 1 } else { 0 });
+    // failmux: a partial file, then a failure.
+    std::process::exit(if name.ends_with("failmux") && step == "mux" {
+        1
+    } else {
+        0
+    });
 }

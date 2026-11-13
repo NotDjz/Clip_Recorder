@@ -136,25 +136,31 @@ fn prepare(
     let mut snapshots = Vec::new();
     for (i, s) in chosen.segments.iter().enumerate() {
         let snap = dir.join(format!("snap_{id}_{i:03}.ts"));
-        let copied = std::fs::File::open(dir.join(&s.name))
-            .and_then(|mut from| std::io::copy(&mut from, &mut crate::winutil::create_new(&snap)?));
-        if let Err(e) = copied {
+        if let Err(e) = crate::winutil::copy_new(&dir.join(&s.name), &snap) {
             say(format!("ABORT: snapshot of {} failed: {e}", s.name));
-            let _ = std::fs::remove_file(&snap);
             snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
             return Err(GiveUp::Error);
         }
         snapshots.push(snap);
     }
     let list = dir.join(format!("concat_{id}.txt"));
-    let listed = crate::winutil::create_new(&list)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
-    if listed.is_err() || std::fs::create_dir_all(folder).is_err() {
-        say("ABORT: concat list or output folder not writable".into());
+    let created = crate::winutil::create_new(&list);
+    let listed = created.is_ok();
+    let written =
+        created.and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
+    // The clip's name is reserved now: two saves in the same second each get their own.
+    let output = written
+        .and_then(|_| std::fs::create_dir_all(folder))
+        .and_then(|_| reserve_output(folder, &local_stamp()));
+    let Ok(output) = output else {
+        say("ABORT: concat list, output folder or clip name not writable".into());
         snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
-        let _ = std::fs::remove_file(&list);
+        // Only what this save created: a list that already existed is not ours.
+        if listed {
+            let _ = std::fs::remove_file(&list);
+        }
         return Err(GiveUp::Error);
-    }
+    };
 
     // The audio window is the video's: same end, same length as the concat's -t.
     let loopback = wav(Kind::Loopback, save_time, chosen.duration);
@@ -168,17 +174,35 @@ fn prepare(
         loopback,
         mic,
         work: dir.into(),
-        output: folder.join(format!("Clip_{}.mp4", local_stamp())),
+        output,
         started,
     })
 }
 
-/// Who wrote the output and whether it is a clip. Two saves in the same second share the output
-/// name: only the run whose ffmpeg actually ran on it (Some) may judge or delete it. With audio,
-/// the mux writes it, and only after a successful concat; without, the concat writes it.
-fn verdict(has_audio: bool, concat: Option<bool>, mux: Option<bool>) -> (bool, bool) {
-    let writer = if has_audio { mux } else { concat };
-    (writer.is_some(), writer == Some(true))
+/// `Clip_<stamp>.mp4`, else `Clip_<stamp>_2.mp4` and on, created empty so no other save can take
+/// it: two saves in the same second once shared a name, and the second (ffmpeg -y) overwrote
+/// the first's clip, or deleted it on failure.
+fn reserve_output(folder: &Path, stamp: &str) -> std::io::Result<PathBuf> {
+    for n in 1.. {
+        let name = if n == 1 {
+            format!("Clip_{stamp}.mp4")
+        } else {
+            format!("Clip_{stamp}_{n}.mp4")
+        };
+        let path = folder.join(name);
+        match crate::winutil::create_new(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+/// Whether the step that writes the clip succeeded: the mux with audio (which only runs after
+/// a successful concat), the concat without.
+fn written(has_audio: bool, concat: Option<bool>, mux: Option<bool>) -> bool {
+    (if has_audio { mux } else { concat }) == Some(true)
 }
 
 /// The audio track to mux. Both sides: the mix, but a failed or timed-out mix keeps the game
@@ -221,15 +245,15 @@ impl Job {
             };
             mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output));
         }
-        let (wrote_output, output_ok) = verdict(has_audio, concat, mux);
-        let saved = wrote_output && output_ok && std::fs::metadata(&self.output).is_ok_and(|m| m.len() > 0);
+        // The name was reserved for this save: a clip that did not come out is removed.
+        let saved = written(has_audio, concat, mux) && std::fs::metadata(&self.output).is_ok_and(|m| m.len() > 0);
         temp.extend(self.snapshots.iter().cloned());
         temp.extend(self.loopback.iter().chain(self.mic.iter()).cloned());
         if has_audio {
             temp.push(video);
         }
         temp.iter().for_each(|p| drop(std::fs::remove_file(p)));
-        if !saved && wrote_output {
+        if !saved {
             let _ = std::fs::remove_file(&self.output);
         }
         self.say(&format!(
@@ -484,20 +508,45 @@ mod tests {
     }
 
     #[test]
-    fn only_the_ffmpeg_that_wrote_the_output_judges_it() {
-        // No audio: the concat writes the clip.
-        assert_eq!(verdict(false, Some(true), None), (true, true));
-        assert_eq!(verdict(false, Some(false), None), (true, false));
-        assert_eq!(
-            verdict(false, None, None),
-            (false, false),
-            "never started: wrote nothing"
+    fn the_clip_is_judged_by_the_step_that_writes_it() {
+        assert!(written(false, Some(true), None), "no audio: the concat writes it");
+        assert!(!written(false, Some(false), None));
+        assert!(!written(false, None, None), "ffmpeg never started");
+        assert!(written(true, Some(true), Some(true)), "audio: the mux writes it");
+        assert!(!written(true, Some(true), Some(false)));
+        assert!(!written(true, Some(false), None), "a failed concat means no mux");
+        assert!(!written(true, Some(true), None));
+    }
+
+    /// Two saves in the same second: each gets its own clip, neither can overwrite the other.
+    #[test]
+    fn two_saves_in_the_same_second_get_their_own_clip() {
+        let dir = temp("names2");
+        let first = reserve_output(&dir, "20261113_101500").unwrap();
+        let second = reserve_output(&dir, "20261113_101500").unwrap();
+        assert_eq!(first.file_name().unwrap(), "Clip_20261113_101500.mp4");
+        assert_eq!(second.file_name().unwrap(), "Clip_20261113_101500_2.mp4");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file already sitting under a snapshot's name aborts the save, which leaves it alone.
+    #[test]
+    fn a_save_never_deletes_a_file_it_did_not_create() {
+        let dir = temp("planted");
+        let t = now();
+        segments(&dir, t);
+        let planted = dir.join("snap_t_001.ts");
+        std::fs::write(&planted, "not this save's").unwrap();
+        assert!(matches!(
+            try_prepare(&dir, t - 60.0, t, &mut no_audio()),
+            Err(GiveUp::Error)
+        ));
+        assert_eq!(std::fs::read_to_string(&planted).unwrap(), "not this save's");
+        assert!(
+            !dir.join("snap_t_000.ts").exists(),
+            "this save's own copy was left behind"
         );
-        // With audio: the mux writes it; a failed concat means it never ran.
-        assert_eq!(verdict(true, Some(true), Some(true)), (true, true));
-        assert_eq!(verdict(true, Some(true), Some(false)), (true, false));
-        assert_eq!(verdict(true, Some(false), None), (false, false));
-        assert_eq!(verdict(true, Some(true), None), (false, false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -525,16 +574,14 @@ mod tests {
         }
     }
 
-    /// A failed encode is reported, never silent, and a clip another save wrote under the same
-    /// second-resolution name is neither judged nor deleted by a run that wrote nothing.
+    /// A failed encode is reported, never silent, and leaves no empty clip under its reserved name.
     #[test]
-    fn a_failed_encode_reports_and_spares_another_saves_clip() {
+    fn a_failed_encode_reports_and_leaves_no_empty_clip() {
         for audio in [true, false] {
             let dir = temp("encode");
-            let output = dir.join("Clip_same_second.mp4");
-            std::fs::write(&output, b"another save's clip").unwrap();
+            let output = reserve_output(&dir, "t").unwrap();
             assert!(matches!(job(&dir, output.clone(), audio).run(), Err(GiveUp::Error)));
-            assert!(output.is_file(), "audio={audio}: the other save's clip was deleted");
+            assert!(!output.exists(), "audio={audio}: an empty clip was left");
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

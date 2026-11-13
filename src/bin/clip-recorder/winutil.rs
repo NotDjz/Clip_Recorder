@@ -26,6 +26,17 @@ pub fn create_new(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+/// Copies a file to a new name with the system's own copy, never over an existing file
+/// (AlreadyExists then). A byte loop through 8 KiB buffers was slower on the UI thread.
+pub fn copy_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::CopyFileW;
+    let (from, to) = (wide(&from.to_string_lossy()), wide(&to.to_string_lossy()));
+    if unsafe { CopyFileW(from.as_ptr(), to.as_ptr(), 1) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +53,20 @@ mod tests {
         assert_eq!(a.len(), 32);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn copy_new_copies_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!("crtest-copy-{}", random_hex()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::write(&a, "segment").unwrap();
+        copy_new(&a, &b).unwrap();
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "segment");
+        std::fs::write(&a, "newer").unwrap();
+        assert_eq!(copy_new(&a, &b).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "segment");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
