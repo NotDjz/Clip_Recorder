@@ -293,3 +293,16 @@ fn the_supply_chain_is_pinned_and_verified() {
     assert!(release.contains("actions/attest-sbom@"), "the SBOM is not attested");
     assert!(code(".github/workflows/ci.yml", "#").contains("cargo deny --locked check"));
 }
+
+/// Release notes come from CHANGELOG.md (written by scripts/prepare-release.ps1 from the
+/// Conventional Commits): a release whose version has no section there stops before publishing.
+#[test]
+fn release_notes_are_the_changelog_section() {
+    let release = code(".github/workflows/release.yml", "#");
+    assert!(
+        release.contains("CHANGELOG.md has no section for"),
+        "a release without its changelog section"
+    );
+    assert!(release.contains("--notes-file notes.md") && !release.contains("--generate-notes"));
+    assert!(read("CHANGELOG.md").contains("## [2.0.1]"));
+}
