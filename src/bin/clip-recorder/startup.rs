@@ -3,7 +3,7 @@
 //! rewrites it never turns a user's "off" back on. The registry is the state: no config key.
 
 use crate::winutil::wide;
-use clip_recorder::settings::startup_approved;
+use clip_recorder::settings::{approved_entry, startup_approved};
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_BINARY, REG_SZ, RRF_RT_ANY, RegGetValueW, RegSetKeyValueW};
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -38,21 +38,17 @@ pub fn enabled() -> bool {
 /// On: the Run value points at this exe (re-pointed every time: an older install's path would
 /// otherwise start nothing), approved. Off: marked disabled, the value left to the MSI.
 pub fn set(on: bool) -> bool {
-    let mut approved = [0u8; 12];
     if on {
-        approved[0] = 2;
         let Ok(exe) = std::env::current_exe() else { return false };
         let value: Vec<u8> = wide(&format!("\"{}\"", exe.display())).iter().flat_map(|c| c.to_le_bytes()).collect();
-        write(RUN, REG_SZ, &value) && write(APPROVED, REG_BINARY, &approved)
+        write(RUN, REG_SZ, &value) && write(APPROVED, REG_BINARY, &approved_entry(true, 0))
     } else if read(RUN).is_some() {
-        approved[0] = 3;
         let now = unsafe {
             let mut ft = std::mem::zeroed();
             windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime(&mut ft);
             (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
         };
-        approved[4..].copy_from_slice(&now.to_le_bytes());
-        write(APPROVED, REG_BINARY, &approved)
+        write(APPROVED, REG_BINARY, &approved_entry(false, now))
     } else {
         true
     }

@@ -431,6 +431,15 @@ mod tests {
         assert!(saved.get(), "Enter on the focused Save did nothing");
     }
 
+    /// One button, Save. A separate Apply was a confusing subset of it and was removed.
+    #[test]
+    fn there_is_no_apply_button() {
+        i_slint_backend_testing::init_no_event_loop();
+        let w = window(&Config::default());
+        assert!(ElementHandle::find_by_accessible_label(&w, "Apply").next().is_none());
+        assert!(ElementHandle::find_by_accessible_label(&w, "Save changes").next().is_some());
+    }
+
     #[test]
     fn the_save_button_saves() {
         i_slint_backend_testing::init_no_event_loop();

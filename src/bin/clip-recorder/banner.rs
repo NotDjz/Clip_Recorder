@@ -291,6 +291,33 @@ mod tests {
         assert!(contrast(FG, BG) >= 4.5);
     }
 
+    fn pump(ms: u64) {
+        let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < end {
+            unsafe {
+                let mut msg: MSG = std::mem::zeroed();
+                while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                    DispatchMessageW(&msg);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// The saving banner breathes; the one that replaces it must not inherit that pulse.
+    #[test]
+    fn a_replaced_banner_stops_breathing() {
+        let banner = Banner::new();
+        let screen = Monitor { x: -5000, y: -5000, w: 800, h: 600 }; // off every screen
+        banner.show(State::Saving, "Saving clip", Some(30), 2000, screen);
+        pump(300);
+        assert!(VIEW.with(|v| v.borrow().step) > 0, "the saving dot does not breathe");
+        banner.show(State::Saved, "Clip saved", Some(30), 2000, screen);
+        pump(300);
+        assert_eq!(VIEW.with(|v| v.borrow().step), 0, "the saved banner kept the old pulse");
+        unsafe { ShowWindow(banner.hwnd, SW_HIDE) };
+    }
+
     #[test]
     fn colorref_is_bgr() {
         assert_eq!(colorref(0x112233), 0x332211);

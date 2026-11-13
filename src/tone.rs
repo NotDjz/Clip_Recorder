@@ -67,6 +67,18 @@ mod tests {
         wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
     }
 
+    /// Same two pitches throughout, so the chimes read as one gesture: the press ascends, the
+    /// save sounds both at once, a failure is the press played backwards.
+    #[test]
+    fn the_failure_is_the_press_played_backwards() {
+        let pitches = |notes: &[Note]| notes.iter().map(|n| n.freq).collect::<Vec<_>>();
+        let mut reversed = pitches(&START);
+        reversed.reverse();
+        assert_eq!(pitches(&FAIL), reversed);
+        assert!(START[0].freq < START[1].freq, "the press ascends");
+        assert!(SAVE.iter().all(|n| n.start_ms == 0), "the save sounds both notes together");
+    }
+
     #[test]
     fn a_valid_wav_as_long_as_its_last_note() {
         let w = wav(&FAIL);

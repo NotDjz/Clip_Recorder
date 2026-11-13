@@ -249,19 +249,18 @@ fn apply_settings() {
         let mut problems = Vec::new();
         if changes.hotkey {
             app.hotkey = None; // let go of the old one first
-            match hotkey_thread::register(hotkey::parse(&new.hotkey), save_clip) {
-                Ok(thread) => {
-                    app.hotkey = Some(thread);
-                    app.tray.set_hotkey(&new.hotkey);
-                }
-                Err(e) => {
-                    log(&format!("hotkey {} not registered (error {e})", new.hotkey));
-                    problems.push(format!("{} is taken by another app: the hotkey stays {}.", new.hotkey, app.config.hotkey));
-                    new.hotkey = app.config.hotkey.clone();
-                    w.set_hotkey(new.hotkey.as_str().into());
-                    app.hotkey = register_hotkey(&new.hotkey, &app.tray);
-                }
+            let registered = hotkey_thread::register(hotkey::parse(&new.hotkey), save_clip);
+            if let Err(e) = &registered {
+                log(&format!("hotkey {} not registered (error {e})", new.hotkey));
+                problems.push(format!("{} is taken by another app: the hotkey stays {}.", new.hotkey, app.config.hotkey));
             }
+            new.hotkey = clip_recorder::settings::hotkey_after_save(&app.config.hotkey, &new.hotkey, registered.is_ok()).to_string();
+            w.set_hotkey(new.hotkey.as_str().into());
+            app.tray.set_hotkey(&new.hotkey);
+            app.hotkey = match registered {
+                Ok(thread) => Some(thread),
+                Err(_) => register_hotkey(&new.hotkey, &app.tray),
+            };
         }
         app.config = new;
         if changes.audio {
@@ -271,7 +270,10 @@ fn apply_settings() {
             app.capture.restart_video(&app.config, &app.screens);
         }
         // Re-pointed whenever it is ticked: an older install's path would start nothing.
-        if w.get_startup_available() && (w.get_startup() || startup::enabled()) && !startup::set(w.get_startup()) {
+        let startup = clip_recorder::settings::startup_change(w.get_startup_available(), w.get_startup(), startup::enabled());
+        if let Some(on) = startup
+            && !startup::set(on)
+        {
             problems.push("Start with Windows could not be changed.".into());
         }
         if let Err(e) = app.config.save(&paths::config_file()) {
@@ -283,23 +285,49 @@ fn apply_settings() {
     });
 }
 
+/// What the user hears and sees at each step of a save.
+#[derive(Debug, PartialEq)]
+struct Feedback {
+    chime: Chime,
+    state: banner::State,
+    text: &'static str,
+    seconds: Option<u32>,
+    hold_ms: u32,
+}
+
+enum SaveEvent {
+    /// The press: acknowledged at once, the length being saved shown as provisional.
+    Pressed { buffer_seconds: u32 },
+    Ended(save::Outcome),
+}
+
+/// Every end is heard and seen: a lost clip once looked exactly like a saved one, and a press
+/// made too soon is told apart from a clip that was lost.
+fn feedback(event: SaveEvent) -> Feedback {
+    let (chime, state, text, seconds, hold_ms) = match event {
+        SaveEvent::Pressed { buffer_seconds } => (Chime::Start, banner::State::Saving, "Saving clip", Some(buffer_seconds), banner::SAVING_MS),
+        SaveEvent::Ended(Ok(seconds)) => (Chime::Saved, banner::State::Saved, "Clip saved", Some(seconds), banner::HOLD_MS),
+        SaveEvent::Ended(Err(GiveUp::TooSoon)) => (Chime::Failed, banner::State::Failed, "Not enough footage yet", None, banner::HOLD_MS),
+        SaveEvent::Ended(Err(GiveUp::Error)) => (Chime::Failed, banner::State::Failed, "Clip not saved", None, banner::HOLD_MS),
+    };
+    Feedback { chime, state, text, seconds, hold_ms }
+}
+
+fn tell(app: &App, f: Feedback) {
+    chimes::play(f.chime);
+    app.notify(f.state, f.text, f.seconds, f.hold_ms);
+}
+
 fn save_clip() {
     with_app(|app| {
-        chimes::play(Chime::Start);
-        app.notify(banner::State::Saving, "Saving clip", Some(app.config.buffer_seconds), banner::SAVING_MS);
+        tell(app, feedback(SaveEvent::Pressed { buffer_seconds: app.config.buffer_seconds }));
         let folder = folders::clips(&app.config.output_folder);
         save::start(&app.capture, &app.audio, &app.ffmpeg, app.config.buffer_seconds, &folder, on_saved);
     });
 }
 
 fn on_saved(outcome: save::Outcome) {
-    let (chime, state, text, seconds) = match outcome {
-        Ok(seconds) => (Chime::Saved, banner::State::Saved, "Clip saved", Some(seconds)),
-        Err(GiveUp::TooSoon) => (Chime::Failed, banner::State::Failed, "Not enough footage yet", None),
-        Err(GiveUp::Error) => (Chime::Failed, banner::State::Failed, "Clip not saved", None),
-    };
-    chimes::play(chime);
-    with_app(|app| app.notify(state, text, seconds, banner::HOLD_MS));
+    with_app(|app| tell(app, feedback(SaveEvent::Ended(outcome))));
 }
 
 fn open(target: &str) {
@@ -313,4 +341,23 @@ fn open(target: &str) {
 fn error_box(text: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
     unsafe { MessageBoxW(std::ptr::null_mut(), wide(text).as_ptr(), wide("Clip Recorder").as_ptr(), MB_OK | MB_ICONERROR) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_end_of_a_save_is_heard_and_seen() {
+        let pressed = feedback(SaveEvent::Pressed { buffer_seconds: 30 });
+        assert_eq!((pressed.chime, pressed.state, pressed.seconds), (Chime::Start, banner::State::Saving, Some(30)));
+        let saved = feedback(SaveEvent::Ended(Ok(31)));
+        assert_eq!((saved.chime, saved.state, saved.seconds), (Chime::Saved, banner::State::Saved, Some(31)));
+        let soon = feedback(SaveEvent::Ended(Err(GiveUp::TooSoon)));
+        let lost = feedback(SaveEvent::Ended(Err(GiveUp::Error)));
+        for f in [&soon, &lost] {
+            assert_eq!((f.chime, f.state), (Chime::Failed, banner::State::Failed), "a lost clip must not look saved");
+        }
+        assert_ne!(soon.text, lost.text, "too soon must read differently from a lost clip");
+    }
 }

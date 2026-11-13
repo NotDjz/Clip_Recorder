@@ -39,6 +39,33 @@ pub fn device_at(choices: &[String], index: usize) -> String {
     if index == 0 { String::new() } else { choices.get(index).cloned().unwrap_or_default() }
 }
 
+/// The hotkey a Save leaves in config.json: the new one only if it registered. Writing an
+/// unconfirmed one pinned a string no registration backed, and since Settings compares strings,
+/// re-picking it could never retry.
+pub fn hotkey_after_save<'a>(old: &'a str, new: &'a str, registered: bool) -> &'a str {
+    if registered { new } else { old }
+}
+
+/// What a Save does to "Start with Windows": Some(on) to write it, None to leave it. Ticked, it is
+/// written every time (an older install's path would otherwise start nothing); unticked, only
+/// switched off if it is on. A dev build offers no switch at all.
+pub fn startup_change(available: bool, ticked: bool, enabled: bool) -> Option<bool> {
+    (available && (ticked || enabled)).then_some(ticked)
+}
+
+/// The 12-byte StartupApproved entry Task Manager writes: 02 on, 03 off with the time it was
+/// switched off (a FILETIME at offset 4).
+pub fn approved_entry(on: bool, filetime: u64) -> [u8; 12] {
+    let mut entry = [0u8; 12];
+    if on {
+        entry[0] = 2;
+    } else {
+        entry[0] = 3;
+        entry[4..].copy_from_slice(&filetime.to_le_bytes());
+    }
+    entry
+}
+
 /// The Python app stored loopback names with " [Loopback]"; config files may still carry it.
 pub fn configured_device(name: &str) -> &str {
     name.trim_end_matches(" [Loopback]")
@@ -106,6 +133,29 @@ mod tests {
     fn an_unplugged_pinned_device_stays_pinned() {
         let (choices, index) = device_choices(live(), "Bluetooth (Off)");
         assert_eq!(device_at(&choices, index), "Bluetooth (Off)");
+    }
+
+    #[test]
+    fn a_hotkey_that_did_not_register_is_never_saved() {
+        assert_eq!(hotkey_after_save("Ctrl+Alt+R", "Ctrl+F9", true), "Ctrl+F9");
+        assert_eq!(hotkey_after_save("Ctrl+Alt+R", "Ctrl+F9", false), "Ctrl+Alt+R");
+    }
+
+    #[test]
+    fn start_with_windows_is_rewritten_when_ticked_and_switched_off_only_when_on() {
+        assert_eq!(startup_change(true, true, true), Some(true), "ticked: re-pointed every time");
+        assert_eq!(startup_change(true, true, false), Some(true));
+        assert_eq!(startup_change(true, false, true), Some(false));
+        assert_eq!(startup_change(true, false, false), None);
+        assert_eq!(startup_change(false, true, true), None, "dev build");
+    }
+
+    #[test]
+    fn the_approved_entry_reads_back_as_written() {
+        assert!(startup_approved(Some(&approved_entry(true, 0))));
+        let off = approved_entry(false, 0x0102_0304_0506_0708);
+        assert!(!startup_approved(Some(&off)));
+        assert_eq!(off[4..], 0x0102_0304_0506_0708u64.to_le_bytes());
     }
 
     #[test]

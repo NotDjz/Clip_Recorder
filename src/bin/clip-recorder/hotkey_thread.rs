@@ -57,3 +57,18 @@ impl Drop for HotkeyThread {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clip_recorder::hotkey::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT};
+
+    #[test]
+    fn a_taken_hotkey_is_refused_with_its_error_and_freed_on_drop() {
+        let key = Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_ALT | MOD_SHIFT, vk: 0x7A }; // F11
+        let first = register(key, || {}).expect("an unused combination registers");
+        assert_eq!(register(key, || {}).err(), Some(1409), "ERROR_HOTKEY_ALREADY_REGISTERED");
+        drop(first);
+        assert!(register(key, || {}).is_ok(), "the dropped thread did not unregister it");
+    }
+}

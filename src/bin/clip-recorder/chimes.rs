@@ -7,6 +7,7 @@ use clip_recorder::tone;
 use std::sync::OnceLock;
 use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT};
 
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Chime {
     Start,
     Saved,
