@@ -1,25 +1,35 @@
 # Clip Recorder
 
-Replay screen recorder for Windows — continuous background capture, `Ctrl+Alt+R` saves the last few seconds as MP4.
+Replay screen recorder for Windows: it keeps the last few seconds of your screen and sound in the background, and
+`Ctrl+Alt+R` saves them as an MP4. An open-source alternative to ShadowPlay or Medal.
 
 ## Features
 
-- Instant replay (15-120s) with system audio + mic
-- GPU-accelerated (NVENC) + DXGI capture up to 240fps
-- Audio device selection in settings
-- Portable app — no admin rights, no registry, uninstall from Settings
+- Instant replay of the last 15 to 120 s, with system sound and microphone
+- DXGI capture into NVENC up to 240 fps; without an NVIDIA GPU it records on the CPU at up to 60 fps
+- Audio and video in sync (measured median 0 ms at 60, 120 and 240 fps)
+- No overlay in your game: a tray icon and a short notification that is never captured into clips
 
 ## Install
 
-Download `ClipRecorderSetup.exe` from [Releases](../../releases) and run it — pick a folder, optionally create a desktop shortcut. Or run from source: `pip install -r requirements.txt && python src\clip_recorder.pyw`
+Download `clip-recorder-<version>-x64.msi` from [Releases](../../releases) and run it. It installs to Program Files
+and starts with Windows (switch that off in Settings). Uninstall it from Windows Settings > Apps; your clips stay.
 
-Requires Windows 10/11, FFmpeg bundled in releases.
+Requires Windows 10 or 11. FFmpeg is included.
+
+## Code signing policy
+
+See [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
 ## Build
 
-`scripts\build.bat` downloads FFmpeg, generates the icon, then runs PyInstaller (`--onefile --windowed`) to produce `dist\ClipRecorder.exe`. `scripts\build_setup.bat` (run after) bundles that exe into `dist\ClipRecorderSetup.exe`. `scripts\build_all.bat` runs both in order.
+Rust (version pinned in `rust-toolchain.toml`) and WiX 7.
 
-Layout: `src/` app + installer, `scripts/` build tooling, `tests/` test harnesses, `assets/` icon, `docs/` notes.
+- `cargo test --locked` runs the tests; `pwsh ./build-msi.ps1` fetches the hash-pinned FFmpeg, builds the release
+  exe and produces `target\clip-recorder-<version>-x64.msi`.
+- Releases are built and published by `.github/workflows/release.yml` from a `v*` tag.
+
+Every bug fixed so far is listed with the tests that guard it in [tests/regressions.md](tests/regressions.md).
 
 ## License
 

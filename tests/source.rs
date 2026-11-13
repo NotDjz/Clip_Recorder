@@ -213,3 +213,29 @@ fn the_session_handler_leaves_through_main() {
         "no deadline after the quit request"
     );
 }
+
+/// SignPath Foundation signs only projects that publish its code signing policy: the exact
+/// attribution, the team roles and the privacy statement, linked from the home and download
+/// pages, and an installer that announces the system changes it makes (start with Windows).
+#[test]
+fn the_code_signing_policy_is_published_where_signpath_requires_it() {
+    let policy = read("CODE_SIGNING_POLICY.md");
+    for required in [
+        "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)",
+        "Committers and reviewers:",
+        "Approvers:",
+        "This program will not transfer any information to other networked systems unless specifically requested by the user",
+    ] {
+        assert!(policy.contains(required), "CODE_SIGNING_POLICY.md lacks: {required}");
+    }
+    for page in ["README.md", "docs/index.html", ".github/workflows/release.yml"] {
+        assert!(
+            read(page).contains("Code signing policy"),
+            "{page} does not link the code signing policy"
+        );
+    }
+    assert!(
+        read("installer/license.rtf").contains("start with Windows"),
+        "the MSI does not announce it"
+    );
+}

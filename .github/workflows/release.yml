@@ -73,4 +73,5 @@ jobs:
           MSI: ${{ needs.build.outputs.msi }}
         run: |
           gh release create "$GITHUB_REF_NAME" "$MSI" --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" --prerelease --verify-tag --generate-notes
+            --title "$GITHUB_REF_NAME" --prerelease --verify-tag --generate-notes \
+            --notes "[Code signing policy](https://github.com/$GITHUB_REPOSITORY/blob/master/CODE_SIGNING_POLICY.md)"
