@@ -167,6 +167,8 @@
 
   /* ---- download ---- */
   .get { display: flex; flex-wrap: wrap; align-items: center; gap: 20px; }
+  .slint { display: inline-block; margin-top: 20px; }
+  .slint img { display: block; }
   .btn {
     display: inline-block; background: var(--record); color: #fff;
     font-variation-settings: "wdth" 104, "wght" 700; font-size: 1rem;
@@ -268,6 +270,12 @@
       <a class="btn" href="https://github.com/NotDjz/Clip_Recorder/releases">Download for Windows</a>
       <span class="meta">clip-recorder-2.0.1-x64.msi — run it, accept the licence, it launches. <a href="https://github.com/NotDjz/Clip_Recorder/blob/master/CODE_SIGNING_POLICY.md">Code signing policy</a>.</span>
     </div>
+    <a class="slint" href="https://slint.dev">
+      <picture>
+        <source srcset="made-with-slint-dark.svg" media="(prefers-color-scheme: dark)">
+        <img src="made-with-slint-light.svg" alt="Made with Slint" height="40">
+      </picture>
+    </a>
   </section>
 
   <footer>

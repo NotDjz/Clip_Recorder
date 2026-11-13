@@ -257,4 +257,16 @@ fn panics_are_logged_from_the_first_line_of_main() {
         logging.contains("LOCK.try_lock()"),
         "the panic path waits on the log lock"
     );
+
+/// Slint is used under its Royalty-free License 2.0, whose condition (section 2) is the
+/// "Made with Slint" badge on a public page, preferably the download page: removing it breaks the
+/// licence of every release.
+#[test]
+fn the_download_page_shows_the_made_with_slint_badge() {
+    let page = read("docs/index.html");
+    let download = &page[position(&page, "Download for Windows")..];
+    assert!(download.contains("made-with-slint-light.svg") && download.contains("alt=\"Made with Slint\""));
+    for badge in ["docs/made-with-slint-light.svg", "docs/made-with-slint-dark.svg"] {
+        assert!(read(badge).contains("<svg"), "{badge} missing");
+    }
 }
