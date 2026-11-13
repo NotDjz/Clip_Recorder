@@ -1,6 +1,8 @@
 #Requires -Version 7
 # Windows PowerShell 5 with $ErrorActionPreference = Stop treats cargo's progress on stderr as an
 # error and stops before building, leaving the previous exe in place.
+# -FFmpegOnly fetches and verifies the pinned ffmpeg.exe and stops (CI's end-to-end tests need it).
+param([switch]$FFmpegOnly)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -35,6 +37,8 @@ if (-not (Test-Pinned $ffmpeg)) {
         Move-Item $part $ffmpeg -Force
     } finally { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
 }
+
+if ($FFmpegOnly) { exit 0 }
 
 cargo build --release --locked
 if ($LASTEXITCODE) { exit $LASTEXITCODE }

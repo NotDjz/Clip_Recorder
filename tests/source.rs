@@ -164,3 +164,34 @@ fn every_fixed_bug_still_has_its_tests() {
         }
     }
 }
+
+/// Every third-party action is pinned to a full commit SHA (a tag can be moved under us), and
+/// every workflow starts from a read-only token.
+#[test]
+fn workflows_pin_their_actions_and_start_read_only() {
+    for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"] {
+        let text = code(workflow, "#");
+        let uses: Vec<&str> = text.lines().filter_map(|l| l.trim().strip_prefix("- uses: ")).collect();
+        assert!(!uses.is_empty(), "{workflow}");
+        for action in uses {
+            let sha = action
+                .split('@')
+                .nth(1)
+                .and_then(|r| r.split_whitespace().next())
+                .unwrap_or("");
+            assert!(
+                sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+                "{workflow}: {action}"
+            );
+        }
+        let top = text.split("\njobs:").next().unwrap();
+        assert!(
+            top.contains("permissions:\n  contents: read"),
+            "{workflow} must default to a read-only token"
+        );
+        assert!(
+            !text.contains("pull_request_target"),
+            "{workflow} would run a fork's code with secrets"
+        );
+    }
+}
