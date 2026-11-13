@@ -20,6 +20,39 @@ slint::slint! {
         out property <color> accent: #FF4A3D;
         out property <color> tick: #49524D;
         out property <color> kept: #2C2422;
+        // Save's fill: the accent darkened until white text on it reaches 4.66:1 (WCAG AA).
+        out property <color> save: #D63A2F;
+    }
+
+    // Save: reachable with Tab, fired by Enter or Space, focus shown by a ring (WCAG 2.2 AA).
+    component AccentButton inherits Rectangle {
+        in property <string> text;
+        callback clicked;
+        width: 130px;
+        height: 32px;
+        border-radius: 4px;
+        background: touch.pressed ? Ink.save.darker(15%) : touch.has-hover ? Ink.save.brighter(8%) : Ink.save;
+        border-width: focus.has-focus ? 2px : 0px;
+        border-color: Ink.fg;
+        accessible-role: button;
+        accessible-label: text;
+        accessible-action-default => { clicked(); }
+        Text { text: root.text; color: #FFFFFF; font-weight: 700; }
+        touch := TouchArea {
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+        focus := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Return || event.text == " " {
+                    root.clicked();
+                    return accept;
+                }
+                return reject;
+            }
+        }
     }
 
     component Group inherits VerticalLayout {
@@ -214,16 +247,7 @@ slint::slint! {
 
                 Rectangle { height: 1px; background: Ink.bg3; }
                 HorizontalLayout {
-                    save-button := Rectangle {
-                        width: 130px; height: 32px;
-                        border-radius: 4px;
-                        background: touch.pressed ? Ink.accent.darker(20%) : touch.has-hover ? Ink.accent.brighter(8%) : Ink.accent;
-                        accessible-role: button;
-                        accessible-label: "Save changes";
-                        accessible-action-default => { save(); }
-                        Text { text: "Save changes"; color: #FFFFFF; font-weight: 700; }
-                        touch := TouchArea { clicked => { save(); } }
-                    }
+                    AccentButton { text: "Save changes"; clicked => { save(); } }
                     Rectangle {}
                 }
             }
@@ -391,6 +415,20 @@ mod tests {
         ElementHandle::find_by_accessible_label(&w, "Ctrl+Alt+R").next().unwrap().invoke_accessible_default_action();
         press(&w, &[Key::Escape.into()]);
         assert_eq!((w.get_capturing(), w.get_hotkey().as_str()), (false, "Ctrl+Alt+R"));
+    }
+
+    /// Keyboard only: Shift+Tab from the start lands on the last control, Save, and Enter fires it.
+    #[test]
+    fn the_save_button_works_from_the_keyboard() {
+        i_slint_backend_testing::init_no_event_loop();
+        let w = window(&Config::default());
+        w.show().unwrap();
+        let saved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let s = saved.clone();
+        w.on_save(move || s.set(true));
+        press(&w, &[Key::Shift.into(), Key::Tab.into()]);
+        press(&w, &[Key::Return.into()]);
+        assert!(saved.get(), "Enter on the focused Save did nothing");
     }
 
     #[test]

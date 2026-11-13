@@ -26,7 +26,6 @@ const BG: u32 = 0x191C1B;
 const FG: u32 = 0xE6EAE7;
 const FG2: u32 = 0x8B958F;
 const ACCENT: u32 = 0xFF4A3D;
-const PROVISIONAL: u32 = 0x49524D;
 /// The transparency key: never a colour of the design.
 const KEY: u32 = 0xFF00FF;
 
@@ -137,6 +136,12 @@ unsafe fn font(dpi: i32, points: i32, bold: bool, face: &str) -> HFONT {
     }
 }
 
+/// The clip length: dimmed while provisional, full once saved. Both stay readable on BG
+/// (FG2 5.55:1, FG 14:1); the old provisional grey was 2.12:1, under WCAG AA.
+fn seconds_colour(state: State) -> u32 {
+    if state == State::Saving { FG2 } else { FG }
+}
+
 fn seconds_text(seconds: Option<u32>) -> Option<String> {
     seconds.map(|s| format!("{s}s"))
 }
@@ -209,7 +214,7 @@ unsafe fn paint(hwnd: HWND) {
             if let Some(s) = seconds_text(v.seconds) {
                 let mono = font(dpi, 10, false, "Consolas");
                 SelectObject(dc, mono as _);
-                SetTextColor(dc, colorref(if v.state == State::Saving { PROVISIONAL } else { FG2 }));
+                SetTextColor(dc, colorref(seconds_colour(v.state)));
                 let mut secs_rect = RECT { left: 0, top: 0, right: r.right - px(PAD), bottom: r.bottom };
                 let mut s = wide(&s);
                 DrawTextW(dc, s.as_mut_ptr(), -1, &mut secs_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -263,6 +268,27 @@ mod tests {
         assert_eq!(breath(PULSE_STEPS), ACCENT);
         let dimmest = breath(PULSE_STEPS / 2);
         assert!(dimmest != ACCENT && dimmest != BG, "{dimmest:06X}");
+    }
+
+    fn contrast(a: u32, b: u32) -> f64 {
+        let lum = |c: u32| {
+            let ch = |v: u32| {
+                let v = v as f64 / 255.0;
+                if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            };
+            0.2126 * ch(c >> 16 & 0xFF) + 0.7152 * ch(c >> 8 & 0xFF) + 0.0722 * ch(c & 0xFF)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// WCAG 2.2 AA: every text colour of the pill at 4.5:1 or more on its background.
+    #[test]
+    fn the_banner_text_is_readable() {
+        for state in [State::Saving, State::Saved, State::Failed] {
+            assert!(contrast(seconds_colour(state), BG) >= 4.5, "{state:?}");
+        }
+        assert!(contrast(FG, BG) >= 4.5);
     }
 
     #[test]
