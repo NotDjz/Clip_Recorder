@@ -314,3 +314,16 @@ fn no_release_without_the_measured_av_sync() {
     }
     assert!(check.contains("context=release/av-sync"));
 }
+
+/// Release notes come from CHANGELOG.md (written by scripts/prepare-release.ps1 from the
+/// Conventional Commits): a release whose version has no section there stops before publishing.
+#[test]
+fn release_notes_are_the_changelog_section() {
+    let release = code(".github/workflows/release.yml", "#");
+    assert!(
+        release.contains("CHANGELOG.md has no section for"),
+        "a release without its changelog section"
+    );
+    assert!(release.contains("--notes-file notes.md") && !release.contains("--generate-notes"));
+    assert!(read("CHANGELOG.md").contains("## [2.0.1]"));
+}
