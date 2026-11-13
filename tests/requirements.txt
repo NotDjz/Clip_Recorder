@@ -1,0 +1,2 @@
+# The A/V sync harness (tests/timecode_sync_test.py), run by scripts/release-check.ps1 before each release.
+pyaudiowpatch==0.2.12.8

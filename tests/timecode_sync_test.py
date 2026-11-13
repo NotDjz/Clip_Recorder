@@ -38,6 +38,9 @@ BEEP_LEN = 2.0            # and lasts this long
 # Indicator block position/size as a fraction of the screen (top-left area).
 IND_X, IND_Y, IND_W, IND_H = 0.02, 0.02, 0.20, 0.20
 
+# What an analysis measured, written by --json for scripts/release-check.ps1.
+RESULT = {}
+
 VIDEO_SAMPLE_FPS = 50     # 20 ms resolution on the indicator edges
 AUDIO_WIN_MS = 10
 
@@ -181,6 +184,7 @@ def report_recency(expected, vdur, save_tc):
         print("  (could not pin the clip to the timecode axis)")
         return
     loss, start_tc = min(losses, key=lambda x: abs(x[0]))
+    RESULT["lost_before_press_s"] = round(loss, 3)
     print(f"  clip covers timecode {start_tc:.2f}s -> {start_tc + vdur:.2f}s; "
           f"hotkey pressed at {save_tc:.2f}s")
     print(f"  LOST BEFORE PRESS: {loss:.2f}s "
@@ -198,6 +202,7 @@ def run_analyze(mp4_path, save_tc=None):
         capture_output=True, timeout=180, creationflags=0x08000000,
     ).stderr.decode("utf-8", "replace").strip()
     print(f"  decode: {'clean' if not errs else 'ERRORS: ' + errs[:200]}")
+    RESULT["decode_clean"] = not errs
     if errs:
         rc = 1
 
@@ -209,18 +214,21 @@ def run_analyze(mp4_path, save_tc=None):
     actual, adur = extract_audio_intervals(samples, arate)
 
     print(f"  video {vdur:.2f}s / audio {adur:.2f}s  (diff {abs(vdur - adur) * 1000:+.0f} ms)")
+    RESULT["duration_diff_ms"] = round(abs(vdur - adur) * 1000)
     if abs(vdur - adur) > 0.25:
         print("  DURATION MISMATCH")
         rc = 1
 
     clicks, per_s = count_discontinuities(samples, arate)
     print(f"  discontinuities: {clicks} ({per_s:.1f}/s)")
+    RESULT["discontinuities"] = clicks
     if per_s > 1.0:
         print("  CRACKLING: abnormal sample-level steps (audio stitched with holes)")
         rc = 1
 
     print(f"  expected beeps (on-screen indicator): {len(expected)}")
     print(f"  actual beeps   (audio energy):        {len(actual)}")
+    RESULT["beeps_expected"] = len(expected)
     if not expected:
         print("  ERROR: indicator never detected — is this a timecode-test clip?")
         return 1
@@ -234,6 +242,7 @@ def run_analyze(mp4_path, save_tc=None):
         near = min(actual, key=lambda a: abs(a[0] - e0))
         if abs(near[0] - e0) > 2.5:
             print(f"    [{e0:6.2f}-{e1:6.2f}]   MISSING            --")
+            RESULT["beeps_missing"] = RESULT.get("beeps_missing", 0) + 1
             rc = 1
             continue
         d = (near[0] - e0) * 1000
@@ -243,6 +252,7 @@ def run_analyze(mp4_path, save_tc=None):
     for a0, a1 in actual:
         if all(abs(a0 - e0) > 2.5 for e0, _ in expected):
             print(f"    (silence expected)    [{a0:6.2f}-{a1:6.2f}]   UNEXPECTED SOUND")
+            RESULT["unexpected_sound"] = RESULT.get("unexpected_sound", 0) + 1
             rc = 1
 
     if save_tc is not None:
@@ -252,6 +262,8 @@ def run_analyze(mp4_path, save_tc=None):
         deltas_sorted = sorted(deltas)
         mean = sum(deltas) / len(deltas)
         median = deltas_sorted[len(deltas_sorted) // 2]
+        RESULT["median_offset_ms"] = round(median)
+        RESULT["max_abs_offset_ms"] = round(max(abs(d) for d in deltas))
         print(f"  offset mean {mean:+.0f} ms / median {median:+.0f} ms "
               f"(min {min(deltas):+.0f} / max {max(deltas):+.0f})")
         print("  (positive = audio LATE vs the picture; negative = audio EARLY/ahead)")
@@ -261,6 +273,7 @@ def run_analyze(mp4_path, save_tc=None):
         if abs(median) > 300:
             print("  A/V MISALIGNED (median offset over 300 ms)")
             rc = 1
+    RESULT["rc"] = rc
     return rc
 
 
@@ -437,8 +450,16 @@ def main():
                    help="Save at this timecode instead of waiting for the buffer to "
                         "fill — exercises the not-enough-history path taken right "
                         "after a settings change.")
+    p.add_argument("--json", metavar="FILE", default=None,
+                   help="Also write what the analysis measured to FILE (read by scripts/release-check.ps1).")
     args = p.parse_args()
-    sys.exit(run_analyze(args.analyze) if args.analyze else run_generate(args))
+    rc = run_analyze(args.analyze) if args.analyze else run_generate(args)
+    if args.json:
+        import json
+        RESULT.setdefault("rc", rc)
+        with open(args.json, "w", encoding="utf-8") as f:
+            json.dump(RESULT, f, indent=1)
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

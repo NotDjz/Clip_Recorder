@@ -293,3 +293,24 @@ fn the_supply_chain_is_pinned_and_verified() {
     assert!(release.contains("actions/attest-sbom@"), "the SBOM is not attested");
     assert!(code(".github/workflows/ci.yml", "#").contains("cargo deny --locked check"));
 }
+
+/// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no
+/// release is built until scripts/release-check.ps1 has measured the tagged commit at the computer.
+#[test]
+fn no_release_without_the_measured_av_sync() {
+    let release = code(".github/workflows/release.yml", "#");
+    let gate = between(&release, "av-sync:", "build:");
+    assert!(
+        gate.contains("release/av-sync") && gate.contains("exit 1"),
+        "the release does not check the measurement"
+    );
+    assert!(
+        between(&release, "build:", "steps:").contains("needs: av-sync"),
+        "the build does not wait for it"
+    );
+    let check = code("scripts/release-check.ps1", "#");
+    for fps in ["60", "120", "240"] {
+        assert!(check.contains(fps), "release-check does not measure {fps} fps");
+    }
+    assert!(check.contains("context=release/av-sync"));
+}
