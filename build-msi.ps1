@@ -1,3 +1,6 @@
+#Requires -Version 7
+# Windows PowerShell 5 with $ErrorActionPreference = Stop treats cargo's progress on stderr as an
+# error and stops before building, leaving the previous exe in place.
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 

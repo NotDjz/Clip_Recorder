@@ -227,6 +227,9 @@ fn the_hotkey_saves_a_clip_that_decodes() {
     let done = wait_until(Duration::from_secs(40), || log().lines().find(|l| l.contains("done: saved=")).map(String::from));
     let done = done.unwrap_or_else(|| panic!("no save finished:\n{}", log()));
     assert!(done.contains("saved=true"), "{}", log());
+    // The clip is placed by ffmpeg's capture clock, parsed from -debug_ts text: an ffmpeg
+    // upgrade that rewords it would silently put every clip back on file times.
+    assert!(log().contains("anchor=capture"), "{}", log());
     let clip = std::fs::read_dir(&clips).unwrap().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "mp4"));
     let clip = clip.expect("no MP4 in the clips folder");
     let decode = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
