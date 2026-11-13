@@ -1,0 +1,18 @@
+# Weekly pull requests for new versions of the pinned actions and the Rust dependencies. Their
+# commits follow Conventional Commits ("build(deps): ..."), so the commits check accepts them.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+      include: "scope"

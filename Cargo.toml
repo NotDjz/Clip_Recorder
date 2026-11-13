@@ -1,0 +1,52 @@
+[package]
+name = "clip-recorder"
+version = "2.0.1"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# keep equal to i-slint-backend-testing
+slint = { version = "=1.18.1", features = ["raw-window-handle-06"] }
+raw-window-handle = "0.6"
+cpal = "0.18"
+tray-icon = "0.26"
+hound = "3.5"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Recovery",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"
+
+[profile.release]
+strip = true
+lto = true
+
+# A stand-in for ffmpeg in the save tests: built by `cargo test --examples`, never shipped.
+[[example]]
+name = "fake_ffmpeg"
+harness = false

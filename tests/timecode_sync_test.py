@@ -15,12 +15,11 @@ stretches really are silent (the WASAPI-loopback-drops-silence case) and flags
 sample-level discontinuities (crackling).
 
 Usage:
-    py tests\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 1]
+    py tests\\timecode_sync_test.py --generate [--fps 60] [--buffer 15] [--monitor 1] [--exe path]
     py tests\\timecode_sync_test.py --analyze "C:\\path\\to\\Clip_....mp4"
 """
 import argparse
 import array
-import importlib.util
 import math
 import os
 import struct
@@ -31,7 +30,6 @@ import time
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.dirname(TESTS_DIR)
-APP_PATH = os.path.join(REPO_DIR, "src", "clip_recorder.pyw")
 
 TONE_FREQ = 1000
 TONE_RATE = 48000
@@ -45,15 +43,8 @@ AUDIO_WIN_MS = 10
 
 
 def _ffmpeg_path():
-    bundled = os.path.join(REPO_DIR, "ffmpeg.exe")
+    bundled = os.path.join(REPO_DIR, "target", "ffmpeg", "ffmpeg.exe")
     return bundled if os.path.exists(bundled) else "ffmpeg"
-
-
-def load_app_module():
-    spec = importlib.util.spec_from_file_location("clip_recorder", APP_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def beep_expected(t):
@@ -275,55 +266,85 @@ def run_analyze(mp4_path, save_tc=None):
 
 # ─── Capture + signal ────────────────────────────────────────────────────────
 
+def monitors_primary_first():
+    """(x, y, w, h, primary) per screen, primary first: the app's own order."""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    found = []
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+                              ctypes.POINTER(wintypes.RECT), wintypes.LPARAM)
+
+    def visit(handle, _dc, _rect, _data):
+        info = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+        user32.GetMonitorInfoW(handle, ctypes.byref(info))
+        r = info.rcMonitor
+        found.append((r.left, r.top, r.right - r.left, r.bottom - r.top, bool(info.dwFlags & 1)))
+        return True
+
+    user32.SetProcessDPIAware()
+    user32.EnumDisplayMonitors(None, None, proc(visit), 0)
+    return sorted(found, key=lambda m: not m[4])
+
+
+def press_hotkey():
+    """Ctrl+Alt+Shift+F12: the harness's own hotkey, so an installed Clip Recorder holding
+    Ctrl+Alt+R is left alone."""
+    import ctypes
+    keys = (0x11, 0x12, 0x10, 0x7B)
+    for k in keys:
+        ctypes.windll.user32.keybd_event(k, 0, 0, 0)
+    for k in reversed(keys):
+        ctypes.windll.user32.keybd_event(k, 0, 2, 0)
+
+
 def run_generate(args):
-    cr = load_app_module()
-    tk = cr.tk
+    """Drives the real app (the Rust exe, on its own data folder) through its real hotkey."""
+    import json
+    import shutil
+    import tempfile
+    import tkinter as tk
+    import pyaudiowpatch as pyaudio
 
-    root = tk.Tk()
-    root.withdraw()
+    screens = monitors_primary_first()
+    mon_idx = min(args.monitor, len(screens) - 1)
+    mx, my, mw, mh, _ = screens[mon_idx]
 
-    monitors = cr.get_monitors() or [{
-        "name": "Default", "x": 0, "y": 0,
-        "w": cr.user32.GetSystemMetrics(0), "h": cr.user32.GetSystemMetrics(1),
-        "primary": True,
-    }]
-    mon_idx = min(args.monitor, len(monitors) - 1)
-    mon = monitors[mon_idx]
+    data = os.path.join(tempfile.gettempdir(), f"crsync-{os.getpid()}")
+    clips = os.path.join(data, "clips")
+    shutil.rmtree(data, ignore_errors=True)
+    os.makedirs(clips)
+    with open(os.path.join(data, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"monitor": mon_idx, "fps": args.fps, "buffer_seconds": args.buffer,
+                   "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12"}, f)
+    env = dict(os.environ, CLIPREC_DATA_DIR=data, CLIPREC_FFMPEG=_ffmpeg_path())
+    app = subprocess.Popen([args.exe], env=env)
 
-    config = dict(cr.DEFAULTS)
-    config["monitor"] = mon_idx
-    config["fps"] = args.fps
-    config["buffer_seconds"] = args.buffer
-
-    audio = cr.AudioCapture(max_seconds=max(cr.BUFFER_OPTIONS + [args.buffer]))
-    capture = cr.FFmpegCapture(root, config, monitors, audio)
-
-    pa = cr.pyaudio.PyAudio()
-    wasapi = pa.get_host_api_info_by_type(cr.pyaudio.paWASAPI)
+    pa = pyaudio.PyAudio()
+    wasapi = pa.get_host_api_info_by_type(pyaudio.paWASAPI)
     out_dev = pa.get_device_info_by_index(wasapi["defaultOutputDevice"])
-    # WASAPI shared mode demands the endpoint's OWN rate, so TONE_RATE cannot be
-    # assumed: a 44.1 kHz output (any Bluetooth speaker) made this raise
-    # -9997 Invalid sample rate and the whole harness refused to start.
+    # WASAPI shared mode demands the endpoint's OWN rate: a 44.1 kHz output (any Bluetooth
+    # speaker) made a fixed 48 kHz open raise -9997 Invalid sample rate.
     tone_rate = int(out_dev["defaultSampleRate"])
-    out_stream = pa.open(format=cr.pyaudio.paInt16, channels=2, rate=tone_rate,
+    out_stream = pa.open(format=pyaudio.paInt16, channels=2, rate=tone_rate,
                          output=True, output_device_index=out_dev["index"])
     beep = make_beep_pcm(rate=tone_rate)
 
-    win = tk.Toplevel(root)
-    win.overrideredirect(True)
-    win.attributes("-topmost", True)
-    win.geometry(f"{mon['w']}x{mon['h']}+{mon['x']}+{mon['y']}")
-    canvas = tk.Canvas(win, bg="black", highlightthickness=0)
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.geometry(f"{mw}x{mh}+{mx}+{my}")
+    canvas = tk.Canvas(root, bg="black", highlightthickness=0)
     canvas.pack(fill="both", expand=True)
-    ind = canvas.create_rectangle(
-        mon["w"] * IND_X, mon["h"] * IND_Y,
-        mon["w"] * (IND_X + IND_W), mon["h"] * (IND_Y + IND_H),
-        fill="black", outline="")
-    label = canvas.create_text(mon["w"] // 2, mon["h"] // 2, text="0.0",
-                               fill="#20ff20", font=("Consolas", 140, "bold"))
-    hint = canvas.create_text(mon["w"] // 2, mon["h"] // 2 + 160, text="",
-                              fill="#808080", font=("Consolas", 40))
-    win.deiconify()
+    ind = canvas.create_rectangle(mw * IND_X, mh * IND_Y, mw * (IND_X + IND_W), mh * (IND_Y + IND_H),
+                                  fill="black", outline="")
+    label = canvas.create_text(mw // 2, mh // 2, text="0.0", fill="#20ff20", font=("Consolas", 140, "bold"))
+    hint = canvas.create_text(mw // 2, mh // 2 + 160, text="", fill="#808080", font=("Consolas", 40))
 
     t0 = time.monotonic()
     stop_flag = threading.Event()
@@ -342,9 +363,8 @@ def run_generate(args):
         last_k = -1
         while not stop_flag.is_set():
             t = time.monotonic() - t0
-            # One beep per scheduled window: the blocking write returns right at
-            # the window's edge, so without this guard the loop re-triggers and
-            # plays a 4 s beep instead of 2 s.
+            # One beep per window: the blocking write returns right at the window's edge, so
+            # without this guard the loop re-triggers and plays a 4 s beep.
             if beep_expected(t) and int(t // BEEP_EVERY) != last_k:
                 last_k = int(t // BEEP_EVERY)
                 try:
@@ -354,53 +374,46 @@ def run_generate(args):
             else:
                 time.sleep(0.01)                # write NOTHING: real digital silence
 
-    capture.start()
-    print(f"Capturing {args.fps} FPS, buffer={args.buffer}s, monitor={mon_idx}")
+    print(f"Capturing {args.fps} FPS, buffer={args.buffer}s, monitor={mon_idx} with {args.exe}")
     print(f"Schedule decided in advance: beep every {BEEP_EVERY:g}s for {BEEP_LEN:g}s")
-    print("  -> sound expected at timecode [5,7) [10,12) [15,17) ... ; silence elsewhere")
     tick()
     threading.Thread(target=audio_loop, daemon=True).start()
 
     result = {}
 
-    def on_success():
-        folder = cr.get_output_folder(config)
-        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.startswith("Clip_")]
-        result["path"] = max(files, key=os.path.getmtime) if files else None
-        print(f"  saved: {result['path']}")
-        stop_flag.set()
-        root.after(400, root.quit)
+    def wait_for_clip(deadline):
+        files = [f for f in os.listdir(clips) if f.endswith(".mp4")]
+        if files:
+            result["path"] = os.path.join(clips, files[0])
+            print(f"  saved: {result['path']}")
+            root.after(1500, root.quit)     # let the mux finish writing
+        elif time.monotonic() < deadline:
+            root.after(200, wait_for_clip, deadline)
+        else:
+            root.quit()
 
     def do_save():
         result["save_tc"] = time.monotonic() - t0
-        print(f"Triggering save_replay() at timecode {result['save_tc']:.1f}s ...")
-        capture.save_replay(
-            on_success=lambda secs: root.after(0, on_success),
-            # Without this an abort is observed as a hang: the harness waits out
-            # its safety stop and then blames "not all saves succeeded".
-            on_failure=lambda reason: print(f"  !! save_replay ABORTED: {reason}"))
+        print(f"Pressing the hotkey at timecode {result['save_tc']:.1f}s ...")
+        press_hotkey()
+        wait_for_clip(time.monotonic() + 45)
 
-    # --save-after forces a save BEFORE the buffer has refilled, which is what
-    # happens right after a settings change: the selection falls back to "take
-    # everything", a different anchoring path.
+    # --save-after forces a save BEFORE the buffer has refilled (the take-everything path).
     save_at = args.save_after if args.save_after else args.buffer + 12
     root.after(int(save_at * 1000), do_save)
-    root.after(int((save_at + 45) * 1000), root.quit)   # hard safety stop
     root.mainloop()
 
     stop_flag.set()
-    for fn in (lambda: out_stream.stop_stream(), lambda: out_stream.close(),
-               lambda: pa.terminate(), lambda: win.destroy()):
+    for fn in (out_stream.stop_stream, out_stream.close, pa.terminate, root.destroy, app.kill):
         try:
             fn()
         except Exception:
             pass
-    capture.cleanup()
-    audio.cleanup()
+    app.wait()
 
     path = result.get("path")
     if not path:
-        print("ERROR: save_replay never completed")
+        print(f"ERROR: no clip was saved; see {os.path.join(data, 'clip_recorder.log')}")
         return 1
     print()
     return run_analyze(path, save_tc=result.get("save_tc"))
@@ -412,6 +425,8 @@ def main():
     m = p.add_mutually_exclusive_group(required=True)
     m.add_argument("--generate", action="store_true")
     m.add_argument("--analyze", metavar="MP4_PATH")
+    p.add_argument("--exe", default=os.path.join(REPO_DIR, "target", "release", "clip-recorder.exe"),
+                   help="The app to drive, on its own data folder (an installed one is untouched).")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--buffer", type=int, default=15)
     p.add_argument("--monitor", type=int, default=1,

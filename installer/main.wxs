@@ -1,0 +1,54 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Id derives a stable UpgradeCode: never change it, or upgrades stop replacing old installs. -->
+  <Package Id="NotDjz.ClipRecorder" Name="Clip Recorder" Manufacturer="NotDjz"
+           Version="$(var.Version)" Scope="perMachine">
+    <!-- Same-version rebuilds replace the previous install instead of installing side by side. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <!-- A running Clip Recorder is closed by Restart Manager: it keeps a hidden top-level window
+         that exits on WM_ENDSESSION, and its kill-on-close job takes ffmpeg.exe along.
+         Don't add util:CloseApplication: it sends WM_CLOSE to winit's hidden windows too,
+         which leaves a windowless process that blocks the upgrade. -->
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Clip Recorder" />
+    </StandardDirectory>
+
+    <File Id="App" Directory="INSTALLFOLDER" Source="target\release\clip-recorder.exe">
+      <Shortcut Name="Clip Recorder" Directory="ProgramMenuFolder" WorkingDirectory="INSTALLFOLDER" />
+    </File>
+
+    <!-- The pinned, hash-checked build (build-msi.ps1). Beside the exe, where the app looks. -->
+    <Component Directory="INSTALLFOLDER">
+      <File Source="$(var.FFmpeg)" Name="ffmpeg.exe" />
+    </Component>
+
+    <!-- Start with Windows, for the user who installs (on by default, as Setup did). HKCU, not
+         HKLM: Explorer keeps the on/off of an HKLM entry under HKLM, so switching it in Settings
+         would need admin. Settings switches it through HKCU's StartupApproved key (what Task
+         Manager uses), so an upgrade that rewrites this value never turns a user's "off" back
+         on. Other users switch it on in Settings. Uninstalling removes it. -->
+    <Component Directory="INSTALLFOLDER">
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="Clip Recorder" Value="&quot;[#App]&quot;" Type="string" KeyPath="yes" />
+    </Component>
+
+    <Icon Id="ClipRecorder.ico" SourceFile="assets\clip-recorder.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ClipRecorder.ico" />
+
+    <!-- Minimal wizard; the final page offers to launch the app (checked by default). -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="installer\license.rtf" />
+    <WixVariable Id="WixUIBannerBmp" Value="installer\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="installer\dialog.bmp" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Clip Recorder" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#App]" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="Wix4ShellExec_X64"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+  </Package>
+</Wix>
