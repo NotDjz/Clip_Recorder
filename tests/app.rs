@@ -57,13 +57,91 @@ fn data_dir(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("crtest-app-{}-{name}", std::process::id()))
 }
 
-fn launch(dir: &std::path::Path) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_clip-recorder")).env("CLIPREC_DATA_DIR", dir).spawn().unwrap()
+/// The app under test. Killed when dropped, so a failing assertion never leaves it running
+/// (and never leaves cargo waiting on a pipe it inherited).
+struct App(Child);
+
+impl Drop for App {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
-fn stop(mut app: Child) {
-    let _ = app.kill();
+impl std::ops::Deref for App {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+fn launch(dir: &std::path::Path) -> App {
+    use std::process::Stdio;
+    App(Command::new(env!("CARGO_BIN_EXE_clip-recorder"))
+        .env("CLIPREC_DATA_DIR", dir)
+        .env("CLIPREC_FFMPEG", concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap())
+}
+
+/// The pid the app logged for its capture ffmpeg.
+fn ffmpeg_pid(dir: &std::path::Path) -> Option<u32> {
+    let log = std::fs::read_to_string(dir.join("clip_recorder.log")).ok()?;
+    let line = log.lines().rev().find(|l| l.contains("capture started"))?;
+    line.split("pid=").nth(1)?.split_whitespace().next()?.parse().ok()
+}
+
+fn process_exits_within(pid: u32, ms: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    unsafe {
+        let h = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if h.is_null() {
+            return true; // already gone
+        }
+        let exited = WaitForSingleObject(h, ms) == WAIT_OBJECT_0;
+        CloseHandle(h);
+        exited
+    }
+}
+
+/// A crash or a Task Manager kill skips every cleanup. The kill-on-close job object must take
+/// the capture ffmpeg along: an orphan keeps writing to %TEMP% and holds one of the GPU's few
+/// NVENC sessions, until enough orphans make every later launch encode nothing.
+#[test]
+fn a_force_killed_app_takes_its_ffmpeg_along() {
+    let dir = data_dir("job");
+    let mut app = launch(&dir);
+    let pid = wait_until(Duration::from_secs(20), || ffmpeg_pid(&dir)).expect("the capture never started");
+    assert!(!process_exits_within(pid, 500), "ffmpeg died on its own: the test proves nothing");
+    app.kill().unwrap(); // TerminateProcess, no cleanup at all
     let _ = app.wait();
+    let died = process_exits_within(pid, 3000);
+    if !died {
+        kill(pid); // an orphan would keep capturing, and keep cargo waiting on its pipe
+    }
+    assert!(died, "ffmpeg pid {pid} outlived the app");
+}
+
+fn kill(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !h.is_null() {
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+    }
 }
 
 /// Restart Manager (MSI upgrades) and logoff close apps with WM_ENDSESSION. A tray app has no
@@ -78,9 +156,6 @@ fn quits_when_windows_ends_the_session() {
         send(hwnd, WM_ENDSESSION, 1);
         app.try_wait().unwrap()
     });
-    if exit.is_none() {
-        stop(app);
-    }
     assert!(exit.is_some_and(|status| status.success()), "clip-recorder ignored WM_ENDSESSION");
 }
 
@@ -93,8 +168,6 @@ fn a_second_launch_exits_and_the_first_keeps_running() {
     let mut second = launch(&dir);
     let exit = wait_until(Duration::from_secs(5), || second.try_wait().unwrap());
     let first_alive = first.try_wait().unwrap().is_none();
-    stop(second);
-    stop(first);
     assert!(exit.is_some_and(|s| s.success()), "the second launch kept running");
     assert!(first_alive, "the first instance died");
 }
