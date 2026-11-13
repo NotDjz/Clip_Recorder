@@ -150,6 +150,18 @@ mod tests {
             "the second harmonic is missing"
         );
         assert!(at(&rich, 220.0) > at(&rich, 440.0), "the fundamental leads");
+        // Sample 900 is a crest of the harmonic (2 x 220 Hz): it adds amp x envelope x harm.
+        let added = rich[900] as i32 - plain[900] as i32;
+        assert!(
+            (1900..=1950).contains(&added),
+            "the harmonic added {added} at its crest"
+        );
+        // And off the crest it follows its own sine (0.866 of the crest at sample 1000).
+        let added = rich[1000] as i32 - plain[1000] as i32;
+        assert!(
+            (1480..=1525).contains(&added),
+            "the harmonic added {added} at sample 1000"
+        );
     }
 
     #[test]

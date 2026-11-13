@@ -183,7 +183,8 @@ fn prepare(
 /// it: two saves in the same second once shared a name, and the second (ffmpeg -y) overwrote
 /// the first's clip, or deleted it on failure.
 fn reserve_output(folder: &Path, stamp: &str) -> std::io::Result<PathBuf> {
-    for n in 1.. {
+    // Bounded: an error that is not "taken" ends it, and so do a thousand taken names.
+    for n in 1..=1000 {
         let name = if n == 1 {
             format!("Clip_{stamp}.mp4")
         } else {
@@ -196,7 +197,7 @@ fn reserve_output(folder: &Path, stamp: &str) -> std::io::Result<PathBuf> {
             Err(e) => return Err(e),
         }
     }
-    unreachable!()
+    Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
 /// Whether the step that writes the clip succeeded: the mux with audio (which only runs after
@@ -526,6 +527,12 @@ mod tests {
         let second = reserve_output(&dir, "20261113_101500").unwrap();
         assert_eq!(first.file_name().unwrap(), "Clip_20261113_101500.mp4");
         assert_eq!(second.file_name().unwrap(), "Clip_20261113_101500_2.mp4");
+        let missing = reserve_output(&dir.join("no such folder"), "20261113_101500").unwrap_err();
+        assert_eq!(
+            missing.kind(),
+            std::io::ErrorKind::NotFound,
+            "only a taken name moves on"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -130,8 +130,9 @@ mod tests {
     /// A stereo chunk that starts before the window: its first frames are cut as whole frames.
     #[test]
     fn a_stereo_chunk_overlapping_the_start_is_cut_by_frames() {
-        // 0.5 s of stereo frames ending at 1.25: [0.75, 1.25], window [1.0, 2.0]. Left 1, right 2.
-        let samples: Vec<i16> = (0..2 * 24000).map(|i| if i % 2 == 0 { 1 } else { 2 }).collect();
+        // 0.5 s of stereo frames ending at 1.25: [0.75, 1.25], window [1.0, 2.0]. Frame f holds
+        // f on the left and -f on the right, so a cut at the wrong frame or inside one shows.
+        let samples: Vec<i16> = (0..24000i16).flat_map(|f| [f, -f]).collect();
         let out = render_window(
             &[Chunk {
                 arrival: 1.25,
@@ -143,8 +144,12 @@ mod tests {
             1.0,
         )
         .unwrap();
-        assert_eq!((out[0], out[1]), (1, 2), "channels swapped by a cut inside a frame");
-        assert_eq!((out[2 * 11999], out[2 * 11999 + 1], out[2 * 12000]), (1, 2, 0));
+        assert_eq!(
+            (out[0], out[1]),
+            (12000, -12000),
+            "the window starts at frame 12000, left first"
+        );
+        assert_eq!((out[2 * 11999], out[2 * 11999 + 1], out[2 * 12000]), (23999, -23999, 0));
     }
 
     #[test]

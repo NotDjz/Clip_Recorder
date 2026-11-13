@@ -81,14 +81,19 @@ mod tests {
         let path = std::env::temp_dir().join(format!("crtest_logcut_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let cap = 4096;
-        let mut i = 0;
-        while !std::fs::read_to_string(&path)
-            .unwrap_or_default()
-            .starts_with("[log truncated]")
-        {
+        let cut = |path: &std::path::Path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .starts_with("[log truncated]")
+        };
+        // Bounded: a log that never cuts fails here instead of looping for ever.
+        for i in 0..1000 {
+            if cut(&path) {
+                break;
+            }
             append_capped(&path, &format!("line {i:05} padding padding padding"), cap).unwrap();
-            i += 1;
         }
+        assert!(cut(&path), "never cut");
         let len = std::fs::metadata(&path).unwrap().len();
         std::fs::remove_file(&path).unwrap();
         assert!(
