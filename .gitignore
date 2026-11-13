@@ -34,3 +34,4 @@ Thumbs.db
 CLAUDE.md
 target/
 *.msi
+.metrics/

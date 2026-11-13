@@ -12,6 +12,7 @@ use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,14 +29,42 @@ pub fn ffmpeg_path() -> PathBuf {
     std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("ffmpeg.exe"))).unwrap_or_else(|| "ffmpeg.exe".into())
 }
 
-fn probe(ffmpeg: &Path, what: &str, needle: &str) -> bool {
-    Command::new(ffmpeg)
-        .args(["-hide_banner", what])
+/// Whether ffmpeg really encodes one frame from `input`. Listing h264_nvenc or ddagrab only says
+/// they were compiled in: without an NVIDIA GPU both are listed and fail, and the capture died
+/// and restarted every two seconds (seen in Windows Sandbox).
+fn works(ffmpeg: &Path, input: &str, encoder: &str) -> bool {
+    let child = Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", input, "-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains(needle))
+        .spawn();
+    let Ok(mut child) = child else { return false };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// DXGI capture straight into NVENC when both work. ddagrab hands over GPU frames, which x264
+/// cannot read, so without NVENC the capture goes through GDI (an AMD or Intel GPU today).
+fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
+    if works(ffmpeg, "ddagrab=output_idx=0", "h264_nvenc") {
+        (Encoder::Nvenc, Grabber::Ddagrab)
+    } else if works(ffmpeg, "color=c=black:s=256x256:d=1", "h264_nvenc") {
+        (Encoder::Nvenc, Grabber::Gdigrab)
+    } else {
+        (Encoder::X264, Grabber::Gdigrab)
+    }
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process
@@ -43,7 +72,11 @@ fn probe(ffmpeg: &Path, what: &str, needle: &str) -> bool {
 struct Running {
     child: Child,
     clock: Arc<Mutex<Option<f64>>>,
+    /// The last lines ffmpeg printed that were not -debug_ts traffic: why it died.
+    last_words: Arc<Mutex<VecDeque<String>>>,
 }
+
+const LAST_WORDS: usize = 6;
 
 pub struct Capture {
     ffmpeg: PathBuf,
@@ -60,8 +93,7 @@ impl Capture {
         crate::job::ensure_kill_on_close();
         let segment_dir = clip_recorder::paths::segments_root().join(format!("{SEGMENT_DIR_PREFIX}{}_{}", std::process::id(), clock::now() as u64));
         std::fs::create_dir_all(&segment_dir)?;
-        let encoder = if probe(&ffmpeg, "-encoders", "h264_nvenc") { Encoder::Nvenc } else { Encoder::X264 };
-        let grabber = if probe(&ffmpeg, "-filters", "ddagrab") { Grabber::Ddagrab } else { Grabber::Gdigrab };
+        let (encoder, grabber) = pipeline(&ffmpeg);
         log(&format!("capture: encoder={encoder:?} grabber={grabber:?} dir={}", segment_dir.display()));
         Ok(Capture { ffmpeg, segment_dir, encoder, grabber, running: None, started_at: 0.0 })
     }
@@ -94,7 +126,12 @@ impl Capture {
 
     /// True if ffmpeg had been started and has since died (the health check restarts it).
     pub fn has_died(&mut self) -> bool {
-        self.running.is_some() && !self.is_running()
+        let died = self.running.is_some() && !self.is_running();
+        if died && let Some(r) = &self.running {
+            let words = r.last_words.lock().unwrap_or_else(|e| e.into_inner());
+            log(&format!("capture ffmpeg exited ({:?}): {}", r.child.id(), words.iter().cloned().collect::<Vec<_>>().join(" | ")));
+        }
+        died
     }
 
     pub fn start(&mut self, config: &Config, screens: &[Screen]) {
@@ -143,9 +180,10 @@ impl Capture {
         // The Command, and our copy of the write end with it, is gone here: otherwise the
         // reader would never see EOF.
         let clock = Arc::new(Mutex::new(None));
-        let published = Arc::clone(&clock);
-        std::thread::spawn(move || read_clock(read, published));
-        Ok(Running { child, clock })
+        let last_words = Arc::new(Mutex::new(VecDeque::new()));
+        let (published, said) = (Arc::clone(&clock), Arc::clone(&last_words));
+        std::thread::spawn(move || read_clock(read, published, said));
+        Ok(Running { child, clock, last_words })
     }
 
     /// Stops ffmpeg cleanly ("q" lets it close the segment), then harder.
@@ -202,14 +240,25 @@ fn stderr_pipe() -> std::io::Result<(std::fs::File, OwnedHandle)> {
 
 /// Drains ffmpeg's stderr to EOF (a full pipe would stall the capture) and publishes the capture
 /// clock as each window closes.
-fn read_clock(stderr: std::fs::File, published: Arc<Mutex<Option<f64>>>) {
+fn read_clock(stderr: std::fs::File, published: Arc<Mutex<Option<f64>>>, last_words: Arc<Mutex<VecDeque<String>>>) {
     let mut estimator = Estimator::default();
     for line in BufReader::new(stderr).split(b'\n') {
         let Ok(line) = line else { break };
-        if let Some(pts) = capture_pts(&line)
-            && let Some(zero) = estimator.observe(clock::now(), pts)
-        {
-            *published.lock().unwrap_or_else(|e| e.into_inner()) = Some(zero);
+        if let Some(pts) = capture_pts(&line) {
+            if let Some(zero) = estimator.observe(clock::now(), pts) {
+                *published.lock().unwrap_or_else(|e| e.into_inner()) = Some(zero);
+            }
+            continue;
         }
+        let text = String::from_utf8_lossy(&line).trim().to_string();
+        // -debug_ts prints every packet with an arrow; progress lines start with frame=.
+        if text.is_empty() || text.contains(" -> ") || text.contains(" <- ") || text.starts_with("frame=") {
+            continue;
+        }
+        let mut words = last_words.lock().unwrap_or_else(|e| e.into_inner());
+        if words.len() == LAST_WORDS {
+            words.pop_front();
+        }
+        words.push_back(text);
     }
 }
