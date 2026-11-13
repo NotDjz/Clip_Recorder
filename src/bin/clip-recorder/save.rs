@@ -230,6 +230,8 @@ impl Job {
     }
 }
 
+/// Local time on purpose: the clip name is what the user reads in Explorer, like ShadowPlay's.
+/// What is stored for the app (the log) is UTC.
 fn local_stamp() -> String {
     use windows_sys::Win32::System::SystemInformation::GetLocalTime;
     let mut t = unsafe { std::mem::zeroed() };

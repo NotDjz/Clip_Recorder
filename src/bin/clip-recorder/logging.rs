@@ -3,17 +3,13 @@
 
 use clip_recorder::{log, paths};
 use std::sync::Mutex;
-use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn log(msg: &str) {
-    let mut t = unsafe { std::mem::zeroed() };
-    unsafe { GetLocalTime(&mut t) };
-    let line = format!(
-        "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}] {msg}",
-        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
-    );
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let line = format!("[{}] {msg}", log::rfc3339(ms));
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = paths::log_file();
     if let Some(dir) = path.parent() {
