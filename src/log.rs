@@ -46,9 +46,39 @@ pub fn rfc3339(unix_ms: u64) -> String {
     )
 }
 
+/// What a panic leaves in the log: the windowed app has no console, so without this a panic
+/// (in any thread: UI, audio callback, hotkey, save worker) vanished without a trace.
+pub fn panic_report(thread: &str, message: &str, location: &str, backtrace: &str) -> String {
+    let mut report = format!("PANIC in thread '{thread}' at {location}: {message}");
+    let backtrace = backtrace.trim();
+    if !backtrace.is_empty() {
+        report.push('\n');
+        report.push_str(backtrace);
+    }
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panic_report_names_the_thread_the_place_and_the_cause() {
+        let report = panic_report(
+            "save",
+            "index out of bounds",
+            "src/bin/clip-recorder/save.rs:42:9",
+            "  0: frame\n",
+        );
+        assert_eq!(
+            report,
+            "PANIC in thread 'save' at src/bin/clip-recorder/save.rs:42:9: index out of bounds\n0: frame"
+        );
+        assert_eq!(
+            panic_report("main", "boom", "a.rs:1:1", " \n"),
+            "PANIC in thread 'main' at a.rs:1:1: boom"
+        );
+    }
 
     #[test]
     fn timestamps_are_utc_rfc3339() {
