@@ -7,7 +7,7 @@
 use crate::logging::log;
 use clip_recorder::clock;
 use clip_recorder::heal::{Decision, Retry};
-use clip_recorder::render::{Chunk, render_window};
+use clip_recorder::render::{self, Chunk, render_window};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use std::collections::VecDeque;
@@ -17,8 +17,6 @@ use std::sync::{Arc, Mutex};
 
 /// History kept per side, whatever the clip length (the longest buffer option).
 pub const KEEP_SECONDS: u32 = 120;
-/// The Python app stored loopback names with this suffix; config files may still carry it.
-const LEGACY_LOOPBACK_SUFFIX: &str = " [Loopback]";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Kind {
@@ -57,7 +55,7 @@ impl Side {
     fn new(kind: Kind, configured: &str) -> Side {
         Side {
             kind,
-            configured: configured.trim_end_matches(LEGACY_LOOPBACK_SUFFIX).to_owned(),
+            configured: clip_recorder::settings::configured_device(configured).to_owned(),
             device: None,
             name: String::new(),
             rate: 48000,
@@ -156,12 +154,7 @@ impl Side {
                 let samples: Vec<i16> = data.iter().map(|&s| i16::from_sample_(s)).collect();
                 frames.fetch_add((samples.len() / channels) as u64, Ordering::Relaxed);
                 let mut history = history.lock().unwrap_or_else(|e| e.into_inner());
-                history.push_back((arrival, samples));
-                // By age, not by size: summing ~12,000 chunks per callback under the lock was
-                // the expensive way to say the same thing.
-                while history.front().is_some_and(|(t, _)| *t < arrival - KEEP_SECONDS as f64) {
-                    history.pop_front();
-                }
+                render::push_chunk(&mut history, arrival, samples, KEEP_SECONDS as f64);
             },
             // Only a lost stream counts: cpal also reports Xruns, refused real-time priority and
             // reroutes here, and the stream carries on through those.
@@ -186,15 +179,11 @@ impl Side {
             Decision::Keep => {}
             Decision::Reopen => {
                 log(&format!("{} stream not alive (frames={frames}), reopening", self.kind.label()));
-                let (format, previous) = ((self.rate, self.channels), self.device.clone());
+                let (format, previous) = ((self.rate, self.channels), self.device.take());
                 self.detect(); // found afresh: cpal re-enumerates
-                if self.device.is_none() {
-                    // Missing for now (unplugged): keep retrying it. Without a device the
-                    // backoff would stop here for good, and a re-plugged headset stay silent.
-                    self.device = previous;
-                }
-                if (self.rate, self.channels) != format {
-                    self.clear(); // render_window cannot mix two formats
+                self.device = render::device_after_reopen(previous, self.device.take());
+                if !render::keeps_history(format, (self.rate, self.channels)) {
+                    self.clear();
                 }
                 self.open();
             }
@@ -286,7 +275,7 @@ impl Audio {
             let before = (side.rate, side.channels);
             *side = Side { history: Arc::clone(&side.history), ..Side::new(side.kind, wanted) };
             side.detect();
-            if (side.rate, side.channels) != before {
+            if !render::keeps_history(before, (side.rate, side.channels)) {
                 side.clear();
             }
         }

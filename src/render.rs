@@ -59,9 +59,57 @@ pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, durat
     wrote.then_some(out)
 }
 
+/// Adds a chunk to a side's history and drops what is older than `keep_seconds`. By age, not by
+/// size: summing ~12,000 chunk lengths per callback under the lock was the expensive way to say
+/// the same thing. Runs in the real-time callback: no I/O, no allocation beyond the deque.
+pub fn push_chunk<T>(history: &mut std::collections::VecDeque<(f64, T)>, arrival: f64, chunk: T, keep_seconds: f64) {
+    history.push_back((arrival, chunk));
+    while history.front().is_some_and(|(t, _)| *t < arrival - keep_seconds) {
+        history.pop_front();
+    }
+}
+
+/// After a dead stream is detected again: the device found now, else the one it had. One
+/// missing for a moment (unplugged) must stay the one retried, or a re-plugged headset never
+/// comes back.
+pub fn device_after_reopen<D>(previous: Option<D>, found: Option<D>) -> Option<D> {
+    found.or(previous)
+}
+
+/// Whether a side keeps its history across a reopen or a device change: only in the same
+/// format, since render_window cannot mix two.
+pub fn keeps_history(before: (u32, u16), after: (u32, u16)) -> bool {
+    before == after
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_history_keeps_its_last_seconds_by_age() {
+        let mut h = std::collections::VecDeque::new();
+        for t in 0..10 {
+            push_chunk(&mut h, t as f64, t, 3.0);
+        }
+        assert_eq!(h.iter().map(|(_, c)| *c).collect::<Vec<_>>(), [6, 7, 8, 9]);
+        push_chunk(&mut h, 100.0, 100, 3.0);
+        assert_eq!(h.len(), 1, "the newest chunk always stays");
+    }
+
+    #[test]
+    fn a_device_missing_at_a_reopen_stays_the_one_retried() {
+        assert_eq!(device_after_reopen(Some("headset"), None), Some("headset"));
+        assert_eq!(device_after_reopen(Some("headset"), Some("speakers")), Some("speakers"));
+        assert_eq!(device_after_reopen::<&str>(None, None), None);
+    }
+
+    #[test]
+    fn history_survives_only_an_unchanged_format() {
+        assert!(keeps_history((48000, 2), (48000, 2)));
+        assert!(!keeps_history((48000, 2), (44100, 2)));
+        assert!(!keeps_history((48000, 2), (48000, 6)));
+    }
 
     const RATE: u32 = 48000;
 

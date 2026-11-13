@@ -39,6 +39,11 @@ pub fn device_at(choices: &[String], index: usize) -> String {
     if index == 0 { String::new() } else { choices.get(index).cloned().unwrap_or_default() }
 }
 
+/// The Python app stored loopback names with " [Loopback]"; config files may still carry it.
+pub fn configured_device(name: &str) -> &str {
+    name.trim_end_matches(" [Loopback]")
+}
+
 /// Which listed device a configured name means: the exact name first, then one that contains
 /// it. Substring first picked "USB Headphones" for "Headphones" (fixed once in Python already).
 pub fn pick_device(names: &[String], configured: &str) -> Option<usize> {
@@ -101,6 +106,12 @@ mod tests {
     fn an_unplugged_pinned_device_stays_pinned() {
         let (choices, index) = device_choices(live(), "Bluetooth (Off)");
         assert_eq!(device_at(&choices, index), "Bluetooth (Off)");
+    }
+
+    #[test]
+    fn a_python_era_loopback_name_still_finds_its_device() {
+        assert_eq!(configured_device("Haut-parleurs (Realtek(R) Audio) [Loopback]"), "Haut-parleurs (Realtek(R) Audio)");
+        assert_eq!(configured_device("Microphone (USB)"), "Microphone (USB)");
     }
 
     #[test]
