@@ -27,6 +27,8 @@ pub fn changes(old: &Config, new: &Config) -> Changes {
 /// the device Auto detected (a Save would pin it). A configured device that is unplugged stays
 /// listed, so a Save made for something else does not quietly switch it to Auto.
 pub fn device_choices(mut live: Vec<String>, configured: &str) -> (Vec<String>, usize) {
+    // The name the capture uses, so a Python-era " [Loopback]" name is not a phantom device.
+    let configured = configured_device(configured);
     if !configured.is_empty() && !live.iter().any(|d| d == configured) {
         live.push(configured.into());
     }
@@ -270,6 +272,17 @@ mod tests {
         let off = approved_entry(false, 0x0102_0304_0506_0708);
         assert!(!startup_approved(Some(&off)));
         assert_eq!(off[4..], 0x0102_0304_0506_0708u64.to_le_bytes());
+    }
+
+    #[test]
+    fn a_python_era_loopback_name_is_not_listed_twice() {
+        let (choices, index) = device_choices(live(), "Speakers (Realtek) [Loopback]");
+        assert_eq!(choices.len(), 3, "{choices:?}");
+        assert_eq!(
+            device_at(&choices, index),
+            "Speakers (Realtek)",
+            "saved back without the suffix"
+        );
     }
 
     #[test]

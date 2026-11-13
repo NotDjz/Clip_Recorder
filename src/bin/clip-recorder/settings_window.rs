@@ -45,6 +45,9 @@ slint::slint! {
             }
         }
         focus := FocusScope {
+            // Without this the scope takes the first press to focus itself, and Save needed
+            // two clicks: the TouchArea below focuses it instead.
+            focus-on-click: false;
             key-pressed(event) => {
                 if event.text == Key.Return || event.text == " " {
                     root.clicked();
@@ -572,6 +575,22 @@ mod tests {
                 .next()
                 .is_some()
         );
+    }
+
+    /// One mouse click saves: the button's focus scope once swallowed the first click.
+    #[test]
+    fn one_click_on_save_saves() {
+        i_slint_backend_testing::init_no_event_loop();
+        let w = window(&Config::default());
+        w.show().unwrap();
+        let saved = std::rc::Rc::new(std::cell::Cell::new(0));
+        let s = saved.clone();
+        w.on_save(move || s.set(s.get() + 1));
+        let save = ElementHandle::find_by_accessible_label(&w, "Save changes")
+            .next()
+            .unwrap();
+        save.mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(saved.get(), 1, "the first click did not save");
     }
 
     #[test]
