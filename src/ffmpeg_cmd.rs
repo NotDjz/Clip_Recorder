@@ -189,7 +189,7 @@ fn path(p: &Path) -> String {
 /// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
 pub fn concat_args(list: &Path, duration: f64, out: &Path) -> Vec<String> {
     let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
-    a.extend([path(list), "-t".into(), duration.to_string()]);
+    a.extend([path(list), "-ss".into(), "0".into(), "-t".into(), duration.to_string()]);
     a.extend(["-c", "copy", "-movflags", "+faststart"].map(String::from));
     a.push(path(out));
     a
