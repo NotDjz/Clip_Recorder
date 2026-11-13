@@ -136,10 +136,12 @@ fn main() {
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
-    with_app(|app| {
+    // Torn down here, in order, rather than by thread-local destructors at process exit.
+    if let Some(mut app) = APP.with(|app| app.borrow_mut().take()) {
         app.audio.stop();
         app.capture.cleanup();
-    });
+        drop(app);
+    }
     log("Clip Recorder exiting");
 }
 

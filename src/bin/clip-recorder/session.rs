@@ -23,8 +23,10 @@ static ON_OPEN: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 unsafe extern "system" fn on_message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_ENDSESSION && wparam != 0 {
         log("Windows is ending the session (upgrade, uninstall or logoff): exiting");
-        // The kill-on-close job takes the capture ffmpeg with us.
-        std::process::exit(0);
+        // Leave through main(), which tears down in order. process::exit here, inside a message
+        // being dispatched, ran the UI's destructors mid-dispatch and crashed (0xC0000409).
+        let _ = slint::quit_event_loop();
+        return 0;
     }
     if msg == WM_OPEN_SETTINGS {
         if let Some(&open) = ON_OPEN.get() {
