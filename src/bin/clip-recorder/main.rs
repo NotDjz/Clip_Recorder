@@ -105,6 +105,14 @@ fn main() {
     let mut audio = audio::Audio::new(&config.loopback_device, &config.mic_device);
     audio.start();
     let hotkey = register_hotkey(&config.hotkey, &tray);
+    // At sign-in the GPU driver or DXGI may not be ready for the launch probe.
+    slint::Timer::single_shot(Duration::from_secs(30), || {
+        with_app(|app| {
+            if app.capture.reprobe() {
+                app.capture.restart_video(&app.config, &app.screens);
+            }
+        });
+    });
     let health = slint::Timer::default();
     health.start(slint::TimerMode::Repeated, HEALTH_TICK, check_health);
     let banner = Banner::new();

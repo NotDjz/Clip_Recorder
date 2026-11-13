@@ -40,7 +40,9 @@ pub fn register(hotkey: Hotkey, on_press: fn()) -> Result<HotkeyThread, u32> {
         }
         UnregisterHotKey(std::ptr::null_mut(), ID);
     });
-    match rx.recv_timeout(Duration::from_secs(2)) {
+    // The thread answers before anything else: a timeout here once left a detached thread
+    // holding a hotkey nobody could unregister.
+    match rx.recv() {
         Ok(Ok(thread_id)) => Ok(HotkeyThread { thread_id, handle: Some(handle) }),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(0),

@@ -149,7 +149,6 @@ impl Side {
         let frames = Arc::clone(&self.frames);
         let dead = Arc::clone(&self.dead);
         let channels = config.channels.max(1) as usize;
-        let keep = KEEP_SECONDS as usize * config.sample_rate as usize * channels;
         device.build_input_stream(
             config,
             move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -158,9 +157,10 @@ impl Side {
                 frames.fetch_add((samples.len() / channels) as u64, Ordering::Relaxed);
                 let mut history = history.lock().unwrap_or_else(|e| e.into_inner());
                 history.push_back((arrival, samples));
-                let mut total: usize = history.iter().map(|(_, s)| s.len()).sum();
-                while total > keep && history.len() > 1 {
-                    total -= history.pop_front().map_or(0, |(_, s)| s.len());
+                // By age, not by size: summing ~12,000 chunks per callback under the lock was
+                // the expensive way to say the same thing.
+                while history.front().is_some_and(|(t, _)| *t < arrival - KEEP_SECONDS as f64) {
+                    history.pop_front();
                 }
             },
             // Only a lost stream counts: cpal also reports Xruns, refused real-time priority and
@@ -186,7 +186,16 @@ impl Side {
             Decision::Keep => {}
             Decision::Reopen => {
                 log(&format!("{} stream not alive (frames={frames}), reopening", self.kind.label()));
-                self.detect(); // the same device, found afresh (cpal re-enumerates)
+                let (format, previous) = ((self.rate, self.channels), self.device.clone());
+                self.detect(); // found afresh: cpal re-enumerates
+                if self.device.is_none() {
+                    // Missing for now (unplugged): keep retrying it. Without a device the
+                    // backoff would stop here for good, and a re-plugged headset stay silent.
+                    self.device = previous;
+                }
+                if (self.rate, self.channels) != format {
+                    self.clear(); // render_window cannot mix two formats
+                }
                 self.open();
             }
             Decision::GiveUp => log(&format!(
@@ -199,7 +208,12 @@ impl Side {
 
     /// Writes this side's window as a WAV. False when nothing overlaps it (a dead stream).
     fn save_wav(&self, path: &Path, end: f64, duration: f64) -> bool {
-        let history = self.history.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // Only the chunks that can reach the window (a chunk ends at its arrival), so the
+        // callbacks wait on a short copy, not on 120 s of audio.
+        let history: Vec<(f64, Vec<i16>)> = {
+            let all = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            all.iter().filter(|(t, _)| *t > end - duration - 1.0).cloned().collect()
+        };
         let chunks: Vec<Chunk> = history.iter().map(|(t, s)| Chunk { arrival: *t, samples: s }).collect();
         let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else { return false };
         let spec = hound::WavSpec { channels: self.channels, sample_rate: self.rate, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };

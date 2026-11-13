@@ -84,6 +84,8 @@ pub struct Capture {
     encoder: Encoder,
     grabber: Grabber,
     running: Option<Running>,
+    /// Started and not stopped: a capture that failed to spawn still counts as one to restart.
+    wanted: bool,
     started_at: f64,
 }
 
@@ -95,7 +97,28 @@ impl Capture {
         std::fs::create_dir_all(&segment_dir)?;
         let (encoder, grabber) = pipeline(&ffmpeg);
         log(&format!("capture: encoder={encoder:?} grabber={grabber:?} dir={}", segment_dir.display()));
-        Ok(Capture { ffmpeg, segment_dir, encoder, grabber, running: None, started_at: 0.0 })
+        Ok(Capture { ffmpeg, segment_dir, encoder, grabber, running: None, wanted: false, started_at: 0.0 })
+    }
+
+    /// GDI cannot keep up above 60 fps: a 120/240 saved while DXGI worked is capped.
+    fn fps(&self, config: &Config) -> u32 {
+        if self.grabber == Grabber::Gdigrab { config.fps.min(60) } else { config.fps }
+    }
+
+    /// Probes again when launch settled for less than DXGI + NVENC: at sign-in the driver or
+    /// DXGI may not be ready yet, and one failed probe must not leave the whole session on GDI.
+    /// True when the pipeline improved (the caller restarts the video).
+    pub fn reprobe(&mut self) -> bool {
+        if (self.encoder, self.grabber) == (Encoder::Nvenc, Grabber::Ddagrab) {
+            return false;
+        }
+        let (encoder, grabber) = pipeline(&self.ffmpeg);
+        let better = (encoder, grabber) != (self.encoder, self.grabber) && (encoder == Encoder::Nvenc || grabber == Grabber::Ddagrab);
+        if better {
+            log(&format!("capture: pipeline now encoder={encoder:?} grabber={grabber:?}"));
+            (self.encoder, self.grabber) = (encoder, grabber);
+        }
+        better
     }
 
     pub fn segment_dir(&self) -> &Path {
@@ -126,7 +149,7 @@ impl Capture {
 
     /// True if ffmpeg had been started and has since died (the health check restarts it).
     pub fn has_died(&mut self) -> bool {
-        let died = self.running.is_some() && !self.is_running();
+        let died = self.wanted && !self.is_running();
         if died && let Some(r) = &self.running {
             let words = r.last_words.lock().unwrap_or_else(|e| e.into_inner());
             log(&format!("capture ffmpeg exited ({:?}): {}", r.child.id(), words.iter().cloned().collect::<Vec<_>>().join(" | ")));
@@ -138,6 +161,7 @@ impl Capture {
         if self.is_running() {
             return;
         }
+        self.wanted = true;
         self.started_at = clock::now();
         let _ = std::fs::create_dir_all(&self.segment_dir);
         // A restart starts from an empty set: mixing a dead capture's segments (its last one
@@ -145,7 +169,7 @@ impl Capture {
         self.wipe_segments();
         let index = config.monitor.min(screens.len().saturating_sub(1));
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
-            fps: config.fps,
+            fps: self.fps(config),
             buffer_seconds: config.buffer_seconds,
             monitor_index: index,
             monitor: screens[index].rect,
@@ -158,7 +182,7 @@ impl Capture {
                 let pid = running.child.id();
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
-                log(&format!("capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}", crate::job::contains(&running.child), config.fps, config.buffer_seconds));
+                log(&format!("capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}", crate::job::contains(&running.child), self.fps(config), config.buffer_seconds));
                 self.running = Some(running);
             }
             Err(e) => {
@@ -188,6 +212,7 @@ impl Capture {
 
     /// Stops ffmpeg cleanly ("q" lets it close the segment), then harder.
     pub fn stop(&mut self) {
+        self.wanted = false;
         let Some(mut running) = self.running.take() else { return };
         if let Some(stdin) = running.child.stdin.as_mut() {
             let _ = stdin.write_all(b"q");
