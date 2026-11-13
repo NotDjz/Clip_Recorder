@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod audio;
 mod capture;
 mod folders;
 mod job;
@@ -33,6 +34,7 @@ struct App {
     config: Config,
     screens: Vec<Screen>,
     capture: Capture,
+    audio: audio::Audio,
     _tray: Tray,
     _health: slint::Timer,
 }
@@ -75,17 +77,22 @@ fn main() {
         }
     };
     capture.start(&config, &screens);
+    let mut audio = audio::Audio::new(&config.loopback_device, &config.mic_device);
+    audio.start();
     let health = slint::Timer::default();
     health.start(slint::TimerMode::Repeated, HEALTH_TICK, check_health);
-    APP.with(|app| *app.borrow_mut() = Some(App { config, screens, capture, _tray: tray, _health: health }));
+    APP.with(|app| *app.borrow_mut() = Some(App { config, screens, capture, audio, _tray: tray, _health: health }));
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
-    with_app(|app| app.capture.cleanup());
+    with_app(|app| {
+        app.audio.stop();
+        app.capture.cleanup();
+    });
     log("Clip Recorder exiting");
 }
 
-/// A dead ffmpeg is started again a second later.
+/// A dead ffmpeg is started again a second later; a dead audio stream is reopened.
 fn check_health() {
     let died = with_app(|app| app.capture.has_died()).unwrap_or(false);
     if died {
@@ -93,7 +100,9 @@ fn check_health() {
         slint::Timer::single_shot(Duration::from_secs(1), || {
             with_app(|app| app.capture.start(&app.config, &app.screens));
         });
+        return;
     }
+    with_app(|app| app.audio.heal());
 }
 
 fn on_action(action: Action) {

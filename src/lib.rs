@@ -4,5 +4,7 @@
 pub mod clock;
 pub mod config;
 pub mod ffmpeg_cmd;
+pub mod heal;
 pub mod log;
 pub mod paths;
+pub mod render;
