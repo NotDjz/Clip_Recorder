@@ -39,6 +39,15 @@ pub fn device_at(choices: &[String], index: usize) -> String {
     if index == 0 { String::new() } else { choices.get(index).cloned().unwrap_or_default() }
 }
 
+/// Which listed device a configured name means: the exact name first, then one that contains
+/// it. Substring first picked "USB Headphones" for "Headphones" (fixed once in Python already).
+pub fn pick_device(names: &[String], configured: &str) -> Option<usize> {
+    if configured.is_empty() {
+        return None;
+    }
+    names.iter().position(|n| n == configured).or_else(|| names.iter().position(|n| n.contains(configured)))
+}
+
 /// Above 60 fps only DXGI capture keeps up.
 pub fn fps_choices(ddagrab: bool) -> Vec<u32> {
     FPS_OPTIONS.into_iter().filter(|&f| ddagrab || f <= 60).collect()
@@ -92,6 +101,15 @@ mod tests {
     fn an_unplugged_pinned_device_stays_pinned() {
         let (choices, index) = device_choices(live(), "Bluetooth (Off)");
         assert_eq!(device_at(&choices, index), "Bluetooth (Off)");
+    }
+
+    #[test]
+    fn the_exact_device_name_wins_over_a_longer_one_listed_first() {
+        let names: Vec<String> = vec!["USB Headphones (Realtek)".into(), "Headphones (Realtek)".into()];
+        assert_eq!(pick_device(&names, "Headphones (Realtek)"), Some(1));
+        assert_eq!(pick_device(&names, "USB Headphones"), Some(0), "a partial name still finds its device");
+        assert_eq!(pick_device(&names, "Speakers"), None);
+        assert_eq!(pick_device(&names, ""), None, "empty is Auto");
     }
 
     #[test]

@@ -77,9 +77,9 @@ impl Side {
             Kind::Loopback => host.output_devices(),
             Kind::Mic => host.input_devices(),
         };
-        let wanted = (!self.configured.is_empty())
-            .then(|| devices.ok()?.find(|d| device_name(d).contains(&self.configured)))
-            .flatten();
+        let mut listed: Vec<cpal::Device> = devices.map(|ds| ds.collect()).unwrap_or_default();
+        let names: Vec<String> = listed.iter().map(device_name).collect();
+        let wanted = clip_recorder::settings::pick_device(&names, &self.configured).map(|i| listed.swap_remove(i));
         let device = wanted.or_else(|| match self.kind {
             Kind::Loopback => host.default_output_device(),
             Kind::Mic => host.default_input_device(),
