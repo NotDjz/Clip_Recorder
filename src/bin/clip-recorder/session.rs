@@ -26,6 +26,17 @@ unsafe extern "system" fn on_message(hwnd: HWND, msg: u32, wparam: WPARAM, lpara
         // Leave through main(), which tears down in order. process::exit here, inside a message
         // being dispatched, ran the UI's destructors mid-dispatch and crashed (0xC0000409).
         let _ = slint::quit_event_loop();
+        // main() cannot resume while a modal loop (the folder picker, a message box) runs, nor
+        // if the quit request failed: then end within 5 s without unwinding the UI, the job
+        // taking ffmpeg along, so an upgrade never waits on us and asks for a reboot.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            log("still running 5 s after the end of the session: terminating");
+            unsafe {
+                use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+                TerminateProcess(GetCurrentProcess(), 0);
+            }
+        });
         return 0;
     }
     if msg == WM_OPEN_SETTINGS {
