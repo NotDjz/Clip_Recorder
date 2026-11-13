@@ -4,7 +4,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    ENDSESSION_CLOSEAPP, EnumWindows, GetClassNameW, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
+    ENDSESSION_CLOSEAPP, EnumWindows, GetClassNameW, GetWindowTextW, IsWindowVisible, GetWindowThreadProcessId, SMTO_ABORTIFHUNG, SendMessageTimeoutW,
     WM_ENDSESSION, WM_QUERYENDSESSION,
 };
 
@@ -13,6 +13,8 @@ const SESSION_CLASS: &str = "ClipRecorderSession";
 
 struct Search {
     pid: u32,
+    class: Option<&'static str>,
+    title: Option<&'static str>,
     found: HWND,
 }
 
@@ -22,17 +24,25 @@ unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> i32 {
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     let mut class = [0u16; 64];
     let n = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) } as usize;
-    if pid == search.pid && String::from_utf16_lossy(&class[..n]) == SESSION_CLASS {
+    let mut title = [0u16; 128];
+    let t = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) } as usize;
+    let matches = |want: Option<&str>, got: &[u16]| want.is_none_or(|w| String::from_utf16_lossy(got) == w);
+    let visible = search.title.is_none() || unsafe { IsWindowVisible(hwnd) } != 0;
+    if pid == search.pid && matches(search.class, &class[..n]) && matches(search.title, &title[..t]) && visible {
         search.found = hwnd;
         return 0;
     }
     1
 }
 
-fn session_window(pid: u32) -> Option<HWND> {
-    let mut search = Search { pid, found: std::ptr::null_mut() };
+fn find_window(pid: u32, class: Option<&'static str>, title: Option<&'static str>) -> Option<HWND> {
+    let mut search = Search { pid, class, title, found: std::ptr::null_mut() };
     unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
     (!search.found.is_null()).then_some(search.found)
+}
+
+fn session_window(pid: u32) -> Option<HWND> {
+    find_window(pid, Some(SESSION_CLASS), None)
 }
 
 fn send(hwnd: HWND, msg: u32, wparam: usize) {
@@ -170,6 +180,19 @@ fn a_second_launch_exits_and_the_first_keeps_running() {
     let first_alive = first.try_wait().unwrap().is_none();
     assert!(exit.is_some_and(|s| s.success()), "the second launch kept running");
     assert!(first_alive, "the first instance died");
+}
+
+/// A tray app shows nothing when its Start Menu shortcut is clicked again; Settings is the
+/// window there is, so a second launch opens it in the running instance.
+#[test]
+fn a_second_launch_opens_settings_in_the_first() {
+    let dir = data_dir("reopen");
+    let first = launch(&dir);
+    wait_until(Duration::from_secs(10), || session_window(first.id())).expect("first instance never started");
+    assert!(find_window(first.id(), None, Some("Clip Recorder Settings")).is_none());
+    let _second = launch(&dir);
+    let shown = wait_until(Duration::from_secs(10), || find_window(first.id(), None, Some("Clip Recorder Settings")));
+    assert!(shown.is_some(), "no Settings window");
 }
 
 fn press(keys: &[u16]) {

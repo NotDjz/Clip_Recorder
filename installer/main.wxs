@@ -25,12 +25,14 @@
       <File Source="$(var.FFmpeg)" Name="ffmpeg.exe" />
     </Component>
 
-    <!-- Start with Windows, for every user. Each user switches it off or on in Settings through
-         Explorer's StartupApproved key (what Task Manager's Startup tab uses), no admin needed,
-         and uninstalling removes this value so no dead entry stays behind. -->
+    <!-- Start with Windows, for the user who installs (on by default, as Setup did). HKCU, not
+         HKLM: Explorer keeps the on/off of an HKLM entry under HKLM, so switching it in Settings
+         would need admin. Settings switches it through HKCU's StartupApproved key (what Task
+         Manager uses), so an upgrade that rewrites this value never turns a user's "off" back
+         on. Other users switch it on in Settings. Uninstalling removes it. -->
     <Component Directory="INSTALLFOLDER">
-      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
-                     Name="Clip Recorder" Value="&quot;[#App]&quot;" Type="string" />
+      <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="Clip Recorder" Value="&quot;[#App]&quot;" Type="string" KeyPath="yes" />
     </Component>
 
     <Icon Id="ClipRecorder.ico" SourceFile="assets\clip-recorder.ico" />

@@ -33,6 +33,15 @@ pub fn parse(text: &str) -> Hotkey {
     }
 }
 
+/// The combination the Settings capture writes to config.json, or None when it would not
+/// register as typed (no modifier, or a key RegisterHotKey is not given).
+pub fn format(ctrl: bool, alt: bool, shift: bool, key: &str) -> Option<String> {
+    let key = key.to_ascii_uppercase();
+    key_code(&key)?;
+    let mods: Vec<&str> = [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift")].into_iter().filter(|m| m.0).map(|m| m.1).collect();
+    (!mods.is_empty()).then(|| format!("{}+{key}", mods.join("+")))
+}
+
 fn key_code(key: &str) -> Option<u32> {
     let bytes = key.as_bytes();
     match bytes {
@@ -59,6 +68,21 @@ mod tests {
         assert_eq!(parse("Ctrl+Shift+F9"), Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, vk: 0x78 });
         assert_eq!(parse(" alt + 5 "), Hotkey { modifiers: MOD_NOREPEAT | MOD_ALT, vk: 0x35 });
         assert_eq!(parse("Ctrl+F12").vk, 0x7B);
+    }
+
+    #[test]
+    fn a_captured_combination_parses_back_to_itself() {
+        let text = format(true, false, true, "f9").unwrap();
+        assert_eq!(text, "Ctrl+Shift+F9");
+        assert_eq!(parse(&text), Hotkey { modifiers: MOD_NOREPEAT | MOD_CONTROL | MOD_SHIFT, vk: 0x78 });
+        assert_eq!(format(true, true, false, "r").as_deref(), Some("Ctrl+Alt+R"));
+    }
+
+    #[test]
+    fn a_capture_without_a_modifier_or_with_an_odd_key_is_refused() {
+        assert_eq!(format(false, false, false, "R"), None);
+        assert_eq!(format(true, false, false, "Escape"), None);
+        assert_eq!(format(true, false, false, ""), None);
     }
 
     #[test]

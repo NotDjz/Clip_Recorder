@@ -12,7 +12,9 @@ mod monitors;
 mod orphans;
 mod save;
 mod session;
+mod settings_window;
 mod single_instance;
+mod startup;
 mod tray;
 mod winutil;
 
@@ -27,6 +29,7 @@ use logging::log;
 use monitors::Screen;
 use std::cell::RefCell;
 use std::path::PathBuf;
+use slint::ComponentHandle;
 use std::time::Duration;
 use tray::{Action, Tray};
 use winutil::wide;
@@ -47,7 +50,8 @@ struct App {
     ffmpeg: PathBuf,
     banner: Banner,
     tray: Tray,
-    _hotkey: Option<hotkey_thread::HotkeyThread>,
+    hotkey: Option<hotkey_thread::HotkeyThread>,
+    settings: Option<settings_window::SettingsWindow>,
     _health: slint::Timer,
 }
 
@@ -69,6 +73,7 @@ fn main() {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     if !single_instance::acquire() {
+        session::ask_running_instance_for_settings();
         return;
     }
     log(&format!("Clip Recorder {} starting", env!("CARGO_PKG_VERSION")));
@@ -81,7 +86,7 @@ fn main() {
     }
     let config = Config::load(&paths::config_file());
     let screens = monitors::list();
-    session::listen();
+    session::listen(open_settings);
     let mut capture = match Capture::new(ffmpeg.clone()) {
         Ok(capture) => capture,
         Err(e) => {
@@ -103,7 +108,7 @@ fn main() {
     let health = slint::Timer::default();
     health.start(slint::TimerMode::Repeated, HEALTH_TICK, check_health);
     let banner = Banner::new();
-    APP.with(|app| *app.borrow_mut() = Some(App { config, screens, capture, audio, ffmpeg, banner, tray, _hotkey: hotkey, _health: health }));
+    APP.with(|app| *app.borrow_mut() = Some(App { config, screens, capture, audio, ffmpeg, banner, tray, hotkey, settings: None, _health: health }));
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
@@ -124,7 +129,13 @@ fn check_health() {
         });
         return;
     }
-    with_app(|app| app.audio.heal());
+    with_app(|app| {
+        app.audio.heal();
+        let recording = app.capture.is_running();
+        if let Some(w) = &app.settings {
+            w.set_recording(recording);
+        }
+    });
 }
 
 fn on_action(action: Action) {
@@ -139,7 +150,7 @@ fn on_action(action: Action) {
             }
         }
         Action::Save => save_clip(),
-        Action::Settings => {}
+        Action::Settings => open_settings(),
     }
 }
 
@@ -164,6 +175,103 @@ fn register_hotkey(configured: &str, tray: &Tray) -> Option<hotkey_thread::Hotke
             None
         }
     }
+}
+
+/// Each open shows the config as it is now and the devices plugged in now.
+fn open_settings() {
+    let shown = with_app(|app| {
+        if app.settings.is_none() {
+            let w = match settings_window::SettingsWindow::new() {
+                Ok(w) => w,
+                Err(e) => {
+                    log(&format!("settings window failed: {e}"));
+                    return false;
+                }
+            };
+            w.on_save(apply_settings);
+            w.on_browse(browse_folder);
+            w.on_key_combination(|text, ctrl, alt, shift| {
+                hotkey::format(ctrl, alt, shift, &settings_window::key_name(&text)).unwrap_or_default().into()
+            });
+            app.settings = Some(w);
+        }
+        let w = app.settings.as_ref().expect("just made");
+        let hw = settings_window::Hardware { encoder: app.capture.encoder(), grabber: app.capture.grabber() };
+        // From a dev build the Run value would start target\debug: only the installed app offers it.
+        let startup = (!cfg!(debug_assertions)).then(startup::enabled);
+        settings_window::fill(w, &app.config, &app.screens, &hw, audio::list_devices(), startup);
+        w.set_recording(app.capture.is_running());
+        w.show().is_ok()
+    });
+    if shown == Some(true) {
+        adopt_settings_window(10);
+    }
+}
+
+/// winit makes the native window a moment after show(): retried until it exists.
+fn adopt_settings_window(tries: u32) {
+    let done = with_app(|app| app.settings.as_ref().and_then(settings_window::adopt)).flatten();
+    match done {
+        Some(hwnd) => unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+        },
+        None if tries > 0 => slint::Timer::single_shot(Duration::from_millis(50), move || adopt_settings_window(tries - 1)),
+        None => {}
+    }
+}
+
+fn browse_folder() {
+    let owner = with_app(|app| app.settings.as_ref().and_then(settings_window::adopt)).flatten();
+    if let Some(folder) = folders::pick(owner.unwrap_or(std::ptr::null_mut()), "Save clips to")
+        && let Some(Some(w)) = with_app(|app| app.settings.as_ref().map(|w| w.as_weak()))
+        && let Some(w) = w.upgrade()
+    {
+        w.set_folder(folder.into());
+    }
+}
+
+/// Save: apply what changed, then persist. Audio restarts only for a device, video only for
+/// monitor/fps/buffer, the hotkey only if it registers (else config.json keeps the old one).
+fn apply_settings() {
+    with_app(|app| {
+        let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else { return };
+        let mut new = settings_window::read(&w, &app.config);
+        let changes = clip_recorder::settings::changes(&app.config, &new);
+        let mut problems = Vec::new();
+        if changes.hotkey {
+            app.hotkey = None; // let go of the old one first
+            match hotkey_thread::register(hotkey::parse(&new.hotkey), save_clip) {
+                Ok(thread) => {
+                    app.hotkey = Some(thread);
+                    app.tray.set_hotkey(&new.hotkey);
+                }
+                Err(e) => {
+                    log(&format!("hotkey {} not registered (error {e})", new.hotkey));
+                    problems.push(format!("{} is taken by another app: the hotkey stays {}.", new.hotkey, app.config.hotkey));
+                    new.hotkey = app.config.hotkey.clone();
+                    w.set_hotkey(new.hotkey.as_str().into());
+                    app.hotkey = register_hotkey(&new.hotkey, &app.tray);
+                }
+            }
+        }
+        app.config = new;
+        if changes.audio {
+            app.audio.reload(&app.config.loopback_device, &app.config.mic_device);
+        }
+        if changes.video {
+            app.capture.restart_video(&app.config, &app.screens);
+        }
+        // Re-pointed whenever it is ticked: an older install's path would start nothing.
+        if w.get_startup_available() && (w.get_startup() || startup::enabled()) && !startup::set(w.get_startup()) {
+            problems.push("Start with Windows could not be changed.".into());
+        }
+        if let Err(e) = app.config.save(&paths::config_file()) {
+            log(&format!("config not saved: {e}"));
+            problems.push(format!("Settings not saved: {e}"));
+        }
+        log(&format!("settings saved: {changes:?}"));
+        w.set_problem(problems.join("\n").into());
+    });
 }
 
 fn save_clip() {

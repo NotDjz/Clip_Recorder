@@ -10,4 +10,5 @@ pub mod log;
 pub mod paths;
 pub mod render;
 pub mod selection;
+pub mod settings;
 pub mod tone;
