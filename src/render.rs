@@ -143,6 +143,37 @@ mod tests {
         }
     }
 
+    /// Just over the 30 ms tolerance is a real gap (loopback skipping silence): it stays silent
+    /// instead of being closed up by a contiguous run.
+    #[test]
+    fn a_gap_just_over_the_tolerance_stays_silent() {
+        // [0.5, 1.0] holds 100, then a 50 ms gap, [1.05, 1.55] holds 200.
+        let chunks = [(1.0, chunk(100, 24000)), (1.55, chunk(200, 24000))];
+        let out = render(&chunks, 2.0, 2.0).unwrap();
+        assert_eq!(at(&out, 1.025), 0, "the gap was closed up");
+        assert_eq!(at(&out, 1.3), 200);
+    }
+
+    /// A stereo chunk that starts before the window: its first frames are cut as whole frames.
+    #[test]
+    fn a_stereo_chunk_overlapping_the_start_is_cut_by_frames() {
+        // 0.5 s of stereo frames ending at 1.25: [0.75, 1.25], window [1.0, 2.0]. Left 1, right 2.
+        let samples: Vec<i16> = (0..2 * 24000).map(|i| if i % 2 == 0 { 1 } else { 2 }).collect();
+        let out = render_window(
+            &[Chunk {
+                arrival: 1.25,
+                samples: &samples,
+            }],
+            RATE,
+            2,
+            2.0,
+            1.0,
+        )
+        .unwrap();
+        assert_eq!((out[0], out[1]), (1, 2), "channels swapped by a cut inside a frame");
+        assert_eq!((out[2 * 11999], out[2 * 11999 + 1], out[2 * 12000]), (1, 2, 0));
+    }
+
     #[test]
     fn the_window_clips_what_is_outside_it() {
         let chunks = [(1.0, chunk(100, 24000)), (4.5, chunk(200, 24000))];

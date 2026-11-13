@@ -4,7 +4,7 @@
 # moved into tested pure functions, or an equivalent mutant (same behaviour by construction).
 
 # The suites CI runs on every change: unit, GUI, real-process, source-level and the registry.
-additional_cargo_test_args = ["--lib", "--bins", "--test", "source"]
+additional_cargo_test_args = ["--lib", "--bins", "--examples", "--test", "source"]
 
 exclude_globs = [
     # Startup wiring, menu, settings apply: e2e (tests/app.rs). Decisions: settings.rs, heal.rs,
@@ -37,6 +37,7 @@ exclude_re = [
     # Equivalent: | and ^ agree on flags with no bit in common.
     "src/bin/clip-recorder/orphans.rs:.*replace \\| with \\^ in kill_orphan",
     "src/hotkey.rs:.*replace \\| with \\^",
+    "src/bin/clip-recorder/banner.rs:.*replace \\| with \\^ in (colorref|breath|Banner::show)",
     # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.
     "src/ffmpeg_cmd.rs:.*replace \\* with / in capture_args",
 ]

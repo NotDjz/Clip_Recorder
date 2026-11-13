@@ -45,3 +45,8 @@ i-slint-backend-testing = "=1.18.1"
 [profile.release]
 strip = true
 lto = true
+
+# A stand-in for ffmpeg in the save tests: built by `cargo test --examples`, never shipped.
+[[example]]
+name = "fake_ffmpeg"
+harness = false

@@ -375,6 +375,7 @@ mod tests {
         let margin = MARGIN * unsafe { GetDpiForWindow(banner.hwnd) }.max(96) as i32 / 96;
         assert_eq!((r.right, r.top), (screen.x + screen.w - margin, screen.y + margin));
         assert!(r.right - r.left >= MIN_W && r.bottom - r.top >= MIN_H);
+        assert_ne!(unsafe { IsWindowVisible(banner.hwnd) }, 0, "placed but never shown");
         unsafe { ShowWindow(banner.hwnd, SW_HIDE) };
     }
 

@@ -30,8 +30,8 @@ machine, CI included.
 | R19 | Segments ordered by wrapped name instead of time | `segments_are_ordered_by_mtime_whatever_their_names` |
 | R20 | The live ffmpeg rewrote a segment while the concat read it (TOCTOU) | `the_concat_reads_only_snapshots_and_the_audio_window_is_the_videos`, `a_snapshot_that_fails_is_an_error_and_leaves_no_copy_behind` |
 | R21 | Every give-up path returned silently: a lost clip looked saved | `a_segment_folder_that_cannot_be_listed_is_an_error`, `a_snapshot_that_fails_is_an_error_and_leaves_no_copy_behind`, `a_failed_encode_reports_and_spares_another_saves_clip`, `every_end_of_a_save_is_heard_and_seen` |
-| R22 | A failing save deleted another save's clip from the same second | `a_failed_encode_reports_and_spares_another_saves_clip` |
-| R23 | A failed or timed-out mix lost the clip, or a partial mix was trusted | `a_failed_mix_keeps_the_game_sound_and_a_missing_mix_is_never_trusted` |
+| R22 | A failing save deleted another save's clip from the same second | `a_failed_encode_reports_and_spares_another_saves_clip`, `a_failed_or_empty_clip_is_reported_and_removed` |
+| R23 | A failed or timed-out mix lost the clip, or a partial mix was trusted | `a_failed_mix_keeps_the_game_sound_and_a_missing_mix_is_never_trusted`, `a_failed_mix_still_saves_the_clip_with_the_game_sound`, `a_save_muxes_the_right_audio_and_cleans_up_after_itself` |
 | R24 | Audio placed by byte count: loopback and mic on different timelines | `a_silence_gap_stays_silent_where_it_really_was`, `contiguous_chunks_land_in_their_slots`, `stereo_frames_are_placed_as_frames` |
 | R25 | Window clipping and dead streams in the audio reconstruction | `the_window_clips_what_is_outside_it`, `a_dead_stream_gives_nothing`, `audio_outside_the_window_gives_nothing` |
 | R26 | A hole at every chunk boundary: crackling (38 discontinuities) | `jittered_arrivals_stay_contiguous` |
@@ -52,7 +52,7 @@ machine, CI included.
 | R41 | An unregistered hotkey written to config.json: never retried | `a_hotkey_that_did_not_register_is_never_saved`, `a_taken_hotkey_is_refused_with_its_error_and_freed_on_drop` |
 | R42 | Hotkey parsing and capture | `the_default_parses_to_ctrl_alt_r`, `letters_digits_and_function_keys`, `a_key_without_a_modifier_or_garbage_falls_back_to_the_default`, `a_captured_combination_parses_back_to_itself`, `a_capture_without_a_modifier_or_with_an_odd_key_is_refused`, `the_hotkey_button_captures_a_combination`, `escape_cancels_a_capture` |
 | R43 | A hand-edited config.json stopped the app | `hand_edited_numbers_are_parsed_leniently`, `values_outside_the_options_fall_back_to_the_defaults`, `missing_keys_take_defaults_and_present_ones_are_kept`, `broken_or_missing_input_gives_the_defaults`, `a_saved_config_loads_back_identical` |
-| R44 | The log grew without bound | `the_log_is_capped_keeps_the_newest_lines_and_cuts_at_a_line` |
+| R44 | The log grew without bound | `the_log_is_capped_keeps_the_newest_lines_and_cuts_at_a_line`, `a_cut_keeps_the_newest_half`, `the_log_cap_is_two_mebibytes` |
 | R45 | Test runs swept the installed app's segment folders and killed its ffmpeg | `data_lives_in_appdata_unless_overridden`, `the_installed_app_shares_the_python_mutex_and_a_test_run_gets_its_own` |
 | R46 | A chime clicked, was cut mid-note, or played on the UI thread | `a_valid_wav_as_long_as_its_last_note`, `it_starts_silent_and_rises_instead_of_clicking`, `the_failure_is_the_press_played_backwards`, `chimes_never_play_on_the_calling_thread` |
 | R47 | The orphan sweep killed a stranger's reused pid, choked on a bad PID file, or raced the folder removal | `a_reused_pid_that_is_not_ffmpeg_is_never_killed`, `a_missing_or_garbage_pid_file_is_tolerated`, `an_orphan_ffmpeg_is_killed_and_waited_for`, `the_sweep_clears_every_capture_folder_and_nothing_else` |

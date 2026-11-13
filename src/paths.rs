@@ -49,10 +49,16 @@ mod tests {
             PathBuf::from(r"C:\somewhere\temp"),
             "a test run would sweep the real %TEMP%"
         );
+        assert_eq!(log_file(), PathBuf::from(r"C:\somewhere\clip_recorder.log"));
         unsafe { std::env::set_var("CLIPREC_DATA_DIR", "") };
         assert!(
             data_dir().ends_with("ClipRecorder"),
             "an empty override must fall back to %APPDATA%"
+        );
+        assert_eq!(
+            segments_root(),
+            std::env::temp_dir(),
+            "an empty override must sweep %TEMP%"
         );
         unsafe { std::env::remove_var("CLIPREC_DATA_DIR") };
     }

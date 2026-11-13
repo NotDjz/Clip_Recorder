@@ -50,7 +50,7 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       # Unit, GUI (Slint testing backend), real-process and source-level tests, and the registry
       # of fixed bugs (tests/regressions.md). No screen capture, no audio device needed.
-      - run: cargo test --locked --lib --bins --test source
+      - run: cargo test --locked --lib --bins --examples --test source
 
   e2e:
     name: e2e

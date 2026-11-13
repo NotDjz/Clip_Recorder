@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked --lib --bins --test source
+      - run: cargo test --locked --lib --bins --examples --test source
       # WiX 7 needs its Open Source Maintenance Fee EULA accepted once per machine.
       - run: |
           dotnet tool install --global wix --version 7.0.1

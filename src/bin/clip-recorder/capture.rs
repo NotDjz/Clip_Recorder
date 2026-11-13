@@ -446,14 +446,15 @@ mod tests {
                 writeln!(out, "[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:{i} pkt_pts_time:{} pkt_dts:{i}", i as f64 * 0.05).unwrap();
                 std::thread::sleep(Duration::from_millis(50));
             }
-            // -debug_ts traffic in both directions and the progress line are not last words.
+            for i in 0..8 {
+                writeln!(out, "Error {i}").unwrap();
+            }
+            // -debug_ts traffic in both directions, the progress line and blank lines come
+            // last: none of them may push a real message out of the last six.
             writeln!(out, "decoder -> ist_index:0:0 type:video frame_pts:1").unwrap();
             writeln!(out, "muxer <- type:video pkt_pts:1").unwrap();
             writeln!(out, "frame=   10 fps=0.0 q=20.0 size=N/A").unwrap();
             writeln!(out).unwrap();
-            for i in 0..8 {
-                writeln!(out, "Error {i}").unwrap();
-            }
         });
         let clock = Arc::new(Mutex::new(None));
         let words = Arc::new(Mutex::new(VecDeque::new()));

@@ -60,6 +60,41 @@ mod tests {
             "2100-02-28T23:59:59.999Z",
             "2100 is not a leap year"
         );
+        assert_eq!(rfc3339(4_107_542_400_000), "2100-03-01T00:00:00.000Z");
+        assert_eq!(rfc3339(7_258_118_400_000), "2200-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339(13_569_465_599_000), "2399-12-31T23:59:59.000Z");
+        assert_eq!(
+            rfc3339(13_574_606_400_000),
+            "2400-02-29T12:00:00.000Z",
+            "2400 is a leap year"
+        );
+    }
+
+    #[test]
+    fn the_log_cap_is_two_mebibytes() {
+        assert_eq!(LOG_MAX_BYTES, 2 << 20);
+    }
+
+    /// Right after a cut the file holds the newest half of the cap, from a whole line.
+    #[test]
+    fn a_cut_keeps_the_newest_half() {
+        let path = std::env::temp_dir().join(format!("crtest_logcut_{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cap = 4096;
+        let mut i = 0;
+        while !std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .starts_with("[log truncated]")
+        {
+            append_capped(&path, &format!("line {i:05} padding padding padding"), cap).unwrap();
+            i += 1;
+        }
+        let len = std::fs::metadata(&path).unwrap().len();
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            len > cap / 2 - 64 && len <= cap / 2 + 16,
+            "{len} bytes after a cut at {cap}"
+        );
     }
 
     #[test]

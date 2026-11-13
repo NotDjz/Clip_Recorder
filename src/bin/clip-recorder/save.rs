@@ -538,4 +538,104 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
+
+    /// examples/fake_ffmpeg.exe, copied into `dir` under `name` (its name picks its behaviour).
+    fn fake_ffmpeg(dir: &Path, name: &str) -> PathBuf {
+        // Built under target/<profile>/examples with a hash in its name.
+        let exe = std::env::current_exe().unwrap();
+        let examples = exe.parent().unwrap().parent().unwrap().join("examples");
+        let built = std::fs::read_dir(&examples)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                name.starts_with("fake_ffmpeg") && name.ends_with(".exe")
+            })
+            .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
+            .expect("run the tests with --examples: no fake_ffmpeg built");
+        let fake = dir.join(format!("{name}.exe"));
+        std::fs::copy(built, &fake).unwrap();
+        fake
+    }
+
+    /// A job over two segments' worth of work, with the sides asked for, run by a fake ffmpeg.
+    fn run_with(fake: &str, loopback: bool, mic: bool) -> (Outcome, PathBuf, PathBuf) {
+        let dir = temp(fake);
+        let wav = |side: &str| {
+            let path = dir.join(format!("{side}_t.wav"));
+            std::fs::write(&path, b"RIFF").unwrap();
+            path
+        };
+        let list = dir.join("concat_t.txt");
+        std::fs::write(&list, "file 'snap'").unwrap();
+        let snapshot = dir.join("snap_t_000.ts");
+        std::fs::write(&snapshot, "segment").unwrap();
+        let output = dir.join("Clip_t.mp4");
+        let job = Job {
+            id: "t".into(),
+            ffmpeg: fake_ffmpeg(&dir, fake),
+            duration: 3.4,
+            list,
+            snapshots: vec![snapshot],
+            loopback: loopback.then(|| wav("loopback")),
+            mic: mic.then(|| wav("mic")),
+            work: dir.clone(),
+            output: output.clone(),
+            started: Instant::now(),
+        };
+        (job.run(), output, dir)
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.ends_with(".exe") && n != "Clip_t.mp4")
+            .collect()
+    }
+
+    /// Without audio the concat writes the clip; with audio it is muxed with the mix of both
+    /// sides, or the one side there is. Every temporary file goes, the clip stays.
+    #[test]
+    fn a_save_muxes_the_right_audio_and_cleans_up_after_itself() {
+        for (loopback, mic, expected) in [
+            (false, false, "concat: "),
+            (true, true, "mixed_t.wav"),
+            (true, false, "loopback_t.wav"),
+            (false, true, "mic_t.wav"),
+        ] {
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, mic);
+            assert_eq!(outcome, Ok(3), "loopback={loopback} mic={mic}");
+            let clip = std::fs::read_to_string(&output).unwrap();
+            assert!(clip.contains(expected), "loopback={loopback} mic={mic}: {clip}");
+            assert_eq!(leftovers(&dir), Vec::<String>::new(), "temporary files left behind");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_failed_mix_still_saves_the_clip_with_the_game_sound() {
+        let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true);
+        assert_eq!(outcome, Ok(3));
+        let clip = std::fs::read_to_string(&output).unwrap();
+        assert!(
+            clip.contains("loopback_t.wav") && !clip.contains("mixed_t.wav"),
+            "{clip}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A clip this run wrote but that failed, or came out empty, is reported and removed.
+    #[test]
+    fn a_failed_or_empty_clip_is_reported_and_removed() {
+        for (fake, loopback) in [("ffmpeg-failmux", true), ("ffmpeg-empty", false)] {
+            let (outcome, output, dir) = run_with(fake, loopback, false);
+            assert_eq!(outcome, Err(GiveUp::Error), "{fake}");
+            assert!(!output.exists(), "{fake}: the broken clip was kept");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
