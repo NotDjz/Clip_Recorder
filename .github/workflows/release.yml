@@ -36,6 +36,11 @@ jobs:
       # WiX and its extensions, each checked against nuget.org's published SHA-512 before use.
       - run: ./scripts/install-wix.ps1
       - run: ./build-msi.ps1
+      # The MSI about to be published goes through its whole life on this disposable runner first.
+      - run: |
+          ./tests/msi/upgrade-pair.ps1 -Out $env:RUNNER_TEMP
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
       # The SBOM of the Windows build (FFmpeg, not a Cargo dependency, is named in the release notes).
       - run: |
           cargo install cargo-cyclonedx --version $env:CARGO_CYCLONEDX_VERSION --locked
