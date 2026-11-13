@@ -71,3 +71,4 @@ machine, CI included.
 | R60 | Predictable temporary names, or a temp file written through | `random_names_are_128_bits_of_hex_and_never_repeat`, `create_new_never_overwrites` |
 | R61 | Log in local time to the second | `timestamps_are_utc_rfc3339` |
 | R62 | The whole path: hotkey to a decodable MP4, anchored on the capture clock | `the_hotkey_saves_a_clip_that_decodes` (e2e) |
+| R63 | The app crashed (0xC0000409) while quitting on WM_ENDSESSION: process::exit inside a dispatched message | `quits_when_windows_ends_the_session` (e2e), `the_session_handler_leaves_through_main` |

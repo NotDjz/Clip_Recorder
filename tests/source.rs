@@ -195,3 +195,15 @@ fn workflows_pin_their_actions_and_start_read_only() {
         );
     }
 }
+
+/// The session window only asks the event loop to stop: process::exit inside a dispatched
+/// message ran the UI's destructors mid-dispatch and crashed on the way out (0xC0000409).
+#[test]
+fn the_session_handler_leaves_through_main() {
+    let session = code("src/bin/clip-recorder/session.rs", "//");
+    assert!(
+        !session.contains("process::exit"),
+        "exit through main(), not from the handler"
+    );
+    assert!(session.contains("slint::quit_event_loop()"));
+}
