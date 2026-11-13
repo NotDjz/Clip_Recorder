@@ -19,7 +19,29 @@ env:
   CARGO_CYCLONEDX_VERSION: "0.5.10"
 
 jobs:
+  # The A/V sync on real hardware, which CI cannot measure (no audio device on its runners): the tagged commit must
+  # carry the release/av-sync status that scripts/release-check.ps1 posts after measuring it at the computer.
+  av-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: read
+    steps:
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          state=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" --jq '[.[] | select(.context == "release/av-sync")][0].state')
+          if [ "$state" != "success" ]; then
+            echo "::error::$SHA has no passing release/av-sync status ($state): run scripts/release-check.ps1 at the computer, then tag again."
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" --jq '[.[] | select(.context == "release/av-sync")][0].description'
+
   build:
+    needs: av-sync
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
