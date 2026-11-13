@@ -32,3 +32,5 @@ Thumbs.db
 # Local working rules for Claude Code. Deliberately untracked: it was
 # public on GitHub. A fresh clone therefore has no project rules.
 CLAUDE.md
+target/
+*.msi
