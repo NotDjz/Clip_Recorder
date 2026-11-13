@@ -29,16 +29,16 @@ machine, CI included.
 | R18 | Audio window not the video's: overlap and echo | `enough_segments_to_cover_the_clip_length`, `the_concat_reads_only_snapshots_and_the_audio_window_is_the_videos` |
 | R19 | Segments ordered by wrapped name instead of time | `segments_are_ordered_by_mtime_whatever_their_names` |
 | R20 | The live ffmpeg rewrote a segment while the concat read it (TOCTOU) | `the_concat_reads_only_snapshots_and_the_audio_window_is_the_videos`, `a_snapshot_that_fails_is_an_error_and_leaves_no_copy_behind` |
-| R21 | Every give-up path returned silently: a lost clip looked saved | `a_segment_folder_that_cannot_be_listed_is_an_error`, `a_snapshot_that_fails_is_an_error_and_leaves_no_copy_behind`, `a_failed_encode_reports_and_spares_another_saves_clip`, `every_end_of_a_save_is_heard_and_seen` |
-| R22 | A failing save deleted another save's clip from the same second | `a_failed_encode_reports_and_spares_another_saves_clip`, `a_failed_or_empty_clip_is_reported_and_removed` |
+| R21 | Every give-up path returned silently: a lost clip looked saved | `a_segment_folder_that_cannot_be_listed_is_an_error`, `a_snapshot_that_fails_is_an_error_and_leaves_no_copy_behind`, `a_failed_encode_reports_and_leaves_no_empty_clip`, `every_end_of_a_save_is_heard_and_seen` |
+| R22 | Two saves in the same second shared a clip name: one overwrote or deleted the other's clip | `two_saves_in_the_same_second_get_their_own_clip`, `the_clip_is_judged_by_the_step_that_writes_it`, `a_failed_or_empty_clip_is_reported_and_removed` |
 | R23 | A failed or timed-out mix lost the clip, or a partial mix was trusted | `a_failed_mix_keeps_the_game_sound_and_a_missing_mix_is_never_trusted`, `a_failed_mix_still_saves_the_clip_with_the_game_sound`, `a_save_muxes_the_right_audio_and_cleans_up_after_itself` |
 | R24 | Audio placed by byte count: loopback and mic on different timelines | `a_silence_gap_stays_silent_where_it_really_was`, `contiguous_chunks_land_in_their_slots`, `stereo_frames_are_placed_as_frames` |
 | R25 | Window clipping and dead streams in the audio reconstruction | `the_window_clips_what_is_outside_it`, `a_dead_stream_gives_nothing`, `audio_outside_the_window_gives_nothing` |
 | R26 | A hole at every chunk boundary: crackling (38 discontinuities) | `jittered_arrivals_stay_contiguous` |
 | R27 | The audio heal gave up 9 s after start, or reopened every tick, or forever | `a_stream_that_dies_late_is_reopened_at_once`, `a_device_that_stays_gone_backs_off_then_is_left_alone`, `a_stream_that_delivers_resets_the_backoff`, `no_device_means_nothing_to_heal` |
 | R28 | A silent but open stream was reopened and came back dead | `an_open_stream_with_no_frame_yet_is_left_alone` |
-| R29 | A capture restart loop stopped the audio heal | `audio_heals_even_on_a_tick_that_restarts_the_capture`, `the_health_tick_never_returns_before_healing_the_audio` |
-| R30 | A device missing at a reopen stopped the heal for good | `a_device_missing_at_a_reopen_stays_the_one_retried` |
+| R29 | A capture restart loop stopped the audio heal | `the_health_tick_never_returns_before_healing_the_audio` |
+| R30 | A device missing at a reopen stopped the heal for good, or a pinned one was replaced by the default for good | `a_pinned_device_unplugged_is_waited_for_not_replaced`, `auto_follows_the_default_device` |
 | R31 | A format change mixed two formats in the history | `history_survives_only_an_unchanged_format` |
 | R32 | Summing the whole history in the audio callback, or I/O in it | `the_history_keeps_its_last_seconds_by_age`, `the_audio_callback_does_no_io` |
 | R33 | Audio restarted for monitor/fps/buffer changes: the round-6 desync | `only_a_device_change_restarts_the_audio` |
@@ -68,7 +68,11 @@ machine, CI included.
 | R57 | An upgrade with the app running asked for a reboot | `quits_when_windows_ends_the_session` (e2e), `the_msi_writes_the_run_value_in_hkcu_and_never_closes_the_app_itself` |
 | R58 | Two instances fought over the capture and the hotkey | `a_second_launch_exits_and_the_first_keeps_running` (e2e), `a_second_launch_opens_settings_in_the_first` (e2e) |
 | R59 | An unverified or stale ffmpeg, or a stale app exe, shipped | `the_build_ships_only_a_verified_ffmpeg_and_a_fresh_exe` |
-| R60 | Predictable temporary names, or a temp file written through | `random_names_are_128_bits_of_hex_and_never_repeat`, `create_new_never_overwrites` |
+| R60 | Predictable temporary names, or a temp file written through | `random_names_are_128_bits_of_hex_and_never_repeat`, `create_new_never_overwrites`, `copy_new_copies_and_never_overwrites`, `a_save_never_deletes_a_file_it_did_not_create` |
 | R61 | Log in local time to the second | `timestamps_are_utc_rfc3339` |
 | R62 | The whole path: hotkey to a decodable MP4, anchored on the capture clock | `the_hotkey_saves_a_clip_that_decodes` (e2e) |
 | R63 | The app crashed (0xC0000409) while quitting on WM_ENDSESSION: process::exit inside a dispatched message | `quits_when_windows_ends_the_session` (e2e), `the_session_handler_leaves_through_main` |
+| R64 | Save needed two clicks: its focus scope swallowed the first | `one_click_on_save_saves` |
+| R65 | A Python-era " [Loopback]" name showed as a second, phantom device in Settings | `a_python_era_loopback_name_is_not_listed_twice` |
+| R66 | Ending the session while a dialog was open kept the app alive until the dialog closed | `the_session_handler_leaves_through_main` |
+| R67 | Snapshots copied through an 8 KiB loop on the UI thread instead of the system copy | `copy_new_copies_and_never_overwrites` |

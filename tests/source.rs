@@ -206,4 +206,10 @@ fn the_session_handler_leaves_through_main() {
         "exit through main(), not from the handler"
     );
     assert!(session.contains("slint::quit_event_loop()"));
+    // A modal loop (folder picker, message box) keeps main() from resuming: a deadline ends it.
+    let handler = &session[session.find("WM_ENDSESSION").unwrap()..];
+    assert!(
+        handler.contains("TerminateProcess(GetCurrentProcess(), 0)"),
+        "no deadline after the quit request"
+    );
 }
