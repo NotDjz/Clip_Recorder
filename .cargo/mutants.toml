@@ -36,6 +36,7 @@ exclude_re = [
     "src/bin/clip-recorder/job.rs:.*in ensure_kill_on_close\\b",
     # Equivalent: | and ^ agree on flags with no bit in common.
     "src/bin/clip-recorder/orphans.rs:.*replace \\| with \\^ in kill_orphan",
+    "src/bin/clip-recorder/job.rs:.*replace \\| with \\^",
     "src/hotkey.rs:.*replace \\| with \\^",
     "src/bin/clip-recorder/banner.rs:.*replace \\| with \\^ in (colorref|breath|Banner::show)",
     # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.

@@ -52,11 +52,15 @@ pub fn ensure_kill_on_close() {
 
 static JOB: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
-/// Whether `child` really is in our job: logged for every capture ffmpeg, so a log shows it.
-pub fn contains(child: &std::process::Child) -> bool {
+/// This process's kill-on-close job; null when it could not be set up.
+pub fn handle() -> HANDLE {
+    JOB.load(std::sync::atomic::Ordering::Relaxed) as HANDLE
+}
+
+/// Whether `child` really is in `job`: logged for every capture ffmpeg, so a log shows it.
+pub fn contains(job: HANDLE, child: &std::process::Child) -> bool {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
-    let job = JOB.load(std::sync::atomic::Ordering::Relaxed) as HANDLE;
     let mut inside = 0;
     !job.is_null() && unsafe { IsProcessInJob(child.as_raw_handle() as HANDLE, job, &mut inside) } != 0 && inside != 0
 }
@@ -89,10 +93,27 @@ mod tests {
     fn children_are_in_the_job() {
         ensure_kill_on_close();
         let mut child = ping(30).spawn().unwrap();
-        let inside = contains(&child);
+        let inside = contains(handle(), &child);
         let _ = child.kill();
         let _ = child.wait();
         assert!(inside);
+    }
+
+    /// The check must be able to say no: a process outside a job, or no job at all.
+    #[test]
+    fn a_process_outside_a_job_is_not_counted_in_it() {
+        use std::os::windows::io::AsRawHandle;
+        let mut child = ping(30).spawn().unwrap();
+        let other = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        let before = contains(other, &child);
+        let null = contains(std::ptr::null_mut(), &child);
+        let assigned = unsafe { AssignProcessToJobObject(other, child.as_raw_handle() as HANDLE) } != 0;
+        let after = contains(other, &child);
+        let _ = child.kill();
+        let _ = child.wait();
+        unsafe { CloseHandle(other) };
+        assert!(!before && !null, "a process outside the job counted as inside");
+        assert!(assigned && after, "a process put in the job is not seen there");
     }
 
     /// Run by the next test in a process of its own: joins the job, starts a child, prints its
