@@ -319,7 +319,7 @@ def run_generate(args):
     clips = os.path.join(data, "clips")
     shutil.rmtree(data, ignore_errors=True)
     os.makedirs(clips)
-    with open(os.path.join(data, "config.json"), "w") as f:
+    with open(os.path.join(data, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"monitor": mon_idx, "fps": args.fps, "buffer_seconds": args.buffer,
                    "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12"}, f)
     env = dict(os.environ, CLIPREC_DATA_DIR=data, CLIPREC_FFMPEG=_ffmpeg_path())
