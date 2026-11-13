@@ -179,9 +179,11 @@ fn kill(pid: u32) {
 /// visible window, so without a reachable top-level window an upgrade asks for a reboot.
 #[test]
 fn quits_when_windows_ends_the_session() {
-    let mut app = launch(&data_dir("endsession"));
+    let dir = data_dir("endsession");
+    let mut app = launch(&dir);
     let pid = app.id();
     let hwnd = wait_until(Duration::from_secs(10), || session_window(pid)).expect("no session window");
+    let asked = Instant::now();
     let exit = wait_until(Duration::from_secs(5), || {
         send(hwnd, WM_QUERYENDSESSION, 0);
         send(hwnd, WM_ENDSESSION, 1);
@@ -189,7 +191,9 @@ fn quits_when_windows_ends_the_session() {
     });
     assert!(
         exit.is_some_and(|status| status.success()),
-        "clip-recorder ignored WM_ENDSESSION"
+        "clip-recorder ignored WM_ENDSESSION for {:?} ({exit:?}); its log:\n{}",
+        asked.elapsed(),
+        std::fs::read_to_string(dir.join("clip_recorder.log")).unwrap_or_default()
     );
 }
 
