@@ -99,4 +99,46 @@ mod tests {
         kill_orphan(&dir, Instant::now());
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    fn ping() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join(r"System32\ping.exe")
+    }
+
+    /// The kill path itself: an orphan named ffmpeg.exe is terminated, and the sweep waits for
+    /// it to be gone (SYNCHRONIZE in the access mask) before removing its folder.
+    #[test]
+    fn an_orphan_ffmpeg_is_killed_and_waited_for() {
+        let dir = temp_dir("orphan");
+        let fake = dir.join("ffmpeg.exe");
+        std::fs::copy(ping(), &fake).unwrap();
+        let mut orphan = std::process::Command::new(&fake).args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        std::fs::write(dir.join(PID_FILE), orphan.id().to_string()).unwrap();
+        kill_orphan(&dir, Instant::now());
+        let gone = orphan.try_wait().unwrap().is_some();
+        if !gone {
+            let _ = orphan.kill();
+        }
+        let _ = orphan.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "the orphan ffmpeg was still running after kill_orphan returned");
+    }
+
+    /// Each cliprec_ folder is handled on its own (one with a garbage PID file does not stop
+    /// the next), and nothing else in the folder is touched.
+    #[test]
+    fn the_sweep_clears_every_capture_folder_and_nothing_else() {
+        let root = temp_dir("sweep");
+        for (name, pid) in [("cliprec_1_a", "garbage"), ("cliprec_2_b", "4000000000")] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join(PID_FILE), pid).unwrap();
+            std::fs::write(root.join(name).join("seg_000.ts"), "x").unwrap();
+        }
+        std::fs::create_dir_all(root.join("someone_else")).unwrap();
+        std::fs::write(root.join("cliprec_not_a_folder.txt"), "x").unwrap();
+        sweep(&root);
+        assert!(!root.join("cliprec_1_a").exists() && !root.join("cliprec_2_b").exists());
+        assert!(root.join("someone_else").exists(), "a folder that is not a capture's was removed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

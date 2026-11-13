@@ -8,6 +8,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn log(msg: &str) {
+    // Unit tests run without CLIPREC_DATA_DIR: they must never write into a real user's log.
+    if cfg!(test) {
+        return;
+    }
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
     let line = format!("[{}] {msg}", log::rfc3339(ms));
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
