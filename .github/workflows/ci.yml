@@ -80,7 +80,7 @@ jobs:
   msi:
     name: msi
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -98,7 +98,9 @@ jobs:
       - run: ./build-msi.ps1
       # A second build of the same version has a new package code: installed over the first, it is an upgrade.
       - run: ./tests/msi/upgrade-pair.ps1 -Out $env:RUNNER_TEMP
-      - run: ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      # Shorter than the job: a hang fails this step and keeps its log (a cancelled job keeps none).
+      - timeout-minutes: 20
+        run: ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

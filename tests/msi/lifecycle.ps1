@@ -37,11 +37,20 @@ public static class K {
 }
 "@
 
-function Check($name, $ok, $detail = '') { $checks[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" } }
+# Each check is printed as it happens: a step that hangs then shows where.
+function Check($name, $ok, $detail = '') {
+    $checks[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" }
+    '{0}  {1}  {2}' -f ($ok ? 'ok  ' : 'FAIL'), $name, $detail | Write-Host
+}
+function Step($what) { "[$(Get-Date -Format HH:mm:ss)] $what" | Write-Host }
 function Msi($verb, $msi, $log) {
     # Wait on msiexec itself only: -Wait would also wait for an app Restart Manager relaunches.
+    Step "msiexec $verb $(Split-Path $msi -Leaf)"
     $p = Start-Process msiexec -ArgumentList $verb, "`"$msi`"", '/qn', '/l*v', "`"$Out\$log`"" -PassThru
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(300000)) {
+        $p.Kill($true)
+        return 'timed out after 5 min'
+    }
     $p.ExitCode
 }
 function Count($name) { @(Get-Process $name -ErrorAction SilentlyContinue).Count }
@@ -54,10 +63,12 @@ Check 'install exits 0' ($code -eq 0) $code
 Check 'app and ffmpeg installed' ((Test-Path $exe) -and (Test-Path "$dir\ffmpeg.exe"))
 Check 'starts with Windows (HKCU Run)' ((RunValue) -eq "`"$exe`"") (RunValue)
 
+Step 'launch the app'
 $app = Launch
 Start-Sleep -Seconds 12
 Check 'app running' ((Count clip-recorder) -eq 1) ($app.HasExited ? ('exited with 0x{0:X8}' -f $app.ExitCode) : '')
 
+Step 'press the hotkey'
 # A clip through the real hotkey: whatever the machine's GPU, the probed pipeline must record.
 [K]::Press(0x11, 0x12, 0x52)
 $clip = $null
@@ -80,6 +91,7 @@ Check 'Run value kept by the upgrade' ((RunValue) -eq "`"$exe`"") (RunValue)
 Check 'start-up "off" survives the upgrade' (((Get-ItemProperty $approved -ErrorAction SilentlyContinue).'Clip Recorder')[0] -eq 3)
 
 if ((Count clip-recorder) -eq 0) { $null = Launch; Start-Sleep -Seconds 8 }
+Step 'second launch'
 $null = Launch
 $settings = $false
 foreach ($i in 1..10) { Start-Sleep -Seconds 1; if ([K]::Visible('Clip Recorder Settings')) { $settings = $true; break } }
@@ -100,5 +112,5 @@ $failed = @($checks.Keys | Where-Object { -not $checks[$_].ok })
     failed = $failed
     log    = @(Get-Content "$env:APPDATA\ClipRecorder\clip_recorder.log" -ErrorAction SilentlyContinue)
 } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Out 'lifecycle.json') -Encoding utf8
-foreach ($name in $checks.Keys) { '{0}  {1}  {2}' -f ($checks[$name].ok ? 'ok  ' : 'FAIL'), $name, $checks[$name].detail }
+"$($failed.Count) failed: $($failed -join '; ')" | Write-Host
 exit $failed.Count
