@@ -60,9 +60,26 @@ jobs:
       - run: ./build-msi.ps1
       # The MSI about to be published goes through its whole life on this disposable runner first.
       - run: ./tests/msi/upgrade-pair.ps1 -Out $env:RUNNER_TEMP
-      # Shorter than the job: a hang fails this step and keeps its log (a cancelled job keeps none).
-      - timeout-minutes: 20
-        run: ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      # One step per phase, each shorter than the job: a hang fails its step and keeps its log, and a runner that
+      # dies (it lost its connection, logless, in 3 runs of 4) still shows which phase it died in.
+      - name: lifecycle install
+        timeout-minutes: 8
+        run: ./tests/msi/lifecycle.ps1 -Phase install -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - name: lifecycle start and hotkey save
+        timeout-minutes: 3
+        run: ./tests/msi/lifecycle.ps1 -Phase start -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - name: lifecycle upgrade with the app running
+        timeout-minutes: 8
+        run: ./tests/msi/lifecycle.ps1 -Phase upgrade -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - name: lifecycle second launch
+        timeout-minutes: 3
+        run: ./tests/msi/lifecycle.ps1 -Phase relaunch -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - name: lifecycle uninstall while running
+        timeout-minutes: 8
+        run: ./tests/msi/lifecycle.ps1 -Phase uninstall -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - name: lifecycle report
+        timeout-minutes: 2
+        run: ./tests/msi/lifecycle.ps1 -Phase report -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

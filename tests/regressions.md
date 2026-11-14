@@ -82,3 +82,4 @@ machine, CI included.
 | R71 | release-check.ps1 died on its first measurement (`Test-Path $x ? ...` binds ? as an argument), so no release could pass the gate | `the_av_sync_verdict_runs_on_measured_results` |
 | R72 | A lifecycle check whose expression threw was skipped instead of failed, and the run went green | `every_msi_goes_through_its_lifecycle_test` |
 | R73 | Merges of master into a branch (conventional commits too) were listed in the release notes | `release_notes_are_the_changelog_section` |
+| R74 | The MSI lifecycle test in a single step lost the CI runner 3 runs in 4 (no log); one step per phase passed 5 runs in 5 | `every_msi_goes_through_its_lifecycle_test` |
