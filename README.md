@@ -17,8 +17,9 @@ and starts with Windows (switch that off in Settings). Uninstall it from Windows
 
 Requires Windows 10 or 11. FFmpeg is included.
 
-The MSI is not signed yet, so SmartScreen asks once ("More info", then "Run anyway"). To check a download was built
-by this repository: `gh attestation verify clip-recorder-<version>-x64.msi -R NotDjz/Clip_Recorder`.
+The MSI is not signed yet: SmartScreen warns ("More info", then "Run anyway"), and Smart App Control, when it is on,
+blocks it. To check a download was built by this repository from its tag:
+`gh attestation verify clip-recorder-<version>-x64.msi -R NotDjz/Clip_Recorder --source-ref refs/tags/v<version>`.
 
 ## Code signing policy
 
