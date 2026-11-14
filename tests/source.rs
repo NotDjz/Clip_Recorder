@@ -304,13 +304,24 @@ fn every_msi_goes_through_its_lifecycle_test() {
             text.contains("./tests/msi/lifecycle.ps1"),
             "{workflow} skips the MSI lifecycle test"
         );
+        // One step per phase: in one step the runner lost its connection, logless, 3 runs in 4.
+        for phase in ["install", "start", "upgrade", "relaunch", "uninstall", "report"] {
+            assert!(
+                text.contains(&format!("lifecycle.ps1 -Phase {phase} ")),
+                "{workflow} runs the lifecycle phase {phase} in a shared step"
+            );
+        }
+        assert!(
+            text.contains("name: msi-lifecycle"),
+            "{workflow} drops the lifecycle logs"
+        );
     }
     let release = code(".github/workflows/release.yml", "#");
     assert!(
         position(&release, "./tests/msi/lifecycle.ps1") < position(&release, "actions/attest-build-provenance@"),
         "the release attests an MSI before testing it"
     );
-    // /qn alone reboots the machine when a file is in use: the runner then drops off with no log at all.
+    // /qn alone may reboot the machine when a file is in use.
     assert!(
         code("tests/msi/lifecycle.ps1", "#").contains("'/qn', '/norestart'"),
         "an msiexec in the lifecycle test may reboot the machine it runs on"
@@ -320,10 +331,6 @@ fn every_msi_goes_through_its_lifecycle_test() {
         code("tests/msi/lifecycle.ps1", "#").contains("trap { Check \"threw:"),
         "a check that throws vanishes from the lifecycle results"
     );
-    // The release's lifecycle run keeps its logs when it fails or hangs, as CI's does.
-    let release = code(".github/workflows/release.yml", "#");
-    let run = &release[position(&release, "./tests/msi/upgrade-pair.ps1")..];
-    assert!(run.contains("- timeout-minutes: 20") && run.contains("name: msi-lifecycle"));
 }
 
 /// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no
