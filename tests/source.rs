@@ -310,6 +310,11 @@ fn every_msi_goes_through_its_lifecycle_test() {
         position(&release, "./tests/msi/lifecycle.ps1") < position(&release, "actions/attest-build-provenance@"),
         "the release attests an MSI before testing it"
     );
+    // /qn alone reboots the machine when a file is in use: the runner then drops off with no log at all.
+    assert!(
+        code("tests/msi/lifecycle.ps1", "#").contains("'/qn', '/norestart'"),
+        "an msiexec in the lifecycle test may reboot the machine it runs on"
+    );
 }
 
 /// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no

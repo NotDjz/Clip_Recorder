@@ -45,8 +45,10 @@ function Check($name, $ok, $detail = '') {
 function Step($what) { "[$(Get-Date -Format HH:mm:ss)] $what" | Write-Host }
 function Msi($verb, $msi, $log) {
     # Wait on msiexec itself only: -Wait would also wait for an app Restart Manager relaunches.
+    # /norestart: under /qn a file in use reboots the machine. That killed the CI runner twice with no log. Without
+    # the reboot it exits 3010, and the exit-0 checks then report it.
     Step "msiexec $verb $(Split-Path $msi -Leaf)"
-    $p = Start-Process msiexec -ArgumentList $verb, "`"$msi`"", '/qn', '/l*v', "`"$Out\$log`"" -PassThru
+    $p = Start-Process msiexec -ArgumentList $verb, "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$Out\$log`"" -PassThru
     if (-not $p.WaitForExit(300000)) {
         $p.Kill($true)
         return 'timed out after 5 min'
