@@ -1,7 +1,5 @@
 # Code signing policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)
-
 ## Team roles
 
 - Committers and reviewers: [NotDjz](https://github.com/NotDjz)
@@ -9,14 +7,25 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 Every change reaches `master` through a pull request that must pass the required checks (tests, end-to-end tests,
 mutation tests, dependency audit, secret scanning). Every release is built from this repository's source by GitHub
-Actions (`.github/workflows/release.yml`), with SLSA build provenance, and is published, and signed, only after the
-approver approves it.
+Actions (`.github/workflows/release.yml`), with SLSA build provenance, and is published only after the approver
+approves it.
 
-## What is signed
+## Signing
 
-`clip-recorder-<version>-x64.msi` and the `clip-recorder.exe` it installs, both built from this repository. The MSI
-also carries `ffmpeg.exe`, an unmodified, hash-pinned build from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/)
-(GPL v3), which is not signed by this project.
+Releases are not signed yet: SignPath Foundation, which signs open-source projects for free, will be asked again
+once this one is better known. Until then:
+
+- Windows SmartScreen warns the first time you run the installer: "More info", then "Run anyway". Smart App
+  Control, when it is on, blocks unsigned programs outright.
+- Each MSI carries GitHub's build provenance instead. This checks that it was built by this repository's release
+  workflow, from the tagged commit:
+
+  ```
+  gh attestation verify clip-recorder-<version>-x64.msi -R NotDjz/Clip_Recorder
+  ```
+
+The MSI installs `clip-recorder.exe`, built from this repository, and `ffmpeg.exe`, an unmodified, hash-pinned build
+from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) (GPL v3).
 
 ## Privacy policy
 
