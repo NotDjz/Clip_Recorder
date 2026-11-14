@@ -294,6 +294,29 @@ fn the_supply_chain_is_pinned_and_verified() {
     assert!(code(".github/workflows/ci.yml", "#").contains("cargo deny --locked check"));
 }
 
+/// The installer's life (install, upgrade with the app running, uninstall) is tested on a
+/// disposable machine in CI, and again on the very MSI a release is about to publish.
+#[test]
+fn every_msi_goes_through_its_lifecycle_test() {
+    for workflow in [".github/workflows/ci.yml", ".github/workflows/release.yml"] {
+        let text = code(workflow, "#");
+        assert!(
+            text.contains("./tests/msi/lifecycle.ps1"),
+            "{workflow} skips the MSI lifecycle test"
+        );
+    }
+    let release = code(".github/workflows/release.yml", "#");
+    assert!(
+        position(&release, "./tests/msi/lifecycle.ps1") < position(&release, "actions/attest-build-provenance@"),
+        "the release attests an MSI before testing it"
+    );
+    // /qn alone reboots the machine when a file is in use: the runner then drops off with no log at all.
+    assert!(
+        code("tests/msi/lifecycle.ps1", "#").contains("'/qn', '/norestart'"),
+        "an msiexec in the lifecycle test may reboot the machine it runs on"
+    );
+}
+
 /// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no
 /// release is built until scripts/release-check.ps1 has measured the tagged commit at the computer.
 #[test]
