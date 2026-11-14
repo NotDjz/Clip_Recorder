@@ -42,6 +42,8 @@ function Check($name, $ok, $detail = '') {
     $checks[$name] = [ordered]@{ ok = [bool]$ok; detail = "$detail" }
     '{0}  {1}  {2}' -f ($ok ? 'ok  ' : 'FAIL'), $name, $detail | Write-Host
 }
+# A check whose expression throws (indexing a missing value...) would be skipped and never counted: it fails instead.
+trap { Check "threw: $($_.InvocationInfo.Line.Trim())" $false $_; continue }
 function Step($what) { "[$(Get-Date -Format HH:mm:ss)] $what" | Write-Host }
 function Msi($verb, $msi, $log) {
     # Wait on msiexec itself only: -Wait would also wait for an app Restart Manager relaunches.

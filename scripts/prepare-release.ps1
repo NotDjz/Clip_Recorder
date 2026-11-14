@@ -29,13 +29,16 @@ if (git status --porcelain) { throw 'The working tree is not clean.' }
 git fetch -q origin
 if ((git rev-parse HEAD) -ne (git rev-parse origin/master)) { throw 'Run it on master, up to date with origin/master.' }
 
-$toml = Get-Content Cargo.toml -Raw
-Set-Content Cargo.toml ($toml -replace '(?m)^version = ".+"$', "version = `"$Version`"") -NoNewline
-cargo update -p clip-recorder --offline
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
 # Under the header (the first "## " line starts the newest release).
 $changelog = Get-Content CHANGELOG.md -Raw
 $at = $changelog.IndexOf("`n## ")
+if ($at -lt 0) { throw 'CHANGELOG.md has no "## " release heading to insert above.' }
+# The first `version =` only: [package] comes first, and a dependency table may carry its own.
+$toml = Get-Content Cargo.toml -Raw
+if ($toml -notmatch '\A\[package\]') { throw 'Cargo.toml no longer starts with [package].' }
+Set-Content Cargo.toml ([regex]::new('(?m)^version = "[^"]+"').Replace($toml, "version = `"$Version`"", 1)) -NoNewline
+cargo update -p clip-recorder --offline
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 Set-Content CHANGELOG.md ($changelog.Substring(0, $at + 1) + $section.Trim() + "`n`n" + $changelog.Substring($at + 1)) -NoNewline
 
 git switch -c "release/v$Version"

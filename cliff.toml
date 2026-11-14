@@ -20,10 +20,11 @@ trim = true
 
 [git]
 conventional_commits = true
-# Merge commits and the Python app's history before the convention are left out.
+# The Python app's history before the convention is left out, and so are the merges of master into a branch.
 filter_unconventional = true
 filter_commits = true
 commit_parsers = [
+    { message = '^[a-z]+(\(.+\))?: merge master', skip = true },
     { message = "^feat", group = "<!-- 0 -->Features" },
     { message = "^fix", group = "<!-- 1 -->Fixes" },
     { message = "^perf", group = "<!-- 2 -->Performance" },
