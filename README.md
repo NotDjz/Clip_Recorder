@@ -27,7 +27,9 @@ Rust (version pinned in `rust-toolchain.toml`) and WiX 7.
 
 - `cargo test --locked` runs the tests; `pwsh ./build-msi.ps1` fetches the hash-pinned FFmpeg, builds the release
   exe and produces `target\clip-recorder-<version>-x64.msi`.
-- Releases are built and published by `.github/workflows/release.yml` from a `v*` tag.
+- Releases: `pwsh scripts/prepare-release.ps1 <version>` opens a PR with the version bump and its
+  [CHANGELOG.md](CHANGELOG.md) section (git-cliff, from the Conventional Commits); once merged, a `v<version>` tag
+  makes `.github/workflows/release.yml` build, test and attest the MSI and its SBOM, and publish after approval.
 
 Every bug fixed so far is listed with the tests that guard it in [tests/regressions.md](tests/regressions.md).
 

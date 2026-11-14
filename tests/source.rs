@@ -311,3 +311,37 @@ fn every_msi_goes_through_its_lifecycle_test() {
         "the release attests an MSI before testing it"
     );
 }
+
+/// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no
+/// release is built until scripts/release-check.ps1 has measured the tagged commit at the computer.
+#[test]
+fn no_release_without_the_measured_av_sync() {
+    let release = code(".github/workflows/release.yml", "#");
+    let gate = between(&release, "av-sync:", "build:");
+    assert!(
+        gate.contains("release/av-sync") && gate.contains("exit 1"),
+        "the release does not check the measurement"
+    );
+    assert!(
+        between(&release, "build:", "steps:").contains("needs: av-sync"),
+        "the build does not wait for it"
+    );
+    let check = code("scripts/release-check.ps1", "#");
+    for fps in ["60", "120", "240"] {
+        assert!(check.contains(fps), "release-check does not measure {fps} fps");
+    }
+    assert!(check.contains("context=release/av-sync"));
+}
+
+/// Release notes come from CHANGELOG.md (written by scripts/prepare-release.ps1 from the
+/// Conventional Commits): a release whose version has no section there stops before publishing.
+#[test]
+fn release_notes_are_the_changelog_section() {
+    let release = code(".github/workflows/release.yml", "#");
+    assert!(
+        release.contains("CHANGELOG.md has no section for"),
+        "a release without its changelog section"
+    );
+    assert!(release.contains("--notes-file notes.md") && !release.contains("--generate-notes"));
+    assert!(read("CHANGELOG.md").contains("## [2.0.1]"));
+}
