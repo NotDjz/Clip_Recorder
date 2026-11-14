@@ -59,10 +59,16 @@ jobs:
       - run: ./scripts/install-wix.ps1
       - run: ./build-msi.ps1
       # The MSI about to be published goes through its whole life on this disposable runner first.
-      - run: |
-          ./tests/msi/upgrade-pair.ps1 -Out $env:RUNNER_TEMP
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - run: ./tests/msi/upgrade-pair.ps1 -Out $env:RUNNER_TEMP
+      # Shorter than the job: a hang fails this step and keeps its log (a cancelled job keeps none).
+      - timeout-minutes: 20
+        run: ./tests/msi/lifecycle.ps1 -Old "$env:RUNNER_TEMP\old.msi" -New "$env:RUNNER_TEMP\new.msi" -Out "$env:RUNNER_TEMP\lifecycle"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: msi-lifecycle
+          path: ${{ runner.temp }}/lifecycle
+          if-no-files-found: ignore
       # The SBOM of the Windows build (FFmpeg, not a Cargo dependency, is named in the release notes).
       - run: |
           cargo install cargo-cyclonedx --version $env:CARGO_CYCLONEDX_VERSION --locked
@@ -81,7 +87,7 @@ jobs:
           # The release notes are this version's CHANGELOG.md section (scripts/prepare-release.ps1 wrote it).
           $changelog = Get-Content CHANGELOG.md -Raw
           $m = [regex]::Match($changelog, "(?ms)^## \[$([regex]::Escape($version))\].*?(?=^## |\z)")
-          if (-not $m.Success) { throw "CHANGELOG.md has no section for $version: run scripts/prepare-release.ps1" }
+          if (-not $m.Success) { throw "CHANGELOG.md has no section for ${version}: run scripts/prepare-release.ps1" }
           $repo = "https://github.com/$env:GITHUB_REPOSITORY/blob/$env:GITHUB_SHA"
           $notes = $m.Value.Trim() + "`n`nBundles FFmpeg (ffmpeg.exe, GPL v3, gyan.dev build), unmodified. " +
                    "SBOM: sbom.cdx.json. [Code signing policy]($repo/CODE_SIGNING_POLICY.md)`n"

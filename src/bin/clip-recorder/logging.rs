@@ -26,7 +26,6 @@ pub fn install_panic_hook() {
             &location,
             &backtrace,
         );
-        // Never wait on the log lock here: the panic may have struck while this thread held it.
         write(&report, true);
         previous(info);
     }));
@@ -42,7 +41,7 @@ fn write(msg: &str, from_panic: bool) {
         .map_or(0, |d| d.as_millis() as u64);
     let line = format!("[{}] {msg}", log::rfc3339(ms));
     let _guard = if from_panic {
-        LOCK.try_lock().ok()
+        panic_guard()
     } else {
         Some(LOCK.lock().unwrap_or_else(|e| e.into_inner()))
     };
@@ -51,4 +50,20 @@ fn write(msg: &str, from_panic: bool) {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = log::append_capped(&path, &line, log::LOG_MAX_BYTES);
+}
+
+/// The log lock for a panic report. Another thread writing holds it for well under a second, so
+/// wait that long: written alongside, the report could be lost to its rotation. Past that, this
+/// thread most likely holds it itself (the panic struck inside a write): go on unlocked rather
+/// than deadlock.
+fn panic_guard() -> Option<std::sync::MutexGuard<'static, ()>> {
+    use std::sync::TryLockError;
+    for _ in 0..100 {
+        match LOCK.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(e)) => return Some(e.into_inner()),
+            Err(TryLockError::WouldBlock) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    None
 }

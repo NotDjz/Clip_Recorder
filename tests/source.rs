@@ -315,6 +315,15 @@ fn every_msi_goes_through_its_lifecycle_test() {
         code("tests/msi/lifecycle.ps1", "#").contains("'/qn', '/norestart'"),
         "an msiexec in the lifecycle test may reboot the machine it runs on"
     );
+    // Under ErrorActionPreference Continue, a check whose expression throws is skipped, not failed.
+    assert!(
+        code("tests/msi/lifecycle.ps1", "#").contains("trap { Check \"threw:"),
+        "a check that throws vanishes from the lifecycle results"
+    );
+    // The release's lifecycle run keeps its logs when it fails or hangs, as CI's does.
+    let release = code(".github/workflows/release.yml", "#");
+    let run = &release[position(&release, "./tests/msi/upgrade-pair.ps1")..];
+    assert!(run.contains("- timeout-minutes: 20") && run.contains("name: msi-lifecycle"));
 }
 
 /// A/V sync, the most expensive bug of the project's history, needs real sound to measure: no
@@ -349,4 +358,174 @@ fn release_notes_are_the_changelog_section() {
     );
     assert!(release.contains("--notes-file notes.md") && !release.contains("--generate-notes"));
     assert!(read("CHANGELOG.md").contains("## [2.0.1]"));
+    // A merge of master into a branch is a conventional commit too: it never reaches the notes.
+    assert!(
+        code("cliff.toml", "#").contains("merge master', skip = true"),
+        "merges of master end up in the notes"
+    );
+}
+
+/// The PowerShell `run:` steps of a workflow, each `${{ … }}` replaced by a plain word. Both
+/// workflows default to pwsh; a job or a step with `shell: bash` is left out.
+fn pwsh_steps(workflow: &str) -> Vec<String> {
+    fn flush(step: &mut Option<(String, bool)>, job_bash: bool, steps: &mut Vec<String>) {
+        if let Some((script, false)) = step.take()
+            && !job_bash
+            && !script.is_empty()
+        {
+            steps.push(script);
+        }
+    }
+    let text = read(workflow);
+    let (mut steps, mut step, mut job_bash, mut block) = (Vec::new(), None::<(String, bool)>, false, None);
+    for line in text.lines() {
+        let (n, t) = (line.len() - line.trim_start().len(), line.trim());
+        if let Some(k) = block {
+            if t.is_empty() || n > k {
+                if let Some((script, _)) = step.as_mut() {
+                    script.push_str(line);
+                    script.push('\n');
+                }
+                continue;
+            }
+            block = None;
+        }
+        let job_start = n == 2 && t.ends_with(':');
+        if job_start || (n == 6 && t.starts_with("- ")) {
+            flush(&mut step, job_bash, &mut steps);
+            if job_start {
+                job_bash = false;
+            } else {
+                step = Some((String::new(), false));
+            }
+        }
+        let key = t.strip_prefix("- ").unwrap_or(t);
+        if key == "shell: bash" {
+            match step.as_mut() {
+                Some(s) => s.1 = true,
+                None => job_bash = true,
+            }
+        } else if let (Some(value), Some((script, _))) = (key.strip_prefix("run:"), step.as_mut()) {
+            match value.trim() {
+                "|" => block = Some(n),
+                one => script.push_str(&format!("{one}\n")),
+            }
+        }
+    }
+    flush(&mut step, job_bash, &mut steps);
+    steps
+        .into_iter()
+        .map(|mut s| {
+            while let Some(start) = s.find("${{") {
+                let end = s[start..].find("}}").map_or(s.len(), |e| start + e + 2);
+                s.replace_range(start..end, "x");
+            }
+            s
+        })
+        .collect()
+}
+
+fn pwsh(command: &str) -> std::process::Output {
+    std::process::Command::new("pwsh")
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("pwsh 7 on PATH")
+}
+
+/// Every PowerShell script and workflow step goes through the PowerShell parser: a string check
+/// passed on a release step that could not even parse (`"$version:"`).
+#[test]
+fn every_powershell_script_and_step_parses() {
+    let dir = std::env::temp_dir().join(format!("ps-parse-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut scripts = 0;
+    for folder in ["", "scripts", "tests/msi"] {
+        for entry in std::fs::read_dir(root.join(folder)).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "ps1") {
+                let name = format!("{}_{}", folder.replace('/', "_"), entry.file_name().to_string_lossy());
+                std::fs::copy(entry.path(), dir.join(name)).unwrap();
+                scripts += 1;
+            }
+        }
+    }
+    let mut steps = Vec::new();
+    for workflow in ["ci", "release"] {
+        for (i, step) in pwsh_steps(&format!(".github/workflows/{workflow}.yml"))
+            .into_iter()
+            .enumerate()
+        {
+            std::fs::write(dir.join(format!("{workflow}-step-{i}.ps1")), &step).unwrap();
+            steps.push(step);
+        }
+    }
+    assert!(scripts >= 8, "only {scripts} scripts found");
+    assert!(
+        steps.iter().any(|s| s.contains("CHANGELOG.md has no section")),
+        "the release notes step was not read"
+    );
+    assert!(
+        !steps.iter().any(|s| s.contains("gh release create")),
+        "a bash step was read as PowerShell"
+    );
+    let out = pwsh(&format!(
+        r#"Get-ChildItem -LiteralPath '{}' -Filter *.ps1 | ForEach-Object {{
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors)
+            $errors | ForEach-Object {{ "$($_.Extent.File | Split-Path -Leaf):$($_.Extent.StartLineNumber): $($_.Message)" }}
+        }}"#,
+        dir.display()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && report.trim().is_empty(),
+        "{report}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// The release gate's verdict runs on real result files: a string check passed on a
+/// release-check.ps1 whose first measurement died on a parameter-binding error.
+#[test]
+fn the_av_sync_verdict_runs_on_measured_results() {
+    let dir = std::env::temp_dir().join(format!("av-verdict-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = r#"{"rc":0,"decode_clean":true,"discontinuities":0,"beeps_expected":4,"median_offset_ms":10,
+        "max_abs_offset_ms":20,"duration_diff_ms":10,"lost_before_press_s":0.87}"#;
+    let cases = [
+        ("good", Some(good.to_string()), ""),
+        (
+            "late",
+            Some(good.replace(r#""median_offset_ms":10"#, r#""median_offset_ms":-40"#)),
+            "median -40 ms",
+        ),
+        (
+            "crackle",
+            Some(good.replace(r#""discontinuities":0"#, r#""discontinuities":3"#)),
+            "3 discontinuities",
+        ),
+        ("missing", None, "no result"),
+    ];
+    for (name, json, expected) in cases {
+        let path = dir.join(format!("{name}.json"));
+        if let Some(json) = json {
+            std::fs::write(&path, json).unwrap();
+        }
+        let out = pwsh(&format!(
+            "(& ./scripts/av-verdict.ps1 -Path '{}').Problems -join '; '",
+            path.display()
+        ));
+        let problems = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{name}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(problems.trim(), expected, "{name}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let check = code("scripts/release-check.ps1", "#");
+    assert!(
+        check.contains("./scripts/av-verdict.ps1 -Path"),
+        "release-check judges on its own"
+    );
 }

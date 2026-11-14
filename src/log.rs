@@ -16,7 +16,8 @@ pub fn append_capped(path: &Path, line: &str, cap: u64) -> std::io::Result<()> {
     }
     drop(file);
     let text = std::fs::read(path)?;
-    let tail = &text[text.len() - (cap / 2) as usize..];
+    // saturating: another writer may have rotated the file since its length was read.
+    let tail = &text[text.len().saturating_sub((cap / 2) as usize)..];
     let whole = tail.iter().position(|&b| b == b'\n').map_or(tail, |i| &tail[i + 1..]);
     let mut kept = TRUNCATED.as_bytes().to_vec();
     kept.extend_from_slice(whole);

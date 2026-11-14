@@ -22,28 +22,15 @@ if ($LASTEXITCODE) { throw 'The harness needs pyaudiowpatch: py -m pip install -
 cargo build --release --locked
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-# Thresholds: the measured release build sat at median 0 ms (60/120/240 fps), with a test resolution of 10 to 20 ms.
-$limits = @{ median = 30; max = 60; durationDiff = 50; lost = 1.5 }
 $failures = @()
 $summary = @()
 foreach ($fps in 60, 120, 240) {
     $json = Join-Path ([IO.Path]::GetTempPath()) "release-check-$fps.json"
     Remove-Item $json -ErrorAction SilentlyContinue
     py tests/timecode_sync_test.py --generate --fps $fps --buffer 15 --monitor $Monitor --json $json
-    $r = Test-Path $json ? (Get-Content $json -Raw | ConvertFrom-Json) : $null
-    $problems = @()
-    if (-not $r) { $problems += 'no result' } else {
-        if ($r.rc -ne 0) { $problems += "harness rc $($r.rc)" }
-        if (-not $r.decode_clean) { $problems += 'decode errors' }
-        if ($r.discontinuities -ne 0) { $problems += "$($r.discontinuities) discontinuities" }
-        if ($r.beeps_missing -or $r.unexpected_sound) { $problems += 'sound where silence was scheduled, or the reverse' }
-        if ([math]::Abs($r.median_offset_ms) -gt $limits.median) { $problems += "median $($r.median_offset_ms) ms" }
-        if ($r.max_abs_offset_ms -gt $limits.max) { $problems += "max $($r.max_abs_offset_ms) ms" }
-        if ($r.duration_diff_ms -gt $limits.durationDiff) { $problems += "audio/video lengths differ by $($r.duration_diff_ms) ms" }
-        if ($null -ne $r.lost_before_press_s -and $r.lost_before_press_s -gt $limits.lost) { $problems += "lost $($r.lost_before_press_s) s before the press" }
-        $summary += "${fps}fps {0:+0;-0;0}ms" -f $r.median_offset_ms
-    }
-    if ($problems) { $failures += "$fps fps: $($problems -join ', ')" }
+    $verdict = ./scripts/av-verdict.ps1 -Path $json
+    if ($null -ne $verdict.Median) { $summary += "${fps}fps {0:+0;-0;0}ms" -f $verdict.Median }
+    if ($verdict.Problems) { $failures += "$fps fps: $($verdict.Problems -join ', ')" }
 }
 
 $state = $failures ? 'failure' : 'success'
