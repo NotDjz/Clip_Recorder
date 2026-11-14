@@ -83,3 +83,4 @@ machine, CI included.
 | R72 | A lifecycle check whose expression threw was skipped instead of failed, and the run went green | `every_msi_goes_through_its_lifecycle_test` |
 | R73 | Merges of master into a branch (conventional commits too) were listed in the release notes | `release_notes_are_the_changelog_section` |
 | R74 | The MSI lifecycle test in a single step lost the CI runner 3 runs in 4 (no log); one step per phase passed 5 runs in 5 | `every_msi_goes_through_its_lifecycle_test` |
+| R75 | The code signing policy said SignPath signed the releases, which were unsigned (application refused) | `the_code_signing_policy_claims_only_what_the_release_does` |

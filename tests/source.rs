@@ -214,14 +214,18 @@ fn the_session_handler_leaves_through_main() {
     );
 }
 
-/// SignPath Foundation signs only projects that publish its code signing policy: the exact
-/// attribution, the team roles and the privacy statement, linked from the home and download
-/// pages, and an installer that announces the system changes it makes (start with Windows).
+/// The code signing policy (team roles, privacy statement, linked from the home and download
+/// pages, an installer that announces start with Windows) is what SignPath Foundation asks for,
+/// kept for a new application. It may say the releases are signed only while release.yml signs
+/// them: SignPath refused the first application, and the policy went on claiming its signature.
 #[test]
-fn the_code_signing_policy_is_published_where_signpath_requires_it() {
+fn the_code_signing_policy_claims_only_what_the_release_does() {
     let policy = read("CODE_SIGNING_POLICY.md");
+    let release = read(".github/workflows/release.yml");
+    let signs = release.contains("signpath/github-action-submit-signing-request") || release.contains("signtool");
+    let claims = policy.contains("SignPath.io") || !policy.contains("not signed");
+    assert_eq!(claims, signs, "the policy's signing claim does not match release.yml");
     for required in [
-        "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)",
         "Committers and reviewers:",
         "Approvers:",
         "This program will not transfer any information to other networked systems unless specifically requested by the user",
