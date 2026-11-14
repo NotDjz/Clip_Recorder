@@ -77,7 +77,7 @@ machine, CI included.
 | R66 | Ending the session while a dialog was open kept the app alive until the dialog closed | `the_session_handler_leaves_through_main` |
 | R67 | Snapshots copied through an 8 KiB loop on the UI thread instead of the system copy | `copy_new_copies_and_never_overwrites` |
 | R68 | A panic in the windowed app (any thread) vanished without a trace | `a_panic_report_names_the_thread_the_place_and_the_cause`, `panics_are_logged_from_the_first_line_of_main` |
-| R69 | The MSI lifecycle test rebooted the CI runner (msiexec /qn with a file in use): the job died with no log | `every_msi_goes_through_its_lifecycle_test` |
+| R69 | The MSI lifecycle test could reboot the machine it runs on (msiexec /qn without /norestart, a file in use) | `every_msi_goes_through_its_lifecycle_test` |
 | R70 | The release notes step could not parse ("$version:"), so every tag would fail after the build; string checks passed | `every_powershell_script_and_step_parses` |
 | R71 | release-check.ps1 died on its first measurement (`Test-Path $x ? ...` binds ? as an argument), so no release could pass the gate | `the_av_sync_verdict_runs_on_measured_results` |
 | R72 | A lifecycle check whose expression threw was skipped instead of failed, and the run went green | `every_msi_goes_through_its_lifecycle_test` |
