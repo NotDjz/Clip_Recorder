@@ -58,6 +58,49 @@ slint::slint! {
         }
     }
 
+    // A small underlined link: reachable with Tab, fired by Enter or Space, brighter when hovered
+    // or focused, its underline thicker with focus.
+    component Link inherits Rectangle {
+        in property <string> text;
+        callback clicked;
+        min-width: label.preferred-width;
+        min-height: label.preferred-height + 3px;
+        horizontal-stretch: 0;
+        accessible-role: button;
+        accessible-label: text;
+        accessible-action-default => { clicked(); }
+        label := Text {
+            y: (parent.height - self.height) / 2;
+            text: root.text;
+            font-size: 11px;
+            color: touch.has-hover || focus.has-focus ? Ink.fg : Ink.fg2;
+        }
+        Rectangle {
+            x: label.x;
+            y: label.y + label.height;
+            width: label.width;
+            height: focus.has-focus ? 2px : 1px;
+            background: label.color;
+        }
+        touch := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                focus.focus();
+                root.clicked();
+            }
+        }
+        focus := FocusScope {
+            focus-on-click: false;
+            key-pressed(event) => {
+                if event.text == Key.Return || event.text == " " {
+                    root.clicked();
+                    return accept;
+                }
+                return reject;
+            }
+        }
+    }
+
     component Group inherits VerticalLayout {
         in property <string> title;
         spacing: 4px;
@@ -255,24 +298,11 @@ slint::slint! {
                 HorizontalLayout {
                     AccentButton { text: "Save changes"; clicked => { save(); } }
                     Rectangle {}
-                    // Small, and out of the Tab order so Save stays the last control: the tray
-                    // menu has the same entry for the keyboard.
                     HorizontalLayout {
                         spacing: 6px;
                         Unit { text: version; font-size: 11px; }
                         Unit { text: "·"; font-size: 11px; }
-                        Unit {
-                            text: "Check for updates";
-                            font-size: 11px;
-                            color: link.has-hover ? Ink.fg : Ink.fg2;
-                            accessible-role: button;
-                            accessible-label: self.text;
-                            accessible-action-default => { check-updates(); }
-                            link := TouchArea {
-                                mouse-cursor: pointer;
-                                clicked => { check-updates(); }
-                            }
-                        }
+                        Link { text: "Check for updates"; clicked => { check-updates(); } }
                     }
                 }
             }
@@ -343,8 +373,11 @@ pub fn fill(
     w.set_startup_available(startup.is_some());
     w.set_startup(startup.unwrap_or(false));
     w.set_problem("".into());
-    w.set_version(concat!("v", env!("CARGO_PKG_VERSION")).into());
+    w.set_version(VERSION.into());
 }
+
+/// The running version, as Settings shows it beside the update link.
+pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 fn picked(model: ModelRc<SharedString>, index: i32) -> String {
     let choices: Vec<String> = model.iter().map(String::from).collect();
@@ -573,15 +606,23 @@ mod tests {
         assert_eq!((w.get_capturing(), w.get_hotkey().as_str()), (false, "Ctrl+Alt+R"));
     }
 
-    /// Keyboard only: Shift+Tab from the start lands on the last control, Save, and Enter fires it.
+    /// Keyboard only: Shift+Tab from the start lands on the last control, the update link, then
+    /// on Save; Enter fires each.
     #[test]
-    fn the_save_button_works_from_the_keyboard() {
+    fn save_and_the_update_link_work_from_the_keyboard() {
         i_slint_backend_testing::init_no_event_loop();
         let w = window(&Config::default());
         w.show().unwrap();
-        let saved = std::rc::Rc::new(std::cell::Cell::new(false));
-        let s = saved.clone();
+        let (saved, asked) = (
+            std::rc::Rc::new(std::cell::Cell::new(false)),
+            std::rc::Rc::new(std::cell::Cell::new(false)),
+        );
+        let (s, a) = (saved.clone(), asked.clone());
         w.on_save(move || s.set(true));
+        w.on_check_updates(move || a.set(true));
+        press(&w, &[Key::Shift.into(), Key::Tab.into()]);
+        press(&w, &[Key::Return.into()]);
+        assert_eq!((asked.get(), saved.get()), (true, false), "Enter on the focused link");
         press(&w, &[Key::Shift.into(), Key::Tab.into()]);
         press(&w, &[Key::Return.into()]);
         assert!(saved.get(), "Enter on the focused Save did nothing");
@@ -623,7 +664,8 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let w = window(&Config::default());
         w.show().unwrap();
-        assert_eq!(w.get_version().as_str(), concat!("v", env!("CARGO_PKG_VERSION")));
+        assert_eq!(w.get_version().as_str(), VERSION);
+        assert!(VERSION.ends_with(env!("CARGO_PKG_VERSION")));
         let asked = std::rc::Rc::new(std::cell::Cell::new(0));
         let a = asked.clone();
         w.on_check_updates(move || a.set(a.get() + 1));

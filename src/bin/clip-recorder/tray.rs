@@ -25,6 +25,10 @@ fn action(id: &str) -> Option<Action> {
     IDS.iter().find(|(i, _)| *i == id).map(|&(_, a)| a)
 }
 
+fn id(action: Action) -> &'static str {
+    IDS.iter().find(|(_, a)| *a == action).map_or("", |&(i, _)| i)
+}
+
 pub struct Tray {
     _icon: TrayIcon,
     save: MenuItem,
@@ -33,16 +37,17 @@ pub struct Tray {
 impl Tray {
     /// `handle` runs on the UI thread for every menu click.
     pub fn new(hotkey: &str, handle: fn(Action)) -> Result<Tray, String> {
-        let save = MenuItem::with_id("save", save_label(hotkey), true, None);
+        let item = |a: Action, text: &str| MenuItem::with_id(id(a), text, true, None);
+        let save = item(Action::Save, &save_label(hotkey));
         let menu = Menu::new();
         menu.append_items(&[
             &save,
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("settings", "Settings", true, None),
-            &MenuItem::with_id("folder", "Open folder", true, None),
-            &MenuItem::with_id("updates", "Check for updates", true, None),
+            &item(Action::Settings, "Settings"),
+            &item(Action::OpenFolder, "Open folder"),
+            &item(Action::Updates, "Check for updates"),
             &PredefinedMenuItem::separator(),
-            &MenuItem::with_id("quit", "Quit", true, None),
+            &item(Action::Quit, "Quit"),
         ])
         .map_err(|e| e.to_string())?;
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -74,10 +79,19 @@ fn save_label(hotkey: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The menu items take their ids from id(), and a click is routed by action(): every action
+    /// must survive the round trip, or its item does nothing.
     #[test]
     fn every_menu_id_reaches_its_action() {
-        assert_eq!(action("updates"), Some(Action::Updates));
-        assert_eq!(action("quit"), Some(Action::Quit));
+        for a in [
+            Action::Save,
+            Action::Settings,
+            Action::OpenFolder,
+            Action::Updates,
+            Action::Quit,
+        ] {
+            assert_eq!(action(id(a)), Some(a));
+        }
         assert_eq!(action("nothing"), None);
     }
 }

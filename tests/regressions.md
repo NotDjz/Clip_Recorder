@@ -63,7 +63,7 @@ machine, CI included.
 | R52 | 120/240 fps through GDI | `gdigrab_never_captures_above_60_fps`, `above_60_fps_needs_ddagrab` |
 | R53 | stderr on a 4 KB pipe stalled the capture at 240 fps | `stderr_gets_a_pipe_large_enough_for_debug_ts` |
 | R54 | The banner stole focus, was captured into clips, or kept a replaced banner's pulse | `the_banner_is_styled_before_it_is_ever_shown`, `a_replaced_banner_stops_breathing`, `the_breathing_dot_runs_from_the_accent_down_and_back` |
-| R55 | Unreadable text (WCAG AA) and a Save unreachable from the keyboard | `the_banner_text_is_readable`, `the_save_button_works_from_the_keyboard` |
+| R55 | Unreadable text (WCAG AA) and a Save unreachable from the keyboard | `the_banner_text_is_readable`, `save_and_the_update_link_work_from_the_keyboard` |
 | R56 | Start with Windows left pointing at an old install, or re-enabled by an upgrade | `start_with_windows_is_rewritten_when_ticked_and_switched_off_only_when_on`, `the_approved_entry_reads_back_as_written`, `startup_approved_reads_like_task_manager`, `the_msi_writes_the_run_value_in_hkcu_and_never_closes_the_app_itself` |
 | R57 | An upgrade with the app running asked for a reboot | `quits_when_windows_ends_the_session` (e2e), `the_msi_writes_the_run_value_in_hkcu_and_never_closes_the_app_itself` |
 | R58 | Two instances fought over the capture and the hotkey | `a_second_launch_exits_and_the_first_keeps_running` (e2e), `a_second_launch_opens_settings_in_the_first` (e2e) |
