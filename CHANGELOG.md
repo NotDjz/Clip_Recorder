@@ -2,6 +2,40 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.0.2] - 2026-11-15
+
+### Features
+
+- Log every panic, in any thread, before the default handling
+
+### Fixes
+
+- Never lose a panic report to the log's rotation
+- Keep every unsigned-release notice true and in step
+
+### Documentation
+
+- Publish a code signing policy and announce start-up in the installer
+- Show the Made with Slint badge on the download page
+- Stop claiming the releases are signed
+- Drop the plan to reapply to SignPath
+
+### Tests
+
+- Close the panic-log check the merge left open
+- Show where the MSI lifecycle test hangs, and bound each msiexec
+- Never let an msiexec in the lifecycle test reboot the runner
+- Run the MSI lifecycle one phase per CI step
+
+### CI and build
+
+- Cargo-deny, an attested SBOM and WiX checked by hash
+- Test the MSI's whole life on every change and before each release
+- No release without the A/V sync measured on real hardware
+- A CHANGELOG generated from the commits, and release notes from it
+- Make the release scripts and steps runnable, and test them by running them
+- Run the release's MSI lifecycle one phase per step, as CI does
+
 ## [2.0.1] - 2026-11-13
 
 The first release of the Rust rewrite as the recommended version, replacing v1.7 (Python).
