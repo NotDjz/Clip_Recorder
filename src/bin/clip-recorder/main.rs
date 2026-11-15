@@ -176,10 +176,15 @@ fn on_action(action: Action) {
                 open(&folder.to_string_lossy());
             }
         }
+        Action::Updates => open(RELEASES),
         Action::Save => save_clip(),
         Action::Settings => open_settings(),
     }
 }
+
+/// "Check for updates" opens this in the browser; the app itself makes no network connection.
+/// Not /releases/latest: that skips pre-releases, and release.yml publishes every tag as one.
+const RELEASES: &str = "https://github.com/NotDjz/Clip_Recorder/releases";
 
 /// The configured hotkey, else Ctrl+Alt+R. config.json is never written here: a hotkey that
 /// failed to register must stay "changed" for Settings, or the user could never retry it.
@@ -217,6 +222,7 @@ fn open_settings() {
             };
             w.on_save(apply_settings);
             w.on_browse(browse_folder);
+            w.on_check_updates(|| open(RELEASES));
             w.on_key_combination(|text, ctrl, alt, shift| {
                 hotkey::format(ctrl, alt, shift, &settings_window::key_name(&text))
                     .unwrap_or_default()
@@ -407,10 +413,12 @@ fn on_saved(outcome: save::Outcome) {
     with_app(|app| tell(app, feedback(SaveEvent::Ended(outcome))));
 }
 
+/// Opens a folder in Explorer or a page in the browser. A failure (no handler for https, for
+/// one) shows nothing on screen, so it is logged.
 fn open(target: &str) {
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    unsafe {
+    let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             wide("open").as_ptr(),
@@ -418,7 +426,11 @@ fn open(target: &str) {
             std::ptr::null(),
             std::ptr::null(),
             SW_SHOWNORMAL,
-        );
+        )
+    };
+    // ShellExecuteW reports success with a value above 32.
+    if result as isize <= 32 {
+        log(&format!("could not open {target} (ShellExecute {})", result as isize));
     }
 }
 
