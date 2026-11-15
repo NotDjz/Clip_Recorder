@@ -15,13 +15,13 @@ approves it.
 Releases are not signed yet: SignPath Foundation, which signs open-source projects for free, will be asked again
 once this one is better known. Until then:
 
-- Windows SmartScreen warns the first time you run the installer: "More info", then "Run anyway". Smart App
-  Control, when it is on, blocks unsigned programs outright.
-- Each MSI carries GitHub's build provenance instead. This checks that it was built by this repository's release
-  workflow, from the tagged commit:
+- Windows SmartScreen warns when you run a new version's installer: "More info", then "Run anyway". Smart App
+  Control, when it is on, blocks unsigned programs outright, with no way to run them.
+- Instead, GitHub holds a build provenance attestation for each MSI. With the GitHub CLI signed in, this checks
+  that the file was built by this repository's release workflow from that version's tag:
 
   ```
-  gh attestation verify clip-recorder-<version>-x64.msi -R NotDjz/Clip_Recorder
+  gh attestation verify clip-recorder-<version>-x64.msi -R NotDjz/Clip_Recorder --source-ref refs/tags/v<version>
   ```
 
 The MSI installs `clip-recorder.exe`, built from this repository, and `ffmpeg.exe`, an unmodified, hash-pinned build
