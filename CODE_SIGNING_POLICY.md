@@ -12,8 +12,7 @@ approves it.
 
 ## Signing
 
-Releases are not signed yet: SignPath Foundation, which signs open-source projects for free, will be asked again
-once this one is better known. Until then:
+Releases are not signed yet, so:
 
 - Windows SmartScreen warns when you run a new version's installer: "More info", then "Run anyway". Smart App
   Control, when it is on, blocks unsigned programs outright, with no way to run them.

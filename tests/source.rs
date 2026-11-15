@@ -215,31 +215,20 @@ fn the_session_handler_leaves_through_main() {
 }
 
 /// The code signing policy (team roles, privacy statement, linked from the home and download
-/// pages, an installer that announces start with Windows) is what SignPath Foundation asks for,
-/// kept for a new application. The policy, README and download page may say the releases are
-/// signed only while release.yml signs them, and then the policy carries SignPath's exact
-/// attribution: SignPath refused the first application, and the policy went on claiming it.
+/// pages, an installer that announces start with Windows). The policy, README and download page
+/// say "not signed yet" exactly while release.yml has no signing step: the policy once claimed a
+/// signature the releases never had.
 #[test]
 fn the_code_signing_policy_claims_only_what_the_release_does() {
     let policy = read("CODE_SIGNING_POLICY.md");
     let release = code(".github/workflows/release.yml", "#");
-    let signs = release.contains("signpath/github-action-submit-signing-request") || release.contains("signtool");
+    let signs = release.contains("signtool") || release.contains("trusted-signing");
     for doc in ["CODE_SIGNING_POLICY.md", "README.md", "docs/index.html"] {
         let unsigned = read(doc).to_lowercase().contains("not signed yet");
         assert_eq!(
             unsigned, !signs,
             "{doc} says \"not signed yet\" = {unsigned}, release.yml signs = {signs}"
         );
-    }
-    assert_eq!(
-        policy.contains("SignPath.io"),
-        signs,
-        "SignPath in the policy without a signing step, or the reverse"
-    );
-    if signs {
-        assert!(policy.contains(
-            "Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org)"
-        ));
     }
     for required in [
         "Committers and reviewers:",
