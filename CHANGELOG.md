@@ -2,6 +2,20 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.0.3] - 2026-11-15
+
+### Features
+
+- Check for updates from the tray menu and Settings
+
+### Fixes
+
+- Make the update link reachable and point it at every release
+
+### Documentation
+
+- Point the download page at v2.0.2
+
 ## [2.0.2] - 2026-11-15
 
 ### Features
