@@ -176,10 +176,14 @@ fn on_action(action: Action) {
                 open(&folder.to_string_lossy());
             }
         }
+        Action::Updates => open(RELEASES),
         Action::Save => save_clip(),
         Action::Settings => open_settings(),
     }
 }
+
+/// "Check for updates" opens this in the browser; the app itself makes no network connection.
+const RELEASES: &str = "https://github.com/NotDjz/Clip_Recorder/releases/latest";
 
 /// The configured hotkey, else Ctrl+Alt+R. config.json is never written here: a hotkey that
 /// failed to register must stay "changed" for Settings, or the user could never retry it.
@@ -217,6 +221,7 @@ fn open_settings() {
             };
             w.on_save(apply_settings);
             w.on_browse(browse_folder);
+            w.on_check_updates(|| open(RELEASES));
             w.on_key_combination(|text, ctrl, alt, shift| {
                 hotkey::format(ctrl, alt, shift, &settings_window::key_name(&text))
                     .unwrap_or_default()

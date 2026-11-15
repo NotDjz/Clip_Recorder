@@ -9,15 +9,21 @@ pub enum Action {
     Save,
     Settings,
     OpenFolder,
+    Updates,
     Quit,
 }
 
-const IDS: [(&str, Action); 4] = [
+const IDS: [(&str, Action); 5] = [
     ("save", Action::Save),
     ("settings", Action::Settings),
     ("folder", Action::OpenFolder),
+    ("updates", Action::Updates),
     ("quit", Action::Quit),
 ];
+
+fn action(id: &str) -> Option<Action> {
+    IDS.iter().find(|(i, _)| *i == id).map(|&(_, a)| a)
+}
 
 pub struct Tray {
     _icon: TrayIcon,
@@ -34,12 +40,13 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("settings", "Settings", true, None),
             &MenuItem::with_id("folder", "Open folder", true, None),
+            &MenuItem::with_id("updates", "Check for updates", true, None),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("quit", "Quit", true, None),
         ])
         .map_err(|e| e.to_string())?;
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if let Some(&(_, action)) = IDS.iter().find(|(id, _)| event.id.as_ref() == *id) {
+            if let Some(action) = action(event.id.as_ref()) {
                 let _ = slint::invoke_from_event_loop(move || handle(action));
             }
         }));
@@ -61,4 +68,16 @@ impl Tray {
 
 fn save_label(hotkey: &str) -> String {
     format!("Save clip ({hotkey})")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_menu_id_reaches_its_action() {
+        assert_eq!(action("updates"), Some(Action::Updates));
+        assert_eq!(action("quit"), Some(Action::Quit));
+        assert_eq!(action("nothing"), None);
+    }
 }

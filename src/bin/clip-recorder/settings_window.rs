@@ -111,9 +111,12 @@ slint::slint! {
         in property <bool> startup-available;
         in-out property <string> problem;
         in-out property <bool> capturing;
+        in property <string> version;
 
         callback browse();
         callback save();
+        // Opens the releases page in the browser: the app itself connects to nothing.
+        callback check-updates();
         // The combination as config.json writes it, or "" if it would not register.
         callback key-combination(string, bool, bool, bool) -> string;
 
@@ -252,6 +255,25 @@ slint::slint! {
                 HorizontalLayout {
                     AccentButton { text: "Save changes"; clicked => { save(); } }
                     Rectangle {}
+                    // Small, and out of the Tab order so Save stays the last control: the tray
+                    // menu has the same entry for the keyboard.
+                    HorizontalLayout {
+                        spacing: 6px;
+                        Unit { text: version; font-size: 11px; }
+                        Unit { text: "·"; font-size: 11px; }
+                        Unit {
+                            text: "Check for updates";
+                            font-size: 11px;
+                            color: link.has-hover ? Ink.fg : Ink.fg2;
+                            accessible-role: button;
+                            accessible-label: self.text;
+                            accessible-action-default => { check-updates(); }
+                            link := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { check-updates(); }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -321,6 +343,7 @@ pub fn fill(
     w.set_startup_available(startup.is_some());
     w.set_startup(startup.unwrap_or(false));
     w.set_problem("".into());
+    w.set_version(concat!("v", env!("CARGO_PKG_VERSION")).into());
 }
 
 fn picked(model: ModelRc<SharedString>, index: i32) -> String {
@@ -591,6 +614,24 @@ mod tests {
             .unwrap();
         save.mock_single_click(slint::platform::PointerEventButton::Left);
         assert_eq!(saved.get(), 1, "the first click did not save");
+    }
+
+    /// The app connects to nothing: the link shows the running version and asks main to open the
+    /// releases page in the browser.
+    #[test]
+    fn the_update_link_shows_the_version_and_opens_the_releases() {
+        i_slint_backend_testing::init_no_event_loop();
+        let w = window(&Config::default());
+        w.show().unwrap();
+        assert_eq!(w.get_version().as_str(), concat!("v", env!("CARGO_PKG_VERSION")));
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let a = asked.clone();
+        w.on_check_updates(move || a.set(a.get() + 1));
+        ElementHandle::find_by_accessible_label(&w, "Check for updates")
+            .next()
+            .expect("update link")
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+        assert_eq!(asked.get(), 1);
     }
 
     #[test]
