@@ -211,10 +211,14 @@ fn path(p: &Path) -> String {
 
 /// Joins the snapshots without re-encoding. No -ss, not even 0: with B-frames each segment's
 /// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
-pub fn concat_args(list: &Path, duration: f64, out: &Path) -> Vec<String> {
+/// `is_clip`: it writes the clip itself (no audio), which alone is worth +faststart's rewrite.
+pub fn concat_args(list: &Path, duration: f64, out: &Path, is_clip: bool) -> Vec<String> {
     let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
     a.extend([path(list), "-t".into(), duration.to_string()]);
-    a.extend(["-c", "copy", "-movflags", "+faststart"].map(String::from));
+    a.extend(["-c", "copy"].map(String::from));
+    if is_clip {
+        a.extend(["-movflags", "+faststart"].map(String::from));
+    }
     a.push(path(out));
     a
 }
@@ -267,9 +271,28 @@ mod tests {
     use super::*;
     use crate::config::{BUFFER_OPTIONS, FPS_OPTIONS};
 
+    /// +faststart rewrites the whole file to move its index first: worth it for the clip, wasted
+    /// on the video the mux reads next (up to 4 GB written twice).
+    #[test]
+    fn only_the_clip_is_rewritten_for_fast_start() {
+        let fast = |a: Vec<String>| a.contains(&"+faststart".to_string());
+        assert!(fast(concat_args(Path::new("l.txt"), 3.0, Path::new("clip.mp4"), true)));
+        assert!(!fast(concat_args(
+            Path::new("l.txt"),
+            3.0,
+            Path::new("video.mp4"),
+            false
+        )));
+        assert!(fast(mux_args(
+            Path::new("v.mp4"),
+            Path::new("a.wav"),
+            Path::new("clip.mp4")
+        )));
+    }
+
     #[test]
     fn the_concat_never_seeks_and_cuts_at_the_selected_duration() {
-        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"));
+        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"), true);
         assert!(!a.contains(&"-ss".to_string()), "{a:?}");
         assert_eq!(value(&a, "-t"), Some("15.25"));
         assert_eq!(value(&a, "-c"), Some("copy"));

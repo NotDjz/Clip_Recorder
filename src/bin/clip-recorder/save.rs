@@ -238,7 +238,10 @@ impl Job {
         };
         // Two saves in the same second share the output name: only the run whose ffmpeg
         // actually wrote it may judge or delete it.
-        let concat = self.ffmpeg("concat", &ffmpeg_cmd::concat_args(&self.list, self.duration, &video));
+        let concat = self.ffmpeg(
+            "concat",
+            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, !has_audio),
+        );
         let mut mux = None;
         let mut temp = vec![self.list.clone()];
         if has_audio && concat == Some(true) {
@@ -684,6 +687,7 @@ mod tests {
             );
             let clip = std::fs::read_to_string(&output).unwrap();
             assert!(clip.contains(expected), "loopback={loopback} mic={mic}: {clip}");
+            assert!(clip.contains("+faststart"), "the clip itself is fast-started: {clip}");
             assert_eq!(leftovers(&dir), Vec::<String>::new(), "temporary files left behind");
             let _ = std::fs::remove_dir_all(&dir);
         }
