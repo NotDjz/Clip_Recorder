@@ -62,6 +62,17 @@ impl App {
         self.banner
             .show(state, text, seconds, duration_ms, self.screens[index].rect);
     }
+
+    /// Starts the capture, or restarts its video, on the screens plugged in now: read once at
+    /// launch, an unplugged screen was restarted on every 3 s until the app was.
+    fn start_capture(&mut self, restart: bool) {
+        self.screens = monitors::list();
+        if restart {
+            self.capture.restart_video(&self.config, &self.screens);
+        } else {
+            self.capture.start(&self.config, &self.screens);
+        }
+    }
 }
 
 fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
@@ -89,9 +100,8 @@ fn main() {
         return;
     }
     let config = Config::load(&paths::config_file());
-    let screens = monitors::list();
     session::listen(open_settings);
-    let mut capture = match Capture::new(ffmpeg.clone()) {
+    let capture = match Capture::new(ffmpeg.clone()) {
         Ok(capture) => capture,
         Err(e) => {
             log(&format!("capture folder not created: {e}"));
@@ -105,7 +115,6 @@ fn main() {
             return;
         }
     };
-    capture.start(&config, &screens);
     let mut audio = audio::Audio::new(&config.loopback_device, &config.mic_device);
     audio.start();
     let hotkey = register_hotkey(&config.hotkey, &tray);
@@ -113,7 +122,7 @@ fn main() {
     slint::Timer::single_shot(Duration::from_secs(30), || {
         with_app(|app| {
             if app.capture.reprobe() {
-                app.capture.restart_video(&app.config, &app.screens);
+                app.start_capture(true);
             }
         });
     });
@@ -123,7 +132,7 @@ fn main() {
     APP.with(|app| {
         *app.borrow_mut() = Some(App {
             config,
-            screens,
+            screens: monitors::list(),
             capture,
             audio,
             ffmpeg,
@@ -134,6 +143,7 @@ fn main() {
             _health: health,
         })
     });
+    with_app(|app| app.start_capture(false));
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
@@ -153,7 +163,7 @@ fn check_health() {
     if with_app(|app| app.capture.has_died()).unwrap_or(false) {
         log("capture ffmpeg died: restarting it");
         slint::Timer::single_shot(Duration::from_secs(1), || {
-            with_app(|app| app.capture.start(&app.config, &app.screens));
+            with_app(|app| app.start_capture(false));
         });
     }
     with_app(|app| {
@@ -230,6 +240,7 @@ fn open_settings() {
             });
             app.settings = Some(w);
         }
+        app.screens = monitors::list();
         let w = app.settings.as_ref().expect("just made");
         let hw = settings_window::Hardware {
             encoder: app.capture.encoder(),
@@ -305,7 +316,7 @@ fn apply_settings() {
             app.audio.reload(&app.config.loopback_device, &app.config.mic_device);
         }
         if changes.video {
-            app.capture.restart_video(&app.config, &app.screens);
+            app.start_capture(true);
         }
         // Re-pointed whenever it is ticked: an older install's path would start nothing.
         let startup =
