@@ -18,8 +18,16 @@ use std::time::{Duration, Instant};
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Seconds of footage saved, or why not.
-pub type Outcome = Result<u32, GiveUp>;
+/// A clip that came out: its length, and whether it carries the game sound (a dead or silent
+/// loopback once downgraded 7 saves in 15 to mic only, each announced as a normal save).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Saved {
+    pub seconds: u32,
+    pub game_sound: bool,
+}
+
+/// What was saved, or why not.
+pub type Outcome = Result<Saved, GiveUp>;
 
 /// Starts a save. `done` runs on the UI thread once, whatever happens.
 pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, folder: &Path, done: fn(Outcome)) {
@@ -263,7 +271,11 @@ impl Job {
             self.started.elapsed().as_secs_f64()
         ));
         if saved {
-            Ok(self.duration.round() as u32)
+            // A failed mix still muxes the loopback, so the loopback WAV alone decides.
+            Ok(Saved {
+                seconds: self.duration.round() as u32,
+                game_sound: self.loopback.is_some(),
+            })
         } else {
             Err(GiveUp::Error)
         }
@@ -662,7 +674,14 @@ mod tests {
             (false, true, "mic_t.wav"),
         ] {
             let (outcome, output, dir) = run_with("ffmpeg", loopback, mic);
-            assert_eq!(outcome, Ok(3), "loopback={loopback} mic={mic}");
+            assert_eq!(
+                outcome,
+                Ok(Saved {
+                    seconds: 3,
+                    game_sound: loopback
+                }),
+                "loopback={loopback} mic={mic}"
+            );
             let clip = std::fs::read_to_string(&output).unwrap();
             assert!(clip.contains(expected), "loopback={loopback} mic={mic}: {clip}");
             assert_eq!(leftovers(&dir), Vec::<String>::new(), "temporary files left behind");
@@ -673,7 +692,13 @@ mod tests {
     #[test]
     fn a_failed_mix_still_saves_the_clip_with_the_game_sound() {
         let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true);
-        assert_eq!(outcome, Ok(3));
+        assert_eq!(
+            outcome,
+            Ok(Saved {
+                seconds: 3,
+                game_sound: true
+            })
+        );
         let clip = std::fs::read_to_string(&output).unwrap();
         assert!(
             clip.contains("loopback_t.wav") && !clip.contains("mixed_t.wav"),

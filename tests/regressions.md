@@ -84,3 +84,4 @@ machine, CI included.
 | R73 | Merges of master into a branch (conventional commits too) were listed in the release notes | `release_notes_are_the_changelog_section` |
 | R74 | The MSI lifecycle test in a single step lost the CI runner 3 runs in 4 (no log); one step per phase passed 5 runs in 5 | `every_msi_goes_through_its_lifecycle_test` |
 | R75 | The code signing policy said SignPath signed the releases, which were unsigned (application refused) | `the_code_signing_policy_claims_only_what_the_release_does` |
+| R76 | A clip without the game sound (dead, stalled or silent loopback) was announced "Clip saved" like any other: 7 saves in 15 | `every_end_of_a_save_is_heard_and_seen`, `a_save_muxes_the_right_audio_and_cleans_up_after_itself` |

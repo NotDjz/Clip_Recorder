@@ -353,10 +353,14 @@ fn feedback(event: SaveEvent) -> Feedback {
             Some(buffer_seconds),
             banner::SAVING_MS,
         ),
-        SaveEvent::Ended(Ok(seconds)) => (
+        SaveEvent::Ended(Ok(save::Saved { seconds, game_sound })) => (
             Chime::Saved,
             banner::State::Saved,
-            "Clip saved",
+            if game_sound {
+                "Clip saved"
+            } else {
+                "Clip saved, no game sound"
+            },
             Some(seconds),
             banner::HOLD_MS,
         ),
@@ -457,11 +461,24 @@ mod tests {
             (pressed.chime, pressed.state, pressed.seconds),
             (Chime::Start, banner::State::Saving, Some(30))
         );
-        let saved = feedback(SaveEvent::Ended(Ok(31)));
+        let saved = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: true,
+        })));
         assert_eq!(
             (saved.chime, saved.state, saved.seconds),
             (Chime::Saved, banner::State::Saved, Some(31))
         );
+        // 7 saves in 15 lost the game sound and said "Clip saved" all the same.
+        let mute = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: false,
+        })));
+        assert_eq!(
+            (mute.chime, mute.state, mute.seconds),
+            (Chime::Saved, banner::State::Saved, Some(31))
+        );
+        assert_ne!(mute.text, saved.text, "a clip without game sound must say so");
         let soon = feedback(SaveEvent::Ended(Err(GiveUp::TooSoon)));
         let lost = feedback(SaveEvent::Ended(Err(GiveUp::Error)));
         for f in [&soon, &lost] {
