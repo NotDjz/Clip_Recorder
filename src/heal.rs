@@ -4,9 +4,13 @@
 //! game audio that way in one real log. A dead stream is reopened, with a wait that doubles on
 //! every reopen, so one that opens and dies at once backs off too, and after MAX_REOPENS it is
 //! left alone (a gone device must not flood the capped log). Only a stream that delivers resets
-//! it. An open stream with no frame yet is never reopened: that is just silence.
+//! it. An open stream with no frame yet is never reopened: that is just silence. One that has
+//! delivered and then nothing for STALL_S is stalled (seen: 3.7 h "alive" with no data), and is
+//! reopened like a dead one.
 
 pub const MAX_REOPENS: u32 = 6;
+/// Seconds without a chunk, after the stream has delivered, that count as a stall.
+pub const STALL_S: f64 = 10.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Decision {
@@ -24,12 +28,13 @@ pub struct Retry {
 }
 
 impl Retry {
-    pub fn decide(&mut self, has_device: bool, alive: bool, frames: u64) -> Decision {
-        if !has_device || (alive && frames > 0) {
+    /// `frames` delivered since the stream opened; `idle_s` since its newest chunk.
+    pub fn decide(&mut self, has_device: bool, alive: bool, frames: u64, idle_s: f64) -> Decision {
+        if !has_device || (alive && frames > 0 && idle_s < STALL_S) {
             *self = Retry::default();
             return Decision::Keep;
         }
-        if alive {
+        if alive && frames == 0 {
             return Decision::Keep; // open, nothing delivered yet: silence
         }
         if self.wait > 0 {
@@ -72,9 +77,13 @@ mod tests {
     #[test]
     fn silence_after_a_reopen_does_not_reset_the_backoff() {
         let mut r = Retry::default();
-        assert_eq!(r.decide(true, false, 0), Decision::Reopen);
-        assert_eq!(r.decide(true, true, 0), Decision::Keep, "open and silent");
-        assert_eq!(r.decide(true, false, 0), Decision::Keep, "dead again: still waiting");
+        assert_eq!(r.decide(true, false, 0, 0.0), Decision::Reopen);
+        assert_eq!(r.decide(true, true, 0, 0.0), Decision::Keep, "open and silent");
+        assert_eq!(
+            r.decide(true, false, 0, 0.0),
+            Decision::Keep,
+            "dead again: still waiting"
+        );
     }
 
     #[test]
@@ -115,9 +124,13 @@ mod tests {
     fn a_stream_that_dies_late_is_reopened_at_once() {
         let mut r = Retry::default();
         for _ in 0..20 {
-            assert_eq!(r.decide(true, true, 1000), Decision::Keep);
+            assert_eq!(r.decide(true, true, 1000, 0.0), Decision::Keep);
         }
-        assert_eq!(r.decide(true, false, 1000), Decision::Reopen, "a late death waited");
+        assert_eq!(
+            r.decide(true, false, 1000, 0.0),
+            Decision::Reopen,
+            "a late death waited"
+        );
     }
 
     #[test]
@@ -125,7 +138,7 @@ mod tests {
         let mut r = Retry::default();
         for _ in 0..100 {
             assert_eq!(
-                r.decide(true, true, 0),
+                r.decide(true, true, 0, 0.0),
                 Decision::Keep,
                 "silence was taken for a dead stream"
             );
@@ -134,7 +147,7 @@ mod tests {
 
     #[test]
     fn no_device_means_nothing_to_heal() {
-        assert_eq!(Retry::default().decide(false, false, 0), Decision::Keep);
+        assert_eq!(Retry::default().decide(false, false, 0, 0.0), Decision::Keep);
     }
 
     #[test]
@@ -143,7 +156,7 @@ mod tests {
         let mut reopened = Vec::new();
         let mut gave_up = Vec::new();
         for tick in 1..=300 {
-            match r.decide(true, false, 0) {
+            match r.decide(true, false, 0, 0.0) {
                 Decision::Reopen => reopened.push(tick),
                 Decision::GiveUp => gave_up.push(tick),
                 Decision::Keep => {}
@@ -157,12 +170,35 @@ mod tests {
     #[test]
     fn a_stream_that_delivers_resets_the_backoff() {
         let mut r = Retry::default();
-        assert_eq!(r.decide(true, false, 0), Decision::Reopen);
-        assert_eq!(r.decide(true, true, 500), Decision::Keep); // the reopen worked
+        assert_eq!(r.decide(true, false, 0, 0.0), Decision::Reopen);
+        assert_eq!(r.decide(true, true, 500, 0.0), Decision::Keep); // the reopen worked
         assert_eq!(
-            r.decide(true, false, 500),
+            r.decide(true, false, 500, 0.0),
             Decision::Reopen,
             "the next death waited for an old backoff"
         );
+    }
+
+    /// 2026-11-14: a loopback delivered 10.6 s after a reopen, then nothing for 3.7 h while
+    /// still "alive", and two clips lost the game sound. A stream that has delivered and then
+    /// goes quiet for STALL_S is reopened like a dead one.
+    #[test]
+    fn a_loopback_that_stops_delivering_is_reopened() {
+        let mut r = Retry::default();
+        assert_eq!(r.decide(true, true, 507_360, 0.0), Decision::Keep);
+        assert_eq!(
+            r.decide(true, true, 507_360, 13_258.6),
+            Decision::Reopen,
+            "stalled for hours"
+        );
+    }
+
+    #[test]
+    fn a_short_quiet_moment_is_not_a_stall() {
+        let mut r = Retry::default();
+        assert_eq!(r.decide(true, true, 1000, STALL_S - 0.1), Decision::Keep);
+        assert_eq!(r.decide(true, true, 1000, STALL_S), Decision::Reopen);
+        // Just reopened: nothing delivered yet, whatever the old history says, is silence.
+        assert_eq!(r.decide(true, true, 0, 13_000.0), Decision::Keep);
     }
 }

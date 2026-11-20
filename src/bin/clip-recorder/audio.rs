@@ -206,12 +206,20 @@ impl Side {
     /// One health tick: reopen a dead stream, with this side's own backoff.
     fn heal(&mut self) {
         let frames = self.frames.load(Ordering::Relaxed);
-        match self.retry.decide(self.device.is_some(), self.alive(), frames) {
+        let newest = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .back()
+            .map(|(t, _)| *t);
+        let idle = newest.map_or(f64::INFINITY, |t| clock::now() - t);
+        match self.retry.decide(self.device.is_some(), self.alive(), frames, idle) {
             Decision::Keep => {}
             Decision::Reopen => {
                 log(&format!(
-                    "{} stream not alive (frames={frames}), reopening",
-                    self.kind.label()
+                    "{} stream {} (frames={frames}, idle={idle:.1}s), reopening",
+                    self.kind.label(),
+                    if self.alive() { "stalled" } else { "not alive" }
                 ));
                 let (format, had) = ((self.rate, self.channels), self.device.take());
                 let (configured, default) = self.candidates();
