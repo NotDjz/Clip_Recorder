@@ -59,18 +59,8 @@ fn works(ffmpeg: &Path, input: &str, encoder: &str) -> bool {
         .stderr(Stdio::null())
         .spawn();
     let Ok(mut child) = child else { return false };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        }
-    }
+    crate::winutil::wait_or_kill(&mut child, Duration::from_secs(10), Duration::from_millis(20))
+        .is_some_and(|s| s.success())
 }
 
 /// DXGI capture straight into NVENC when both work. ddagrab hands over GPU frames, which x264

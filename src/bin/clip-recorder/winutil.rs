@@ -37,6 +37,27 @@ pub fn copy_new(from: &std::path::Path, to: &std::path::Path) -> std::io::Result
     Ok(())
 }
 
+/// Waits for `child` up to `timeout`, checking every `poll`; past it, kills it and returns None.
+/// One rule for every short ffmpeg (the pipeline probes, a save's steps), so none can hang.
+pub fn wait_or_kill(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+    poll: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(poll),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,6 +88,37 @@ mod tests {
         assert_eq!(copy_new(&a, &b).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "segment");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn wait_or_kill_returns_the_status_or_kills_on_timeout() {
+        use std::time::{Duration, Instant};
+        let mut quick = std::process::Command::new("cmd")
+            .args(["/c", "exit 3"])
+            .spawn()
+            .unwrap();
+        let status = wait_or_kill(&mut quick, Duration::from_secs(10), Duration::from_millis(10));
+        assert_eq!(status.and_then(|s| s.code()), Some(3));
+        let mut slow = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = slow.id();
+        let start = Instant::now();
+        assert_eq!(
+            wait_or_kill(&mut slow, Duration::from_millis(200), Duration::from_millis(10)),
+            None
+        );
+        assert!(start.elapsed() < Duration::from_secs(5), "waited past the timeout");
+        let listed = std::process::Command::new("tasklist")
+            .args(["/fi", &format!("PID eq {pid}"), "/nh"])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains("PING"),
+            "the timed-out process is still running"
+        );
     }
 
     #[test]

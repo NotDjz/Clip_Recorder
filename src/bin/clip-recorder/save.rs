@@ -44,10 +44,7 @@ pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32,
             return None;
         }
         log(&format!("[{id}] {}", audio.describe(kind)));
-        let path = dir.join(format!(
-            "{}_{id}.wav",
-            if kind == Kind::Loopback { "loopback" } else { "mic" }
-        ));
+        let path = dir.join(format!("{}_{id}.wav", kind.label()));
         let ok = audio.save_wav(kind, &path, end, duration);
         log(&format!("[{id}] save_wav({kind:?}) ok={ok}"));
         ok.then_some(path)
@@ -306,18 +303,7 @@ impl Job {
             }
             text
         });
-        let deadline = Instant::now() + FFMPEG_TIMEOUT;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
+        let status = crate::winutil::wait_or_kill(&mut child, FFMPEG_TIMEOUT, Duration::from_millis(50));
         let text = reader.join().unwrap_or_default();
         let ok = status.is_some_and(|s| s.success());
         if ok {

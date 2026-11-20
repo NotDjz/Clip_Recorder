@@ -25,7 +25,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Kind::Loopback => "loopback",
             Kind::Mic => "mic",
