@@ -1,12 +1,6 @@
-build/
-dist/
 __pycache__/
-*.spec
 config.json
 clip_recorder.log
-ffmpeg.exe
-icon.ico
-Clips/
 .claude/
 CONTEXT.md
 
