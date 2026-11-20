@@ -35,13 +35,38 @@ pub enum Encoder {
     X264,
 }
 
+/// What one capture reads: a DXGI output, by its index on the first graphics adapter (as ddagrab
+/// counts them), or the GDI desktop at a screen's rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Source {
+    Ddagrab { output: usize },
+    Gdigrab(Monitor),
+}
+
+impl Source {
+    pub fn grabber(&self) -> Grabber {
+        match self {
+            Source::Ddagrab { .. } => Grabber::Ddagrab,
+            Source::Gdigrab(_) => Grabber::Gdigrab,
+        }
+    }
+}
+
+/// ddagrab on the DXGI output whose rectangle is `screen`'s, else GDI on that rectangle.
+/// `dxgi_outputs` are the first adapter's, in DXGI's order: Settings' order (primary first, left
+/// to right) only matched it by luck, and a screen on another adapter is not in it at all.
+pub fn source(grabber: Grabber, dxgi_outputs: &[Monitor], screen: Monitor) -> Source {
+    match dxgi_outputs.iter().position(|o| *o == screen) {
+        Some(output) if grabber == Grabber::Ddagrab => Source::Ddagrab { output },
+        _ => Source::Gdigrab(screen),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Capture<'a> {
     pub fps: u32,
     pub buffer_seconds: u32,
-    pub monitor_index: usize,
-    pub monitor: Monitor,
-    pub grabber: Grabber,
+    pub source: Source,
     pub encoder: Encoder,
     pub segment_dir: &'a Path,
 }
@@ -88,20 +113,19 @@ pub fn is_capture_file(name: &str) -> bool {
 }
 
 pub fn capture_args(c: &Capture) -> Vec<String> {
-    let rate = effective_fps(c.fps, c.grabber);
+    let rate = effective_fps(c.fps, c.source.grabber());
     let keyframes = (rate * SEGMENT_DURATION).to_string();
     let fps = rate.to_string();
     let wrap = segment_wrap(c.buffer_seconds).to_string();
-    let m = c.monitor;
     let mut a: Vec<String> = vec!["-y".into(), "-debug_ts".into()];
-    match c.grabber {
-        Grabber::Ddagrab => a.extend([
+    match c.source {
+        Source::Ddagrab { output } => a.extend([
             "-f".into(),
             "lavfi".into(),
             "-i".into(),
-            format!("ddagrab=framerate={fps}:output_idx={}:draw_mouse=0", c.monitor_index),
+            format!("ddagrab=framerate={fps}:output_idx={output}:draw_mouse=0"),
         ]),
-        Grabber::Gdigrab => a.extend([
+        Source::Gdigrab(m) => a.extend([
             "-f".into(),
             "gdigrab".into(),
             "-framerate".into(),
@@ -288,13 +312,12 @@ mod tests {
         h: 1440,
     };
 
+    /// The capture of SECOND, DXGI's output 1 when ddagrab captures it.
     fn args(fps: u32, grabber: Grabber, encoder: Encoder) -> Vec<String> {
         capture_args(&Capture {
             fps,
             buffer_seconds: 30,
-            monitor_index: 1,
-            monitor: SECOND,
-            grabber,
+            source: source(grabber, &[PRIMARY, SECOND], SECOND),
             encoder,
             segment_dir: Path::new(r"C:\tmp\cliprec_x"),
         })
@@ -430,7 +453,42 @@ mod tests {
             (Some("1920"), Some("0"), Some("2560x1440"))
         );
         assert_eq!(value(&a, "-i"), Some("desktop"));
-        let _ = PRIMARY;
+    }
+
+    /// ddagrab counts the outputs of the first graphics adapter in DXGI's own order, which is not
+    /// Settings' (primary first, then left to right): the screen is found by its rectangle.
+    #[test]
+    fn ddagrab_captures_the_output_whose_rectangle_is_the_screen() {
+        let left = Monitor {
+            x: -1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let outputs = [PRIMARY, left, SECOND];
+        assert_eq!(
+            source(Grabber::Ddagrab, &outputs, SECOND),
+            Source::Ddagrab { output: 2 }
+        );
+        assert_eq!(
+            source(Grabber::Ddagrab, &outputs, PRIMARY),
+            Source::Ddagrab { output: 0 }
+        );
+    }
+
+    /// A screen on another adapter, or no DXGI list at all, is captured through GDI rather than
+    /// a ddagrab that would capture another screen or fail on every restart.
+    #[test]
+    fn a_screen_ddagrab_cannot_reach_is_captured_through_gdi() {
+        assert_eq!(source(Grabber::Ddagrab, &[PRIMARY], SECOND), Source::Gdigrab(SECOND));
+        assert_eq!(source(Grabber::Ddagrab, &[], PRIMARY), Source::Gdigrab(PRIMARY));
+        assert_eq!(
+            source(Grabber::Gdigrab, &[PRIMARY, SECOND], SECOND),
+            Source::Gdigrab(SECOND),
+            "no DXGI pipeline"
+        );
+        assert_eq!(Source::Gdigrab(SECOND).grabber(), Grabber::Gdigrab);
+        assert_eq!(Source::Ddagrab { output: 0 }.grabber(), Grabber::Ddagrab);
     }
 
     #[test]

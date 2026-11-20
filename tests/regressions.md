@@ -88,3 +88,4 @@ machine, CI included.
 | R77 | A loopback that stopped delivering while still "alive" was never reopened: 3.7 h without game sound, two clips mic-only | `a_loopback_that_stops_delivering_is_reopened`, `a_short_quiet_moment_is_not_a_stall` |
 | R78 | A device plugged in after launch (a USB or Bluetooth headset at sign-in) was never picked up: the whole session without its sound | `a_side_without_a_device_looks_again_every_30_s` |
 | R79 | The screens were read once at launch: an unplugged screen had ffmpeg restarted on it every 3 s until the app was restarted | `the_screens_are_read_again_before_each_restart` |
+| R80 | ddagrab picked its screen by its position in Settings' list (primary first, left to right), not by DXGI's own order: possibly the wrong screen with 3, a restart loop for one on a second adapter | `ddagrab_captures_the_output_whose_rectangle_is_the_screen`, `a_screen_ddagrab_cannot_reach_is_captured_through_gdi` |

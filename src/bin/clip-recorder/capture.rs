@@ -205,12 +205,11 @@ impl Capture {
         // cut mid-write) with the new one put the restart gap inside a clip.
         self.wipe_segments();
         let index = config.monitor.min(screens.len().saturating_sub(1));
+        let source = ffmpeg_cmd::source(self.grabber, &crate::monitors::dxgi_outputs(), screens[index].rect);
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
             fps: config.fps,
             buffer_seconds: config.buffer_seconds,
-            monitor_index: index,
-            monitor: screens[index].rect,
-            grabber: self.grabber,
+            source,
             encoder: self.encoder,
             segment_dir: &self.segment_dir,
         });
@@ -220,9 +219,9 @@ impl Capture {
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
                 log(&format!(
-                    "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}",
+                    "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index} source={source:?}",
                     crate::job::contains(crate::job::handle(), &running.child),
-                    ffmpeg_cmd::effective_fps(config.fps, self.grabber),
+                    ffmpeg_cmd::effective_fps(config.fps, source.grabber()),
                     config.buffer_seconds
                 ));
                 self.running = Some(running);

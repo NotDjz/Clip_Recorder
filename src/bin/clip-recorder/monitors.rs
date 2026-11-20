@@ -37,6 +37,31 @@ unsafe extern "system" fn visit(handle: HMONITOR, _dc: HDC, _rect: *mut RECT, da
     1
 }
 
+/// The first graphics adapter's outputs, in DXGI's order: what ddagrab's output_idx counts (its
+/// D3D11 device is made on the default adapter). Empty if DXGI cannot be asked: GDI then.
+pub fn dxgi_outputs() -> Vec<Monitor> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let outputs = || -> windows::core::Result<Vec<Monitor>> {
+        let adapter = unsafe { CreateDXGIFactory1::<IDXGIFactory1>()?.EnumAdapters1(0)? };
+        let mut found = Vec::new();
+        // EnumOutputs fails (DXGI_ERROR_NOT_FOUND) one past the last output.
+        while let Ok(output) = unsafe { adapter.EnumOutputs(found.len() as u32) } {
+            let r = unsafe { output.GetDesc()? }.DesktopCoordinates;
+            found.push(Monitor {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+            });
+        }
+        Ok(found)
+    };
+    outputs().unwrap_or_else(|e| {
+        crate::logging::log(&format!("DXGI outputs not listed ({e}): capturing through GDI"));
+        Vec::new()
+    })
+}
+
 pub fn list() -> Vec<Screen> {
     let mut screens: Vec<Screen> = Vec::new();
     unsafe {
@@ -57,4 +82,28 @@ pub fn list() -> Vec<Screen> {
         });
     }
     screens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs real screens: `cargo test -- --ignored --nocapture dxgi_outputs_on_this_machine`.
+    /// Every screen of Settings' list is either a DXGI output of the first adapter or captured
+    /// through GDI, and the mapping is printed to check by eye.
+    #[test]
+    #[ignore]
+    fn dxgi_outputs_on_this_machine() {
+        let outputs = dxgi_outputs();
+        println!("DXGI outputs (adapter 0): {outputs:?}");
+        for (i, s) in list().iter().enumerate() {
+            let source =
+                clip_recorder::ffmpeg_cmd::source(clip_recorder::ffmpeg_cmd::Grabber::Ddagrab, &outputs, s.rect);
+            println!(
+                "Settings {i}: {} {:?} primary={} -> {source:?}",
+                s.name, s.rect, s.primary
+            );
+        }
+        assert!(!outputs.is_empty(), "no DXGI output listed on a machine with a screen");
+    }
 }
