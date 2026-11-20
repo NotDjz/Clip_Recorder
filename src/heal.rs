@@ -11,6 +11,9 @@
 pub const MAX_REOPENS: u32 = 6;
 /// Seconds without a chunk, after the stream has delivered, that count as a stall.
 pub const STALL_S: f64 = 10.0;
+/// Ticks between two looks for a device when a side has none (30 s): one plugged in after
+/// launch is picked up, and looking costs only an enumeration.
+pub const DETECT_TICKS: u32 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Decision {
@@ -18,6 +21,8 @@ pub enum Decision {
     Reopen,
     /// Once, when the reopens run out: log it and leave the stream alone.
     GiveUp,
+    /// No device: look for one again.
+    Detect,
 }
 
 /// One stream's state. Never shared: a gone mic once held a dead loopback back.
@@ -25,12 +30,22 @@ pub enum Decision {
 pub struct Retry {
     wait: u32,
     reopens: u32,
+    /// Ticks spent without a device since the last look.
+    searching: u32,
 }
 
 impl Retry {
     /// `frames` delivered since the stream opened; `idle_s` since its newest chunk.
     pub fn decide(&mut self, has_device: bool, alive: bool, frames: u64, idle_s: f64) -> Decision {
-        if !has_device || (alive && frames > 0 && idle_s < STALL_S) {
+        if !has_device {
+            self.searching += 1;
+            if self.searching < DETECT_TICKS {
+                return Decision::Keep;
+            }
+            self.searching = 0;
+            return Decision::Detect;
+        }
+        if alive && frames > 0 && idle_s < STALL_S {
             *self = Retry::default();
             return Decision::Keep;
         }
@@ -146,8 +161,17 @@ mod tests {
     }
 
     #[test]
-    fn no_device_means_nothing_to_heal() {
-        assert_eq!(Retry::default().decide(false, false, 0, 0.0), Decision::Keep);
+    fn a_side_without_a_device_looks_again_every_30_s() {
+        // A headset plugged in after launch (Start with Windows) was never picked up.
+        let mut r = Retry::default();
+        let looked: Vec<u32> = (1..=45)
+            .filter(|_| r.decide(false, false, 0, f64::INFINITY) == Decision::Detect)
+            .collect();
+        assert_eq!(looked, [DETECT_TICKS, 2 * DETECT_TICKS, 3 * DETECT_TICKS]);
+        assert_eq!(DETECT_TICKS, 15, "every 30 s at one tick every 2 s");
+        // Found: the stream opens, delivers, and the side is healed like any other.
+        assert_eq!(r.decide(true, true, 100, 0.0), Decision::Keep);
+        assert_eq!(r.decide(true, false, 100, 0.0), Decision::Reopen);
     }
 
     #[test]
@@ -159,7 +183,7 @@ mod tests {
             match r.decide(true, false, 0, 0.0) {
                 Decision::Reopen => reopened.push(tick),
                 Decision::GiveUp => gave_up.push(tick),
-                Decision::Keep => {}
+                Decision::Keep | Decision::Detect => {}
             }
         }
         let gaps: Vec<u32> = reopened.windows(2).map(|w| w[1] - w[0]).collect();

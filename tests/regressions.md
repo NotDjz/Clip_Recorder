@@ -35,7 +35,7 @@ machine, CI included.
 | R24 | Audio placed by byte count: loopback and mic on different timelines | `a_silence_gap_stays_silent_where_it_really_was`, `contiguous_chunks_land_in_their_slots`, `stereo_frames_are_placed_as_frames` |
 | R25 | Window clipping and dead streams in the audio reconstruction | `the_window_clips_what_is_outside_it`, `a_dead_stream_gives_nothing`, `audio_outside_the_window_gives_nothing` |
 | R26 | A hole at every chunk boundary: crackling (38 discontinuities) | `jittered_arrivals_stay_contiguous` |
-| R27 | The audio heal gave up 9 s after start, or reopened every tick, or forever | `a_stream_that_dies_late_is_reopened_at_once`, `a_device_that_stays_gone_backs_off_then_is_left_alone`, `a_stream_that_delivers_resets_the_backoff`, `no_device_means_nothing_to_heal` |
+| R27 | The audio heal gave up 9 s after start, or reopened every tick, or forever | `a_stream_that_dies_late_is_reopened_at_once`, `a_device_that_stays_gone_backs_off_then_is_left_alone`, `a_stream_that_delivers_resets_the_backoff`, `a_side_without_a_device_looks_again_every_30_s` |
 | R28 | A silent but open stream was reopened and came back dead | `an_open_stream_with_no_frame_yet_is_left_alone` |
 | R29 | A capture restart loop stopped the audio heal | `the_health_tick_never_returns_before_healing_the_audio` |
 | R30 | A device missing at a reopen stopped the heal for good, or a pinned one was replaced by the default for good | `a_pinned_device_unplugged_is_waited_for_not_replaced`, `auto_follows_the_default_device` |
@@ -86,3 +86,4 @@ machine, CI included.
 | R75 | The code signing policy said SignPath signed the releases, which were unsigned (application refused) | `the_code_signing_policy_claims_only_what_the_release_does` |
 | R76 | A clip without the game sound (dead, stalled or silent loopback) was announced "Clip saved" like any other: 7 saves in 15 | `every_end_of_a_save_is_heard_and_seen`, `a_save_muxes_the_right_audio_and_cleans_up_after_itself` |
 | R77 | A loopback that stopped delivering while still "alive" was never reopened: 3.7 h without game sound, two clips mic-only | `a_loopback_that_stops_delivering_is_reopened`, `a_short_quiet_moment_is_not_a_stall` |
+| R78 | A device plugged in after launch (a USB or Bluetooth headset at sign-in) was never picked up: the whole session without its sound | `a_side_without_a_device_looks_again_every_30_s` |

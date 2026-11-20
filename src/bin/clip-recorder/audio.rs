@@ -234,6 +234,22 @@ impl Side {
                 self.kind.label(),
                 clip_recorder::heal::MAX_REOPENS
             )),
+            // Silent while nothing is found: a side with no device would otherwise log every 30 s.
+            Decision::Detect => {
+                let (configured, default) = self.candidates();
+                let Some(device) = configured.or(default) else { return };
+                let format = (self.rate, self.channels);
+                self.adopt(Some(device));
+                if !heal::keeps_history(format, (self.rate, self.channels)) {
+                    self.clear();
+                }
+                log(&format!(
+                    "{} device found after launch: {}",
+                    self.kind.label(),
+                    self.name
+                ));
+                self.open();
+            }
         }
     }
 
