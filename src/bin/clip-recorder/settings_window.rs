@@ -707,6 +707,9 @@ mod tests {
         };
         w.set_format(-1);
         assert_eq!(read(&w, &mkv, &shown()).format, ClipFormat::Mkv);
+        // Back to MP4 from an MKV config: picked, not taken from the config.
+        w.set_format(0);
+        assert_eq!(read(&w, &mkv, &shown()).format, ClipFormat::Mp4);
     }
 
     fn press(w: &SettingsWindow, keys: &[SharedString]) {
