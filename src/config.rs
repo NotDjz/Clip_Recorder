@@ -69,7 +69,7 @@ impl Config {
         };
         let monitor = match (number("monitor"), text("monitor")) {
             (Some(n), _) => MonitorChoice::Index(n as usize),
-            (None, Some(name)) if !name.trim().is_empty() => MonitorChoice::Device(name),
+            (None, Some(name)) if !name.trim().is_empty() => MonitorChoice::Device(name.trim().into()),
             _ => d.monitor.clone(),
         };
         Config {
@@ -141,6 +141,11 @@ mod tests {
             Config::parse(r#"{"monitor": ""}"#).monitor,
             MonitorChoice::Index(0),
             "empty: primary"
+        );
+        assert_eq!(
+            Config::parse(r#"{"monitor": " \\\\.\\DISPLAY2 "}"#).monitor,
+            MonitorChoice::Device(r"\\.\DISPLAY2".into()),
+            "hand-typed spaces: names are compared exactly"
         );
     }
 
