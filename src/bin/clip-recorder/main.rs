@@ -363,7 +363,7 @@ fn apply_settings() {
             log(&format!("config not saved: {e}"));
             problems.push(format!("Settings not saved: {e}"));
         }
-        log(&format!("settings saved: {changes:?}"));
+        log(&format!("settings saved: {changes:?} format={:?}", app.config.format));
         w.set_problem(problems.join("\n").into());
     });
 }
@@ -451,7 +451,10 @@ fn save_clip() {
             &app.audio,
             &app.ffmpeg,
             app.config.buffer_seconds,
-            &folder,
+            &save::Destination {
+                folder: &folder,
+                format: app.config.format,
+            },
             on_saved,
         );
     });

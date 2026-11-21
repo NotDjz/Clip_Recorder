@@ -2,7 +2,7 @@
 //! Save then restarts is decided in clip_recorder::settings and applied by main.rs.
 
 use crate::monitors::Screen;
-use clip_recorder::config::{BUFFER_OPTIONS, Config, MonitorChoice};
+use clip_recorder::config::{BUFFER_OPTIONS, ClipFormat, Config, MonitorChoice};
 use clip_recorder::ffmpeg_cmd::{Encoder, Grabber};
 use clip_recorder::settings::{device_at, device_choices, fps_choices, index_of};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -155,6 +155,8 @@ slint::slint! {
         in property <[string]> mics;
         in-out property <int> mic;
         in-out property <string> folder;
+        // 0: MP4, 1: MKV (the order of the picker below).
+        in-out property <int> format;
         in-out property <string> hotkey;
         in-out property <bool> startup;
         in property <bool> startup-available;
@@ -278,6 +280,12 @@ slint::slint! {
                         Button { text: "Browse"; clicked => { browse(); } }
                     }
                     Row {
+                        label: "File format";
+                        ComboBox { model: ["MP4", "MKV"]; current-index <=> format; width: 90px; }
+                        Unit { text: "Discord previews MP4 only"; font-size: 11px; }
+                        Rectangle {}
+                    }
+                    Row {
                         label: "Hotkey";
                         hotkey-button := Button {
                             text: capturing ? "Press a key..." : hotkey;
@@ -395,6 +403,7 @@ pub fn fill(
             .into(),
     );
     w.set_hotkey(config.hotkey.as_str().into());
+    w.set_format(if config.format == ClipFormat::Mkv { 1 } else { 0 });
     w.set_capturing(false);
     w.set_startup_available(startup.is_some());
     w.set_startup(startup.unwrap_or(false));
@@ -434,6 +443,11 @@ pub fn read(w: &SettingsWindow, config: &Config, shown: &[ShownScreen]) -> Confi
         loopback_device: picked(w.get_loopbacks(), w.get_loopback()),
         mic_device: picked(w.get_mics(), w.get_mic()),
         hotkey: w.get_hotkey().to_string(),
+        format: match w.get_format() {
+            0 => ClipFormat::Mp4,
+            1 => ClipFormat::Mkv,
+            _ => config.format,
+        },
     }
 }
 
@@ -606,6 +620,7 @@ mod tests {
                 buffer_seconds: 90,
                 mic_device: "Microphone (Realtek)".into(),
                 hotkey: "Ctrl+Shift+F9".into(),
+                format: ClipFormat::Mkv,
                 ..Config::default()
             },
             Config {
@@ -673,6 +688,25 @@ mod tests {
             240,
             "the choice is kept for a DXGI screen"
         );
+    }
+
+    #[test]
+    fn picking_mkv_saves_mkv_and_mp4_stays_the_default() {
+        i_slint_backend_testing::init_no_event_loop();
+        let config = Config::default();
+        let w = window(&config);
+        assert_eq!(w.get_format(), 0, "MP4 shown first and picked");
+        w.set_format(1);
+        assert_eq!(read(&w, &config, &shown()).format, ClipFormat::Mkv);
+        w.set_format(0);
+        assert_eq!(read(&w, &config, &shown()).format, ClipFormat::Mp4);
+        // No selection (a model reset): the configured format stays, as the other pickers do.
+        let mkv = Config {
+            format: ClipFormat::Mkv,
+            ..Config::default()
+        };
+        w.set_format(-1);
+        assert_eq!(read(&w, &mkv, &shown()).format, ClipFormat::Mkv);
     }
 
     fn press(w: &SettingsWindow, keys: &[SharedString]) {

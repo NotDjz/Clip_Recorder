@@ -1,4 +1,4 @@
-//! Ctrl+Alt+R: the last N seconds as an MP4.
+//! Ctrl+Alt+R: the last N seconds as an MP4 or MKV (the format setting).
 //!
 //! The quick part runs on the UI thread (pick segments, snapshot them, write the audio WAVs),
 //! so the window is fixed at the press; ffmpeg's concat, mix and mux run on a worker thread.
@@ -8,6 +8,7 @@ use crate::audio::{Audio, Kind};
 use crate::capture::{CREATE_NO_WINDOW, Capture};
 use crate::logging::log;
 use clip_recorder::clock;
+use clip_recorder::config::ClipFormat;
 use clip_recorder::ffmpeg_cmd::{self, SEGMENT_LIST_FILE};
 use clip_recorder::render::{self, GameSound, Written};
 use clip_recorder::selection::{self, GiveUp, Segment};
@@ -30,8 +31,14 @@ pub struct Saved {
 /// What was saved, or why not.
 pub type Outcome = Result<Saved, GiveUp>;
 
+/// Where a clip goes: its folder and its container.
+pub struct Destination<'a> {
+    pub folder: &'a Path,
+    pub format: ClipFormat,
+}
+
 /// Starts a save. `done` runs on the UI thread once, whatever happens.
-pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, folder: &Path, done: fn(Outcome)) {
+pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, to: &Destination, done: fn(Outcome)) {
     let save_time = clock::now();
     let id = crate::winutil::random_hex();
     let source = Source {
@@ -50,7 +57,7 @@ pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32,
         log(&format!("[{id}] save_wav({kind:?}) {written:?}"));
         written.map(|w| (path, w))
     };
-    match prepare(&source, &mut wav, ffmpeg, clip_seconds, folder, save_time, &id) {
+    match prepare(&source, &mut wav, ffmpeg, clip_seconds, to, save_time, &id) {
         Ok(job) => {
             std::thread::spawn(move || {
                 let outcome = job.run();
@@ -87,6 +94,7 @@ struct Job {
     game_sound: GameSound,
     work: PathBuf,
     output: PathBuf,
+    format: ClipFormat,
     started: Instant,
 }
 
@@ -95,7 +103,7 @@ fn prepare(
     wav: &mut WavWriter,
     ffmpeg: &Path,
     clip_seconds: u32,
-    folder: &Path,
+    to: &Destination,
     save_time: f64,
     id: &str,
 ) -> Result<Job, GiveUp> {
@@ -158,8 +166,8 @@ fn prepare(
         created.and_then(|mut f| std::io::Write::write_all(&mut f, ffmpeg_cmd::concat_list(&snapshots).as_bytes()));
     // The clip's name is reserved now: two saves in the same second each get their own.
     let output = written
-        .and_then(|_| std::fs::create_dir_all(folder))
-        .and_then(|_| reserve_output(folder, &local_stamp()));
+        .and_then(|_| std::fs::create_dir_all(to.folder))
+        .and_then(|_| reserve_output(to.folder, &local_stamp(), to.format));
     let Ok(output) = output else {
         say("ABORT: concat list, output folder or clip name not writable".into());
         snapshots.iter().for_each(|p| drop(std::fs::remove_file(p)));
@@ -186,20 +194,22 @@ fn prepare(
         game_sound,
         work: dir.into(),
         output,
+        format: to.format,
         started,
     })
 }
 
-/// `Clip_<stamp>.mp4`, else `Clip_<stamp>_2.mp4` and on, created empty so no other save can take
+/// `Clip_<stamp>.<ext>`, else `Clip_<stamp>_2.<ext>` and on, created empty so no other save can take
 /// it: two saves in the same second once shared a name, and the second (ffmpeg -y) overwrote
 /// the first's clip, or deleted it on failure.
-fn reserve_output(folder: &Path, stamp: &str) -> std::io::Result<PathBuf> {
+fn reserve_output(folder: &Path, stamp: &str, format: ClipFormat) -> std::io::Result<PathBuf> {
+    let ext = format.extension();
     // Bounded: an error that is not "taken" ends it, and so do a thousand taken names.
     for n in 1..=1000 {
         let name = if n == 1 {
-            format!("Clip_{stamp}.mp4")
+            format!("Clip_{stamp}.{ext}")
         } else {
-            format!("Clip_{stamp}_{n}.mp4")
+            format!("Clip_{stamp}_{n}.{ext}")
         };
         let path = folder.join(name);
         match crate::winutil::create_new(&path) {
@@ -243,7 +253,7 @@ impl Job {
         // actually wrote it may judge or delete it.
         let concat = self.ffmpeg(
             "concat",
-            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, !has_audio),
+            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, (!has_audio).then_some(self.format)),
         );
         let mut mux = None;
         let mut temp = vec![self.list.clone()];
@@ -258,7 +268,7 @@ impl Job {
                 (Some(only), None) | (None, Some(only)) => only.clone(),
                 (None, None) => unreachable!(),
             };
-            mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output));
+            mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output, self.format));
         }
         // The name was reserved for this save: a clip that did not come out is removed.
         let saved = written(has_audio, concat, mux) && std::fs::metadata(&self.output).is_ok_and(|m| m.len() > 0);
@@ -389,7 +399,10 @@ mod tests {
             wav,
             Path::new("ffmpeg.exe"),
             3,
-            &dir.join("clips"),
+            &Destination {
+                folder: &dir.join("clips"),
+                format: ClipFormat::Mp4,
+            },
             save_time,
             "t",
         )
@@ -427,7 +440,10 @@ mod tests {
             &mut no_audio(),
             Path::new("ffmpeg.exe"),
             3,
-            &dir.join("blocked").join("sub"),
+            &Destination {
+                folder: &dir.join("blocked").join("sub"),
+                format: ClipFormat::Mp4,
+            },
             t,
             "u",
         );
@@ -530,11 +546,17 @@ mod tests {
     #[test]
     fn two_saves_in_the_same_second_get_their_own_clip() {
         let dir = temp("names2");
-        let first = reserve_output(&dir, "20261113_101500").unwrap();
-        let second = reserve_output(&dir, "20261113_101500").unwrap();
+        let first = reserve_output(&dir, "20261113_101500", ClipFormat::Mp4).unwrap();
+        let second = reserve_output(&dir, "20261113_101500", ClipFormat::Mp4).unwrap();
         assert_eq!(first.file_name().unwrap(), "Clip_20261113_101500.mp4");
         assert_eq!(second.file_name().unwrap(), "Clip_20261113_101500_2.mp4");
-        let missing = reserve_output(&dir.join("no such folder"), "20261113_101500").unwrap_err();
+        let mkv = reserve_output(&dir, "20261113_101500", ClipFormat::Mkv).unwrap();
+        assert_eq!(
+            mkv.file_name().unwrap(),
+            "Clip_20261113_101500.mkv",
+            "its own extension"
+        );
+        let missing = reserve_output(&dir.join("no such folder"), "20261113_101500", ClipFormat::Mp4).unwrap_err();
         assert_eq!(
             missing.kind(),
             std::io::ErrorKind::NotFound,
@@ -585,6 +607,7 @@ mod tests {
             mic: None,
             work: dir.into(),
             output,
+            format: ClipFormat::Mp4,
             started: Instant::now(),
         }
     }
@@ -594,7 +617,7 @@ mod tests {
     fn a_failed_encode_reports_and_leaves_no_empty_clip() {
         for audio in [true, false] {
             let dir = temp("encode");
-            let output = reserve_output(&dir, "t").unwrap();
+            let output = reserve_output(&dir, "t", ClipFormat::Mp4).unwrap();
             assert!(matches!(job(&dir, output.clone(), audio).run(), Err(GiveUp::Error)));
             assert!(!output.exists(), "audio={audio}: an empty clip was left");
             let _ = std::fs::remove_dir_all(&dir);
@@ -623,7 +646,7 @@ mod tests {
     }
 
     /// A job over two segments' worth of work, with the sides asked for, run by a fake ffmpeg.
-    fn run_with(fake: &str, loopback: bool, mic: bool) -> (Outcome, PathBuf, PathBuf) {
+    fn run_with(fake: &str, loopback: bool, mic: bool, format: ClipFormat) -> (Outcome, PathBuf, PathBuf) {
         let dir = temp(fake);
         let wav = |side: &str| {
             let path = dir.join(format!("{side}_t.wav"));
@@ -634,7 +657,7 @@ mod tests {
         std::fs::write(&list, "file 'snap'").unwrap();
         let snapshot = dir.join("snap_t_000.ts");
         std::fs::write(&snapshot, "segment").unwrap();
-        let output = dir.join("Clip_t.mp4");
+        let output = dir.join(format!("Clip_t.{}", format.extension()));
         let job = Job {
             id: "t".into(),
             ffmpeg: fake_ffmpeg(&dir, fake),
@@ -646,6 +669,7 @@ mod tests {
             mic: mic.then(|| wav("mic")),
             work: dir.clone(),
             output: output.clone(),
+            format,
             started: Instant::now(),
         };
         (job.run(), output, dir)
@@ -656,7 +680,7 @@ mod tests {
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.ends_with(".exe") && n != "Clip_t.mp4")
+            .filter(|n| !n.ends_with(".exe") && !n.starts_with("Clip_t."))
             .collect()
     }
 
@@ -670,7 +694,7 @@ mod tests {
             (true, false, "loopback_t.wav"),
             (false, true, "mic_t.wav"),
         ] {
-            let (outcome, output, dir) = run_with("ffmpeg", loopback, mic);
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, mic, ClipFormat::Mp4);
             assert_eq!(
                 outcome,
                 Ok(Saved {
@@ -687,9 +711,22 @@ mod tests {
         }
     }
 
+    /// An MKV clip, with sound or without: written under its own name, with no MP4 flag.
+    #[test]
+    fn an_mkv_save_writes_an_mkv_without_mp4_flags() {
+        for loopback in [true, false] {
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, false, ClipFormat::Mkv);
+            assert!(outcome.is_ok(), "loopback={loopback}: {outcome:?}");
+            assert_eq!(output.extension().unwrap(), "mkv");
+            let clip = std::fs::read_to_string(&output).unwrap();
+            assert!(clip.contains("Clip_t.mkv") && !clip.contains("-movflags"), "{clip}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn a_failed_mix_still_saves_the_clip_with_the_game_sound() {
-        let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true);
+        let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true, ClipFormat::Mp4);
         assert_eq!(
             outcome,
             Ok(Saved {
@@ -709,7 +746,7 @@ mod tests {
     #[test]
     fn a_failed_or_empty_clip_is_reported_and_removed() {
         for (fake, loopback) in [("ffmpeg-failmux", true), ("ffmpeg-empty", false)] {
-            let (outcome, output, dir) = run_with(fake, loopback, false);
+            let (outcome, output, dir) = run_with(fake, loopback, false, ClipFormat::Mp4);
             assert_eq!(outcome, Err(GiveUp::Error), "{fake}");
             assert!(!output.exists(), "{fake}: the broken clip was kept");
             let _ = std::fs::remove_dir_all(&dir);
