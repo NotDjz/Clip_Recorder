@@ -2,6 +2,53 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.0.4] - 2026-11-21
+
+### Fixes
+
+- Say when a clip has no game sound
+- Reopen a loopback that stopped delivering
+- Pick up a device plugged in after launch
+- Read the screens again before a restart
+- Find ddagrab's output by its rectangle
+- Never kill a process started after its PID file
+- Only a loopback that delivered all along can stall
+- A found device that cannot open is not announced
+- Ask DXGI only for a DXGI pipeline
+- Remember the chosen screen by its name, and go back to it
+- Show how the selected screen will really be captured
+- Say when part of the game sound is missing
+- Capture ddagrab on the NVIDIA adapter, named explicitly
+- Keep the chosen screen unless another one is picked
+- Read the form against the screens it showed
+- Move to another screen only once the change holds 10 s
+- Count each filled frame once
+- Trim a hand-typed screen name
+
+### Performance
+
+- Fast-start only the clip itself
+
+### Documentation
+
+- Point the download page at v2.0.3
+- Narrow R78 to what it fixes
+
+### Tests
+
+- Exclude two equivalent mutants
+
+### CI and build
+
+- Ignore RUSTSEC-2026-0543 (chrono unmaintained)
+
+### Refactoring
+
+- One wait-or-kill helper for every short ffmpeg
+- Split the backoff out of decide
+- One rule for which screen is captured
+- The clock line belongs to the grabber
+
 ## [2.0.3] - 2026-11-15
 
 ### Features
