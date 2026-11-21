@@ -10,6 +10,7 @@ targets = ["x86_64-pc-windows-msvc"]
 # drop it once its crate leaves Cargo.lock or a fix ships.
 ignore = [
     { id = "RUSTSEC-2026-0441", reason = "pin-utils: unmaintained, no fix; compile time only, inside the slint-macros proc-macro" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: unmaintained, no known vulnerability; pulled in at runtime by slint (i-slint-core) only; drop when slint replaces it" },
 ]
 
 [licenses]

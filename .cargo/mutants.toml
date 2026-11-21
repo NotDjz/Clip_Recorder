@@ -39,6 +39,10 @@ exclude_re = [
     "src/bin/clip-recorder/job.rs:.*replace \\| with \\^",
     "src/hotkey.rs:.*replace \\| with \\^",
     "src/bin/clip-recorder/banner.rs:.*replace \\| with \\^ in (colorref|breath|Banner::show)",
+    # Equivalent: a FILETIME's high and low halves share no bit once the high one is shifted.
+    "src/bin/clip-recorder/orphans.rs:.*replace \\| with \\^ in system_time",
+    # Equivalent: < and <= on Instant differ only at the deadline's exact nanosecond.
+    "src/bin/clip-recorder/winutil.rs:.*replace < with <= in wait_or_kill",
     # Equivalent: SEGMENT_DURATION is 1, so rate * 1 == rate / 1.
     "src/ffmpeg_cmd.rs:.*replace \\* with / in capture_args",
     # The sweep's shared 3 s budget: TerminateProcess is near-instant, so only the 250 ms floor

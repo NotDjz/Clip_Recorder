@@ -4,9 +4,9 @@
 use crate::logging::log;
 use crate::monitors::Screen;
 use crate::orphans::{PID_FILE, SEGMENT_DIR_PREFIX};
-use clip_recorder::clock::{self, Estimator, capture_pts};
+use clip_recorder::clock::{self, ClockLine, Estimator, capture_pts};
 use clip_recorder::config::Config;
-use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber};
+use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber, Source};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
@@ -35,49 +35,28 @@ pub fn ffmpeg_path() -> PathBuf {
 /// Whether ffmpeg really encodes one frame from `input`. Listing h264_nvenc or ddagrab only says
 /// they were compiled in: without an NVIDIA GPU both are listed and fail, and the capture died
 /// and restarted every two seconds (seen in Windows Sandbox).
-fn works(ffmpeg: &Path, input: &str, encoder: &str) -> bool {
+fn works(ffmpeg: &Path, input: &[String], encoder: &str) -> bool {
     let child = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            input,
-            "-frames:v",
-            "1",
-            "-c:v",
-            encoder,
-            "-f",
-            "null",
-            "-",
-        ])
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(input)
+        .args(["-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
     let Ok(mut child) = child else { return false };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-        }
-    }
+    crate::winutil::wait_or_kill(&mut child, Duration::from_secs(10), Duration::from_millis(20))
+        .is_some_and(|s| s.success())
 }
 
 /// DXGI capture straight into NVENC when both work. ddagrab hands over GPU frames, which x264
 /// cannot read, so without NVENC the capture goes through GDI (an AMD or Intel GPU today).
 fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
-    let dda = works(ffmpeg, "ddagrab=output_idx=0", "h264_nvenc");
-    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, "color=c=black:s=256x256:d=1", "h264_nvenc"))
+    // The capture's own ddagrab input: on the NVIDIA adapter, named explicitly.
+    let dda = works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0), "h264_nvenc");
+    let color = ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=1"].map(String::from);
+    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, &color, "h264_nvenc"))
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process
@@ -194,6 +173,20 @@ impl Capture {
         died
     }
 
+    /// How each screen would be captured now: what the capture starts with and Settings shows.
+    pub fn sources(&self, screens: &[Screen]) -> Vec<Source> {
+        // Only a DXGI pipeline asks DXGI: where it cannot be asked (RDP, a basic display adapter)
+        // GDI needs no answer, and a failure would be logged on every health restart.
+        let outputs = match self.grabber {
+            Grabber::Ddagrab => crate::monitors::dxgi_outputs(),
+            Grabber::Gdigrab => Vec::new(),
+        };
+        screens
+            .iter()
+            .map(|s| ffmpeg_cmd::source(self.grabber, &outputs, s.rect))
+            .collect()
+    }
+
     pub fn start(&mut self, config: &Config, screens: &[Screen]) {
         if self.is_running() {
             return;
@@ -204,25 +197,24 @@ impl Capture {
         // A restart starts from an empty set: mixing a dead capture's segments (its last one
         // cut mid-write) with the new one put the restart gap inside a clip.
         self.wipe_segments();
-        let index = config.monitor.min(screens.len().saturating_sub(1));
+        let index = clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str()));
+        let source = self.sources(screens)[index];
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
             fps: config.fps,
             buffer_seconds: config.buffer_seconds,
-            monitor_index: index,
-            monitor: screens[index].rect,
-            grabber: self.grabber,
+            source,
             encoder: self.encoder,
             segment_dir: &self.segment_dir,
         });
-        match self.spawn(&args) {
+        match self.spawn(&args, source.grabber().clock_line()) {
             Ok(running) => {
                 let pid = running.child.id();
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
                 let _ = std::fs::write(self.segment_dir.join(PID_FILE), pid.to_string());
                 log(&format!(
-                    "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index}",
+                    "capture started: pid={pid} in_job={} fps={} buffer={} monitor={index} source={source:?}",
                     crate::job::contains(crate::job::handle(), &running.child),
-                    ffmpeg_cmd::effective_fps(config.fps, self.grabber),
+                    ffmpeg_cmd::effective_fps(config.fps, source.grabber()),
                     config.buffer_seconds
                 ));
                 self.running = Some(running);
@@ -234,7 +226,7 @@ impl Capture {
         }
     }
 
-    fn spawn(&self, args: &[String]) -> std::io::Result<Running> {
+    fn spawn(&self, args: &[String], clock_line: ClockLine) -> std::io::Result<Running> {
         let (read, write) = stderr_pipe()?;
         let child = Command::new(&self.ffmpeg)
             .args(args)
@@ -248,7 +240,7 @@ impl Capture {
         let clock = Arc::new(Mutex::new(None));
         let last_words = Arc::new(Mutex::new(VecDeque::new()));
         let (published, said) = (Arc::clone(&clock), Arc::clone(&last_words));
-        std::thread::spawn(move || read_clock(read, published, said));
+        std::thread::spawn(move || read_clock(read, clock_line, published, said));
         Ok(Running {
             child,
             clock,
@@ -318,11 +310,16 @@ fn stderr_pipe() -> std::io::Result<(std::fs::File, OwnedHandle)> {
 
 /// Drains ffmpeg's stderr to EOF (a full pipe would stall the capture) and publishes the capture
 /// clock as each window closes.
-fn read_clock(stderr: std::fs::File, published: Arc<Mutex<Option<f64>>>, last_words: Arc<Mutex<VecDeque<String>>>) {
+fn read_clock(
+    stderr: std::fs::File,
+    clock_line: ClockLine,
+    published: Arc<Mutex<Option<f64>>>,
+    last_words: Arc<Mutex<VecDeque<String>>>,
+) {
     let mut estimator = Estimator::default();
     for line in BufReader::new(stderr).split(b'\n') {
         let Ok(line) = line else { break };
-        if let Some(pts) = capture_pts(&line) {
+        if let Some(pts) = capture_pts(&line, clock_line) {
             if let Some(zero) = estimator.observe(clock::now(), pts) {
                 *published.lock().unwrap_or_else(|e| e.into_inner()) = Some(zero);
             }
@@ -458,7 +455,7 @@ mod tests {
         });
         let clock = Arc::new(Mutex::new(None));
         let words = Arc::new(Mutex::new(VecDeque::new()));
-        read_clock(read, Arc::clone(&clock), Arc::clone(&words));
+        read_clock(read, ClockLine::Demuxer, Arc::clone(&clock), Arc::clone(&words));
         writer.join().unwrap();
         let zero = clock.lock().unwrap().expect("no capture clock published");
         assert!((clock::now() - zero).abs() < 10.0, "zero={zero}");

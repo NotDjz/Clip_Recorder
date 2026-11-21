@@ -1,6 +1,7 @@
 //! The capture ffmpeg's command line. Every argument here was measured on the Python app;
 //! the tests pin each one to the bug it once caused.
 
+use crate::clock::ClockLine;
 use std::path::Path;
 
 /// Each segment's length. The segment ffmpeg is still writing is unusable, so this is exactly
@@ -28,6 +29,18 @@ pub enum Grabber {
     Gdigrab,
 }
 
+impl Grabber {
+    /// The -debug_ts line a capture through it reads its clock from: ddagrab is a source filter,
+    /// gdigrab an input.
+    pub fn clock_line(self) -> ClockLine {
+        if self == Grabber::Ddagrab {
+            ClockLine::Filter
+        } else {
+            ClockLine::Demuxer
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Encoder {
     Nvenc,
@@ -35,13 +48,56 @@ pub enum Encoder {
     X264,
 }
 
+/// What one capture reads: a DXGI output, by its index on the first graphics adapter (as ddagrab
+/// counts them), or the GDI desktop at a screen's rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Source {
+    Ddagrab { output: usize },
+    Gdigrab(Monitor),
+}
+
+impl Source {
+    pub fn grabber(&self) -> Grabber {
+        match self {
+            Source::Ddagrab { .. } => Grabber::Ddagrab,
+            Source::Gdigrab(_) => Grabber::Gdigrab,
+        }
+    }
+}
+
+/// NVIDIA's PCI vendor id: NVENC encodes only its adapter's frames, and the app lists only its
+/// outputs (monitors::dxgi_outputs).
+pub const NVIDIA_VENDOR_ID: u32 = 0x10DE;
+
+/// ddagrab as a source filter on the NVIDIA adapter, named explicitly. Read through -f lavfi it
+/// ignores any device and runs on the ffmpeg process's default adapter, which a per-app GPU
+/// preference can make another one than the app's (measured: lavfi keeps an internal device).
+pub fn ddagrab_input(fps: u32, output: usize) -> Vec<String> {
+    vec![
+        "-init_hw_device".into(),
+        format!("d3d11va=dda:,vendor_id={NVIDIA_VENDOR_ID:#06x}"),
+        "-filter_hw_device".into(),
+        "dda".into(),
+        "-filter_complex".into(),
+        format!("ddagrab=framerate={fps}:output_idx={output}:draw_mouse=0"),
+    ]
+}
+
+/// ddagrab on the DXGI output whose rectangle is `screen`'s, else GDI on that rectangle.
+/// `dxgi_outputs` are the first adapter's, in DXGI's order: Settings' order (primary first, left
+/// to right) only matched it by luck, and a screen on another adapter is not in it at all.
+pub fn source(grabber: Grabber, dxgi_outputs: &[Monitor], screen: Monitor) -> Source {
+    match dxgi_outputs.iter().position(|o| *o == screen) {
+        Some(output) if grabber == Grabber::Ddagrab => Source::Ddagrab { output },
+        _ => Source::Gdigrab(screen),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Capture<'a> {
     pub fps: u32,
     pub buffer_seconds: u32,
-    pub monitor_index: usize,
-    pub monitor: Monitor,
-    pub grabber: Grabber,
+    pub source: Source,
     pub encoder: Encoder,
     pub segment_dir: &'a Path,
 }
@@ -88,20 +144,14 @@ pub fn is_capture_file(name: &str) -> bool {
 }
 
 pub fn capture_args(c: &Capture) -> Vec<String> {
-    let rate = effective_fps(c.fps, c.grabber);
+    let rate = effective_fps(c.fps, c.source.grabber());
     let keyframes = (rate * SEGMENT_DURATION).to_string();
     let fps = rate.to_string();
     let wrap = segment_wrap(c.buffer_seconds).to_string();
-    let m = c.monitor;
     let mut a: Vec<String> = vec!["-y".into(), "-debug_ts".into()];
-    match c.grabber {
-        Grabber::Ddagrab => a.extend([
-            "-f".into(),
-            "lavfi".into(),
-            "-i".into(),
-            format!("ddagrab=framerate={fps}:output_idx={}:draw_mouse=0", c.monitor_index),
-        ]),
-        Grabber::Gdigrab => a.extend([
+    match c.source {
+        Source::Ddagrab { output } => a.extend(ddagrab_input(rate, output)),
+        Source::Gdigrab(m) => a.extend([
             "-f".into(),
             "gdigrab".into(),
             "-framerate".into(),
@@ -187,10 +237,14 @@ fn path(p: &Path) -> String {
 
 /// Joins the snapshots without re-encoding. No -ss, not even 0: with B-frames each segment's
 /// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
-pub fn concat_args(list: &Path, duration: f64, out: &Path) -> Vec<String> {
+/// `is_clip`: it writes the clip itself (no audio), which alone is worth +faststart's rewrite.
+pub fn concat_args(list: &Path, duration: f64, out: &Path, is_clip: bool) -> Vec<String> {
     let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
     a.extend([path(list), "-t".into(), duration.to_string()]);
-    a.extend(["-c", "copy", "-movflags", "+faststart"].map(String::from));
+    a.extend(["-c", "copy"].map(String::from));
+    if is_clip {
+        a.extend(["-movflags", "+faststart"].map(String::from));
+    }
     a.push(path(out));
     a
 }
@@ -243,9 +297,28 @@ mod tests {
     use super::*;
     use crate::config::{BUFFER_OPTIONS, FPS_OPTIONS};
 
+    /// +faststart rewrites the whole file to move its index first: worth it for the clip, wasted
+    /// on the video the mux reads next (up to 4 GB written twice).
+    #[test]
+    fn only_the_clip_is_rewritten_for_fast_start() {
+        let fast = |a: Vec<String>| a.contains(&"+faststart".to_string());
+        assert!(fast(concat_args(Path::new("l.txt"), 3.0, Path::new("clip.mp4"), true)));
+        assert!(!fast(concat_args(
+            Path::new("l.txt"),
+            3.0,
+            Path::new("video.mp4"),
+            false
+        )));
+        assert!(fast(mux_args(
+            Path::new("v.mp4"),
+            Path::new("a.wav"),
+            Path::new("clip.mp4")
+        )));
+    }
+
     #[test]
     fn the_concat_never_seeks_and_cuts_at_the_selected_duration() {
-        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"));
+        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"), true);
         assert!(!a.contains(&"-ss".to_string()), "{a:?}");
         assert_eq!(value(&a, "-t"), Some("15.25"));
         assert_eq!(value(&a, "-c"), Some("copy"));
@@ -288,13 +361,12 @@ mod tests {
         h: 1440,
     };
 
+    /// The capture of SECOND, DXGI's output 1 when ddagrab captures it.
     fn args(fps: u32, grabber: Grabber, encoder: Encoder) -> Vec<String> {
         capture_args(&Capture {
             fps,
             buffer_seconds: 30,
-            monitor_index: 1,
-            monitor: SECOND,
-            grabber,
+            source: source(grabber, &[PRIMARY, SECOND], SECOND),
             encoder,
             segment_dir: Path::new(r"C:\tmp\cliprec_x"),
         })
@@ -430,7 +502,62 @@ mod tests {
             (Some("1920"), Some("0"), Some("2560x1440"))
         );
         assert_eq!(value(&a, "-i"), Some("desktop"));
-        let _ = PRIMARY;
+    }
+
+    /// ddagrab read through `-f lavfi` ignores any device given to it and runs on the ffmpeg
+    /// process's default adapter, which a per-app GPU preference can change. Through
+    /// -filter_complex it takes the device named here: the NVIDIA adapter, which NVENC needs
+    /// anyway, and whose outputs the app lists (measured: no internal device is created then).
+    #[test]
+    fn ddagrab_runs_on_the_nvidia_adapter_named_explicitly() {
+        let a = args(240, Grabber::Ddagrab, Encoder::Nvenc);
+        assert_eq!(value(&a, "-init_hw_device"), Some("d3d11va=dda:,vendor_id=0x10de"));
+        assert_eq!(value(&a, "-filter_hw_device"), Some("dda"));
+        assert_eq!(
+            value(&a, "-filter_complex"),
+            Some("ddagrab=framerate=240:output_idx=1:draw_mouse=0")
+        );
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap();
+        assert!(at("-init_hw_device") < at("-filter_hw_device") && at("-filter_hw_device") < at("-filter_complex"));
+        assert!(!a.contains(&"lavfi".to_string()), "{a:?}");
+        assert_eq!(Grabber::Ddagrab.clock_line(), ClockLine::Filter);
+        assert_eq!(Grabber::Gdigrab.clock_line(), ClockLine::Demuxer);
+    }
+
+    /// ddagrab counts the outputs of the first graphics adapter in DXGI's own order, which is not
+    /// Settings' (primary first, then left to right): the screen is found by its rectangle.
+    #[test]
+    fn ddagrab_captures_the_output_whose_rectangle_is_the_screen() {
+        let left = Monitor {
+            x: -1920,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let outputs = [PRIMARY, left, SECOND];
+        assert_eq!(
+            source(Grabber::Ddagrab, &outputs, SECOND),
+            Source::Ddagrab { output: 2 }
+        );
+        assert_eq!(
+            source(Grabber::Ddagrab, &outputs, PRIMARY),
+            Source::Ddagrab { output: 0 }
+        );
+    }
+
+    /// A screen on another adapter, or no DXGI list at all, is captured through GDI rather than
+    /// a ddagrab that would capture another screen or fail on every restart.
+    #[test]
+    fn a_screen_ddagrab_cannot_reach_is_captured_through_gdi() {
+        assert_eq!(source(Grabber::Ddagrab, &[PRIMARY], SECOND), Source::Gdigrab(SECOND));
+        assert_eq!(source(Grabber::Ddagrab, &[], PRIMARY), Source::Gdigrab(PRIMARY));
+        assert_eq!(
+            source(Grabber::Gdigrab, &[PRIMARY, SECOND], SECOND),
+            Source::Gdigrab(SECOND),
+            "no DXGI pipeline"
+        );
+        assert_eq!(Source::Gdigrab(SECOND).grabber(), Grabber::Gdigrab);
+        assert_eq!(Source::Ddagrab { output: 0 }.grabber(), Grabber::Ddagrab);
     }
 
     #[test]

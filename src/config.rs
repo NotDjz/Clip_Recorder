@@ -8,10 +8,19 @@ pub const FPS_OPTIONS: [u32; 4] = [30, 60, 120, 240];
 pub const BUFFER_OPTIONS: [u32; 5] = [15, 30, 60, 90, 120];
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Alt+R";
 
+/// The screen to capture. By its device name (`\\.\DISPLAY2`): an index into the primary-first
+/// list pointed at another screen as soon as one was unplugged. A number is an older config's
+/// index, read as such until the next Save writes the name.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum MonitorChoice {
+    Index(usize),
+    Device(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
-    /// Index into the primary-first monitor list.
-    pub monitor: usize,
+    pub monitor: MonitorChoice,
     /// One of FPS_OPTIONS.
     pub fps: u32,
     /// One of BUFFER_OPTIONS.
@@ -28,7 +37,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            monitor: 0,
+            monitor: MonitorChoice::Index(0),
             fps: 60,
             buffer_seconds: 30,
             output_folder: String::new(),
@@ -58,8 +67,13 @@ impl Config {
                 .filter(|n| options.contains(n))
                 .unwrap_or(default)
         };
+        let monitor = match (number("monitor"), text("monitor")) {
+            (Some(n), _) => MonitorChoice::Index(n as usize),
+            (None, Some(name)) if !name.trim().is_empty() => MonitorChoice::Device(name.trim().into()),
+            _ => d.monitor.clone(),
+        };
         Config {
-            monitor: number("monitor").map_or(d.monitor, |n| n as usize),
+            monitor,
             fps: pick("fps", &FPS_OPTIONS, d.fps),
             buffer_seconds: pick("buffer_seconds", &BUFFER_OPTIONS, d.buffer_seconds),
             output_folder: text("output_folder").unwrap_or(d.output_folder),
@@ -106,14 +120,33 @@ mod tests {
             (c.fps, c.hotkey.as_str(), c.mic_device.as_str()),
             (240, "Ctrl+Shift+F9", "Microphone (USB)")
         );
-        assert_eq!((c.buffer_seconds, c.monitor), (30, 0));
+        assert_eq!((c.buffer_seconds, c.monitor), (30, MonitorChoice::Index(0)));
     }
 
     #[test]
     fn hand_edited_numbers_are_parsed_leniently() {
         // "fps": "120" used to crash the Python app's >= comparison and leave it capturing nothing.
         let c = Config::parse(r#"{"fps": "120", "buffer_seconds": " 90 ", "monitor": "1"}"#);
-        assert_eq!((c.fps, c.buffer_seconds, c.monitor), (120, 90, 1));
+        assert_eq!((c.fps, c.buffer_seconds, c.monitor), (120, 90, MonitorChoice::Index(1)));
+    }
+
+    /// A screen is kept by its device name, which another screen's unplugging does not shift; a
+    /// number is an older config's index into the primary-first list.
+    #[test]
+    fn the_screen_is_read_by_name_or_as_an_older_index() {
+        let named = Config::parse(r#"{"monitor": "\\\\.\\DISPLAY2"}"#);
+        assert_eq!(named.monitor, MonitorChoice::Device(r"\\.\DISPLAY2".into()));
+        assert_eq!(Config::parse(r#"{"monitor": 1}"#).monitor, MonitorChoice::Index(1));
+        assert_eq!(
+            Config::parse(r#"{"monitor": ""}"#).monitor,
+            MonitorChoice::Index(0),
+            "empty: primary"
+        );
+        assert_eq!(
+            Config::parse(r#"{"monitor": " \\\\.\\DISPLAY2 "}"#).monitor,
+            MonitorChoice::Device(r"\\.\DISPLAY2".into()),
+            "hand-typed spaces: names are compared exactly"
+        );
     }
 
     #[test]
@@ -131,6 +164,7 @@ mod tests {
             fps: 240,
             buffer_seconds: 90,
             loopback_device: "Haut-parleurs (Realtek(R) Audio)".into(),
+            monitor: MonitorChoice::Device(r"\\.\DISPLAY2".into()),
             ..Config::default()
         };
         c.save(&path).unwrap();

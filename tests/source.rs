@@ -133,6 +133,64 @@ fn settings_lists_devices_on_every_open() {
     assert!(open.contains("audio::list_devices()"));
 }
 
+/// Every capture (re)start reads the screens afresh, in one place: with the list read once at
+/// launch, an unplugged screen restarted ffmpeg on it every 3 s until the app was restarted.
+/// Settings lists them afresh too.
+#[test]
+fn the_screens_are_read_again_before_each_restart() {
+    let main = code("src/bin/clip-recorder/main.rs", "//");
+    let start = between(&main, "fn start_capture(", "\n    }");
+    assert!(
+        position(start, "monitors::list()") < position(start, "self.capture."),
+        "{start}"
+    );
+    let elsewhere = main.replace(start, "");
+    for call in ["capture.start(", "capture.restart_video("] {
+        assert!(!elsewhere.contains(call), "{call} outside start_capture");
+    }
+    let open = between(&main, "fn open_settings()", "\n}");
+    assert!(open.contains("monitors::list()"), "{open}");
+}
+
+/// Each health tick lists the screens and moves the capture when the chosen one comes back or
+/// goes: once moved to another screen, it never returned until Settings or a relaunch. The
+/// screen it runs on is recorded where the capture starts.
+#[test]
+fn the_health_tick_moves_the_capture_to_the_chosen_screen() {
+    let main = code("src/bin/clip-recorder/main.rs", "//");
+    let tick = between(&main, "fn check_health()", "\n}");
+    assert!(
+        position(tick, "monitors::list()") < position(tick, "screen_to_move_to("),
+        "{tick}"
+    );
+    // Waited out: a sleeping DisplayPort screen must not cost the buffer twice.
+    assert!(
+        position(tick, "screen_to_move_to(") < position(tick, "app.screen_move.tick("),
+        "{tick}"
+    );
+    assert!(tick.contains("start_capture(true)"), "{tick}");
+    let start = between(&main, "fn start_capture(", "\n    }");
+    assert!(start.contains("self.capturing_on ="), "{start}");
+}
+
+/// Save reads the form against the screens Settings showed, not the list a health tick may have
+/// refreshed since: a screen unplugged while the window was open shifted the picked index onto
+/// another screen.
+#[test]
+fn settings_reads_the_form_against_the_screens_it_showed() {
+    let main = code("src/bin/clip-recorder/main.rs", "//");
+    let open = between(&main, "fn open_settings()", "\n}");
+    assert!(
+        position(open, "app.settings_shown =") < position(open, "settings_window::fill("),
+        "{open}"
+    );
+    let apply = between(&main, "fn apply_settings()", "\n}");
+    assert!(
+        apply.contains("settings_window::read(&w, &app.config, &app.settings_shown)"),
+        "{apply}"
+    );
+}
+
 /// tests/regressions.md lists every fixed bug and its tests. A test it names must still exist:
 /// deleting or renaming a guard has to update the registry in the same commit.
 #[test]

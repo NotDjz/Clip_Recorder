@@ -24,6 +24,7 @@ use chimes::Chime;
 use clip_recorder::config::Config;
 use clip_recorder::hotkey;
 use clip_recorder::paths;
+use clip_recorder::render::GameSound;
 use clip_recorder::selection::GiveUp;
 use logging::log;
 use monitors::Screen;
@@ -45,6 +46,10 @@ thread_local! {
 struct App {
     config: Config,
     screens: Vec<Screen>,
+    /// The device the capture was last started on: a health tick moves it when the screen the
+    /// config picks is another one.
+    capturing_on: String,
+    screen_move: clip_recorder::settings::ScreenMove,
     capture: Capture,
     audio: audio::Audio,
     ffmpeg: PathBuf,
@@ -52,15 +57,32 @@ struct App {
     tray: Tray,
     hotkey: Option<hotkey_thread::HotkeyThread>,
     settings: Option<settings_window::SettingsWindow>,
+    /// The screens Settings showed when it opened: its Save reads the picker against these.
+    settings_shown: Vec<settings_window::ShownScreen>,
     _health: slint::Timer,
 }
 
 impl App {
     /// The banner goes on the captured screen: that is where the user is looking.
     fn notify(&self, state: banner::State, text: &str, seconds: Option<u32>, duration_ms: u32) {
-        let index = self.config.monitor.min(self.screens.len().saturating_sub(1));
+        let index =
+            clip_recorder::settings::screen_index(&self.config.monitor, self.screens.iter().map(|s| s.name.as_str()));
         self.banner
             .show(state, text, seconds, duration_ms, self.screens[index].rect);
+    }
+
+    /// Starts the capture, or restarts its video, on the screens plugged in now: read once at
+    /// launch, an unplugged screen was restarted on every 3 s until the app was.
+    fn start_capture(&mut self, restart: bool) {
+        self.screens = monitors::list();
+        let index =
+            clip_recorder::settings::screen_index(&self.config.monitor, self.screens.iter().map(|s| s.name.as_str()));
+        self.capturing_on = self.screens[index].name.clone();
+        if restart {
+            self.capture.restart_video(&self.config, &self.screens);
+        } else {
+            self.capture.start(&self.config, &self.screens);
+        }
     }
 }
 
@@ -89,9 +111,8 @@ fn main() {
         return;
     }
     let config = Config::load(&paths::config_file());
-    let screens = monitors::list();
     session::listen(open_settings);
-    let mut capture = match Capture::new(ffmpeg.clone()) {
+    let capture = match Capture::new(ffmpeg.clone()) {
         Ok(capture) => capture,
         Err(e) => {
             log(&format!("capture folder not created: {e}"));
@@ -105,7 +126,6 @@ fn main() {
             return;
         }
     };
-    capture.start(&config, &screens);
     let mut audio = audio::Audio::new(&config.loopback_device, &config.mic_device);
     audio.start();
     let hotkey = register_hotkey(&config.hotkey, &tray);
@@ -113,7 +133,7 @@ fn main() {
     slint::Timer::single_shot(Duration::from_secs(30), || {
         with_app(|app| {
             if app.capture.reprobe() {
-                app.capture.restart_video(&app.config, &app.screens);
+                app.start_capture(true);
             }
         });
     });
@@ -123,7 +143,9 @@ fn main() {
     APP.with(|app| {
         *app.borrow_mut() = Some(App {
             config,
-            screens,
+            screens: monitors::list(),
+            capturing_on: String::new(),
+            screen_move: Default::default(),
             capture,
             audio,
             ffmpeg,
@@ -131,9 +153,11 @@ fn main() {
             tray,
             hotkey,
             settings: None,
+            settings_shown: Vec::new(),
             _health: health,
         })
     });
+    with_app(|app| app.start_capture(false));
     if let Err(e) = slint::run_event_loop_until_quit() {
         log(&format!("event loop failed: {e}"));
     }
@@ -153,10 +177,20 @@ fn check_health() {
     if with_app(|app| app.capture.has_died()).unwrap_or(false) {
         log("capture ffmpeg died: restarting it");
         slint::Timer::single_shot(Duration::from_secs(1), || {
-            with_app(|app| app.capture.start(&app.config, &app.screens));
+            with_app(|app| app.start_capture(false));
         });
     }
     with_app(|app| {
+        // The chosen screen came back, or went, for 10 s: listing them is cheap, and a resolution
+        // change of the same screen moves nothing.
+        let screens = monitors::list();
+        let names = screens.iter().map(|s| s.name.as_str());
+        let wanted = clip_recorder::settings::screen_to_move_to(&app.config.monitor, names, &app.capturing_on)
+            .map(|i| screens[i].name.as_str());
+        if let Some(to) = app.screen_move.tick(wanted) {
+            log(&format!("capture moves from {} to {to}", app.capturing_on));
+            app.start_capture(true);
+        }
         app.audio.heal();
         let recording = app.capture.is_running();
         if let Some(w) = &app.settings {
@@ -230,6 +264,16 @@ fn open_settings() {
             });
             app.settings = Some(w);
         }
+        app.screens = monitors::list();
+        app.settings_shown = app
+            .screens
+            .iter()
+            .zip(app.capture.sources(&app.screens))
+            .map(|(screen, source)| settings_window::ShownScreen {
+                screen: screen.clone(),
+                grabber: source.grabber(),
+            })
+            .collect();
         let w = app.settings.as_ref().expect("just made");
         let hw = settings_window::Hardware {
             encoder: app.capture.encoder(),
@@ -237,7 +281,7 @@ fn open_settings() {
         };
         // From a dev build the Run value would start target\debug: only the installed app offers it.
         let startup = (!cfg!(debug_assertions)).then(startup::enabled);
-        settings_window::fill(w, &app.config, &app.screens, &hw, audio::list_devices(), startup);
+        settings_window::fill(w, &app.config, &app.settings_shown, &hw, audio::list_devices(), startup);
         w.set_recording(app.capture.is_running());
         w.show().is_ok()
     });
@@ -277,7 +321,7 @@ fn apply_settings() {
         let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else {
             return;
         };
-        let mut new = settings_window::read(&w, &app.config);
+        let mut new = settings_window::read(&w, &app.config, &app.settings_shown);
         let changes = clip_recorder::settings::changes(&app.config, &new);
         let mut problems = Vec::new();
         if changes.hotkey {
@@ -305,7 +349,7 @@ fn apply_settings() {
             app.audio.reload(&app.config.loopback_device, &app.config.mic_device);
         }
         if changes.video {
-            app.capture.restart_video(&app.config, &app.screens);
+            app.start_capture(true);
         }
         // Re-pointed whenever it is ticked: an older install's path would start nothing.
         let startup =
@@ -353,10 +397,14 @@ fn feedback(event: SaveEvent) -> Feedback {
             Some(buffer_seconds),
             banner::SAVING_MS,
         ),
-        SaveEvent::Ended(Ok(seconds)) => (
+        SaveEvent::Ended(Ok(save::Saved { seconds, game_sound })) => (
             Chime::Saved,
             banner::State::Saved,
-            "Clip saved",
+            match game_sound {
+                GameSound::Full => "Clip saved",
+                GameSound::Partial => "Clip saved, game sound partly missing",
+                GameSound::Missing => "Clip saved, no game sound",
+            },
             Some(seconds),
             banner::HOLD_MS,
         ),
@@ -457,10 +505,32 @@ mod tests {
             (pressed.chime, pressed.state, pressed.seconds),
             (Chime::Start, banner::State::Saving, Some(30))
         );
-        let saved = feedback(SaveEvent::Ended(Ok(31)));
+        let saved = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: GameSound::Full,
+        })));
         assert_eq!(
             (saved.chime, saved.state, saved.seconds),
             (Chime::Saved, banner::State::Saved, Some(31))
+        );
+        // 7 saves in 15 lost the game sound and said "Clip saved" all the same.
+        let mute = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: GameSound::Missing,
+        })));
+        let partial = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: GameSound::Partial,
+        })));
+        assert_eq!(
+            (mute.chime, mute.state, mute.seconds),
+            (Chime::Saved, banner::State::Saved, Some(31))
+        );
+        assert_ne!(mute.text, saved.text, "a clip without game sound must say so");
+        assert_eq!(partial.state, banner::State::Saved);
+        assert!(
+            partial.text != saved.text && partial.text != mute.text,
+            "part of the game sound missing reads apart from both"
         );
         let soon = feedback(SaveEvent::Ended(Err(GiveUp::TooSoon)));
         let lost = feedback(SaveEvent::Ended(Err(GiveUp::Error)));

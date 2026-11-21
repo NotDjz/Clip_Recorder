@@ -5,11 +5,11 @@
 
 use crate::logging::log;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+    GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
 
 /// Prefix of every capture's segment folder in %TEMP%: written by capture.rs, scanned here.
@@ -19,6 +19,20 @@ pub const PID_FILE: &str = "ffmpeg.pid";
 const SWEEP_BUDGET: Duration = Duration::from_millis(3000);
 /// Never wait zero: the folder removal that follows would race the still-open segment file.
 const WAIT_FLOOR: Duration = Duration::from_millis(250);
+
+/// Only an ffmpeg.exe that was already running when the PID file was written. The job object
+/// kills the capture with the app, so a leftover file's PID is usually free, and Windows hands it
+/// out again: a process started since is someone else's.
+fn may_kill(is_ffmpeg: bool, created: SystemTime, pid_written: SystemTime) -> bool {
+    is_ffmpeg && created <= pid_written
+}
+
+/// A FILETIME (100 ns ticks since 1601) as a SystemTime.
+fn system_time(ft: windows_sys::Win32::Foundation::FILETIME) -> SystemTime {
+    const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let ticks = (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime);
+    SystemTime::UNIX_EPOCH + Duration::from_nanos(ticks.saturating_sub(UNIX_EPOCH_TICKS) * 100)
+}
 
 /// Kills each leftover capture ffmpeg, then removes its folder. One failure never stops the rest.
 pub fn sweep(temp: &Path) {
@@ -37,10 +51,14 @@ pub fn sweep(temp: &Path) {
 /// Terminates the process in `dir`'s PID file, but only if it still is an ffmpeg.exe: PIDs are
 /// reused, and killing a stranger's process is worse than leaving an orphan.
 pub fn kill_orphan(dir: &Path, deadline: Instant) {
-    let Some(pid) = std::fs::read_to_string(dir.join(PID_FILE))
+    let pid_file = dir.join(PID_FILE);
+    let Some(pid) = std::fs::read_to_string(&pid_file)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
     else {
+        return;
+    };
+    let Ok(pid_written) = std::fs::metadata(&pid_file).and_then(|m| m.modified()) else {
         return;
     };
     unsafe {
@@ -60,7 +78,18 @@ pub fn kill_orphan(dir: &Path, deadline: Instant) {
             let name = Path::new(&image)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_lowercase());
-            if name.as_deref() == Some("ffmpeg.exe") {
+            let zero = windows_sys::Win32::Foundation::FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            };
+            let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+            // Unknown creation time: treated as created now, so never killed.
+            let created = if GetProcessTimes(h, &mut created, &mut exited, &mut kernel, &mut user) != 0 {
+                system_time(created)
+            } else {
+                SystemTime::now()
+            };
+            if may_kill(name.as_deref() == Some("ffmpeg.exe"), created, pid_written) {
                 TerminateProcess(h, 1);
                 // TerminateProcess is asynchronous.
                 let wait = deadline.saturating_duration_since(Instant::now()).max(WAIT_FLOOR);
@@ -138,6 +167,46 @@ mod tests {
         let _ = orphan.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(gone, "the orphan ffmpeg was still running after kill_orphan returned");
+    }
+
+    #[test]
+    fn only_an_ffmpeg_already_running_when_its_pid_was_written_may_be_killed() {
+        let written = std::time::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let before = written - Duration::from_secs(5);
+        let after = written + Duration::from_millis(1);
+        assert!(may_kill(true, before, written));
+        assert!(may_kill(true, written, written));
+        assert!(!may_kill(true, after, written), "a later process reusing the PID");
+        assert!(!may_kill(false, before, written), "not an ffmpeg");
+    }
+
+    /// The job object kills the capture with the app, so a leftover PID file's PID is usually free
+    /// and Windows hands it out again: an ffmpeg started since (the user's own) is not ours.
+    #[test]
+    fn an_ffmpeg_started_after_the_pid_file_is_never_killed() {
+        let dir = temp_dir("reused");
+        let fake = dir.join("ffmpeg.exe");
+        std::fs::copy(ping(), &fake).unwrap();
+        let mut stranger = std::process::Command::new(&fake)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid_file = dir.join(PID_FILE);
+        std::fs::write(&pid_file, stranger.id().to_string()).unwrap();
+        let an_hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&pid_file)
+            .unwrap()
+            .set_modified(an_hour_ago)
+            .unwrap();
+        kill_orphan(&dir, Instant::now());
+        let alive = stranger.try_wait().unwrap().is_none();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(alive, "an ffmpeg younger than the PID file was killed");
     }
 
     /// Each cliprec_ folder is handled on its own (one with a garbage PID file does not stop

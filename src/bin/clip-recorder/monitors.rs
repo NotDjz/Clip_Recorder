@@ -37,6 +37,37 @@ unsafe extern "system" fn visit(handle: HMONITOR, _dc: HDC, _rect: *mut RECT, da
     1
 }
 
+/// The NVIDIA adapter's outputs, in DXGI's order: what ddagrab's output_idx counts, since the
+/// capture names that adapter to ffmpeg (ffmpeg_cmd::ddagrab_input) by the same rule, the first
+/// adapter with NVIDIA's vendor id. Empty without one, or if DXGI cannot be asked: GDI then.
+pub fn dxgi_outputs() -> Vec<Monitor> {
+    use clip_recorder::ffmpeg_cmd::NVIDIA_VENDOR_ID;
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let outputs = || -> windows::core::Result<Vec<Monitor>> {
+        let factory = unsafe { CreateDXGIFactory1::<IDXGIFactory1>()? };
+        // EnumAdapters1 and EnumOutputs fail (DXGI_ERROR_NOT_FOUND) one past the last.
+        let nvidia = (0..)
+            .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
+            .find(|a| unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == NVIDIA_VENDOR_ID));
+        let Some(adapter) = nvidia else { return Ok(Vec::new()) };
+        let mut found = Vec::new();
+        while let Ok(output) = unsafe { adapter.EnumOutputs(found.len() as u32) } {
+            let r = unsafe { output.GetDesc()? }.DesktopCoordinates;
+            found.push(Monitor {
+                x: r.left,
+                y: r.top,
+                w: r.right - r.left,
+                h: r.bottom - r.top,
+            });
+        }
+        Ok(found)
+    };
+    outputs().unwrap_or_else(|e| {
+        crate::logging::log(&format!("DXGI outputs not listed ({e}): capturing through GDI"));
+        Vec::new()
+    })
+}
+
 pub fn list() -> Vec<Screen> {
     let mut screens: Vec<Screen> = Vec::new();
     unsafe {
@@ -57,4 +88,28 @@ pub fn list() -> Vec<Screen> {
         });
     }
     screens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs real screens: `cargo test -- --ignored --nocapture dxgi_outputs_on_this_machine`.
+    /// Every screen of Settings' list is either a DXGI output of the first adapter or captured
+    /// through GDI, and the mapping is printed to check by eye.
+    #[test]
+    #[ignore]
+    fn dxgi_outputs_on_this_machine() {
+        let outputs = dxgi_outputs();
+        println!("DXGI outputs (NVIDIA adapter): {outputs:?}");
+        for (i, s) in list().iter().enumerate() {
+            let source =
+                clip_recorder::ffmpeg_cmd::source(clip_recorder::ffmpeg_cmd::Grabber::Ddagrab, &outputs, s.rect);
+            println!(
+                "Settings {i}: {} {:?} primary={} -> {source:?}",
+                s.name, s.rect, s.primary
+            );
+        }
+        assert!(!outputs.is_empty(), "no DXGI output listed on a machine with a screen");
+    }
 }

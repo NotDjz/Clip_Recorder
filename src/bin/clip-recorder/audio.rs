@@ -7,7 +7,7 @@
 use crate::logging::log;
 use clip_recorder::clock;
 use clip_recorder::heal::{self, Decision, Retry};
-use clip_recorder::render::{self, Chunk, render_window};
+use clip_recorder::render::{self, Chunk, Written, render_window};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use std::collections::VecDeque;
@@ -25,7 +25,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Kind::Loopback => "loopback",
             Kind::Mic => "mic",
@@ -49,6 +49,8 @@ struct Side {
     frames: Arc<AtomicU64>,
     history: History,
     retry: Retry,
+    /// When the current stream opened: whether it delivered all along is judged from it.
+    opened_at: f64,
 }
 
 impl Side {
@@ -65,6 +67,7 @@ impl Side {
             frames: Arc::new(AtomicU64::new(0)),
             history: Arc::new(Mutex::new(VecDeque::new())),
             retry: Retry::default(),
+            opened_at: 0.0,
         }
     }
 
@@ -91,12 +94,17 @@ impl Side {
         (configured, default)
     }
 
+    /// The format a stream on `device` would open with: a loopback captures an output's.
+    fn format(&self, device: &cpal::Device) -> Option<cpal::SupportedStreamConfig> {
+        match self.kind {
+            Kind::Loopback => device.default_output_config().ok(),
+            Kind::Mic => device.default_input_config().ok(),
+        }
+    }
+
     /// Takes `device` with its current format, or none.
     fn adopt(&mut self, device: Option<cpal::Device>) {
-        let config = device.as_ref().and_then(|d| match self.kind {
-            Kind::Loopback => d.default_output_config().ok(),
-            Kind::Mic => d.default_input_config().ok(),
-        });
+        let config = device.as_ref().and_then(|d| self.format(d));
         match (device, config) {
             (Some(d), Some(c)) => {
                 self.name = device_name(&d);
@@ -118,11 +126,7 @@ impl Side {
     fn open(&mut self) {
         self.stream = None;
         let Some(device) = self.device.clone() else { return };
-        let config = match self.kind {
-            Kind::Loopback => device.default_output_config(),
-            Kind::Mic => device.default_input_config(),
-        };
-        let Ok(config) = config else {
+        let Some(config) = self.format(&device) else {
             log(&format!(
                 "{} stream OPEN FAILED: no config for {}",
                 self.kind.label(),
@@ -155,6 +159,7 @@ impl Side {
                     self.channels
                 ));
                 self.stream = Some(stream);
+                self.opened_at = clock::now();
             }
             Err(e) => log(&format!(
                 "{} stream OPEN FAILED: device={:?}: {e}",
@@ -206,12 +211,24 @@ impl Side {
     /// One health tick: reopen a dead stream, with this side's own backoff.
     fn heal(&mut self) {
         let frames = self.frames.load(Ordering::Relaxed);
-        match self.retry.decide(self.device.is_some(), self.alive(), frames) {
+        let newest = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .back()
+            .map(|(t, _)| *t);
+        let idle = newest.map_or(f64::INFINITY, |t| clock::now() - t);
+        let continuous = newest.is_some_and(|t| heal::delivered_continuously(frames, self.rate, self.opened_at, t));
+        match self
+            .retry
+            .decide(self.device.is_some(), self.alive(), frames, idle, continuous)
+        {
             Decision::Keep => {}
             Decision::Reopen => {
                 log(&format!(
-                    "{} stream not alive (frames={frames}), reopening",
-                    self.kind.label()
+                    "{} stream {} (frames={frames}, idle={idle:.1}s), reopening",
+                    self.kind.label(),
+                    if self.alive() { "stalled" } else { "not alive" }
                 ));
                 let (format, had) = ((self.rate, self.channels), self.device.take());
                 let (configured, default) = self.candidates();
@@ -226,11 +243,30 @@ impl Side {
                 self.kind.label(),
                 clip_recorder::heal::MAX_REOPENS
             )),
+            // Silent while nothing is found: a side with no device would otherwise log every 30 s.
+            Decision::Detect => {
+                let (configured, default) = self.candidates();
+                // One that cannot give a format is not found either: adopt would log every 30 s.
+                let Some(device) = configured.or(default).filter(|d| self.format(d).is_some()) else {
+                    return;
+                };
+                let format = (self.rate, self.channels);
+                self.adopt(Some(device));
+                if !heal::keeps_history(format, (self.rate, self.channels)) {
+                    self.clear();
+                }
+                log(&format!(
+                    "{} device found after launch: {}",
+                    self.kind.label(),
+                    self.name
+                ));
+                self.open();
+            }
         }
     }
 
     /// Writes this side's window as a WAV. False when nothing overlaps it (a dead stream).
-    fn save_wav(&self, path: &Path, end: f64, duration: f64) -> bool {
+    fn save_wav(&self, path: &Path, end: f64, duration: f64) -> Option<Written> {
         // Only the chunks that can reach the window (a chunk ends at its arrival), so the
         // callbacks wait on a short copy, not on 120 s of audio.
         let history: Vec<(f64, Vec<i16>)> = {
@@ -244,9 +280,8 @@ impl Side {
                 samples: s,
             })
             .collect();
-        let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else {
-            return false;
-        };
+        let rendered = render_window(&chunks, self.rate, self.channels, end, duration)?;
+        let samples = &rendered.samples;
         let spec = hound::WavSpec {
             channels: self.channels,
             sample_rate: self.rate,
@@ -261,7 +296,15 @@ impl Side {
             s.flush()?;
             w.finalize()
         };
-        write().is_ok()
+        write().ok()?;
+        let frames = samples.len() / self.channels.max(1) as usize;
+        let continuous = history.last().is_some_and(|(t, _)| {
+            heal::delivered_continuously(self.frames.load(Ordering::Relaxed), self.rate, self.opened_at, *t)
+        });
+        Some(Written {
+            coverage: rendered.filled as f64 / frames.max(1) as f64,
+            continuous,
+        })
     }
 
     /// One line for the save log: enough to tell silence, a stall and a dead stream apart.
@@ -349,7 +392,7 @@ impl Audio {
         self.side(kind).device.is_some()
     }
 
-    pub fn save_wav(&self, kind: Kind, path: &Path, end: f64, duration: f64) -> bool {
+    pub fn save_wav(&self, kind: Kind, path: &Path, end: f64, duration: f64) -> Option<Written> {
         self.side(kind).save_wav(path, end, duration)
     }
 
@@ -395,6 +438,7 @@ mod tests {
         let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_file(&wav);
         audio.stop();
-        assert!(saved && size > 0, "loopback WAV not written ({size} bytes)");
+        println!("loopback WAV: {saved:?}");
+        assert!(saved.is_some() && size > 0, "loopback WAV not written ({size} bytes)");
     }
 }

@@ -9,6 +9,7 @@ use crate::capture::{CREATE_NO_WINDOW, Capture};
 use crate::logging::log;
 use clip_recorder::clock;
 use clip_recorder::ffmpeg_cmd::{self, SEGMENT_LIST_FILE};
+use clip_recorder::render::{self, GameSound, Written};
 use clip_recorder::selection::{self, GiveUp, Segment};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
@@ -18,8 +19,16 @@ use std::time::{Duration, Instant};
 
 const FFMPEG_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Seconds of footage saved, or why not.
-pub type Outcome = Result<u32, GiveUp>;
+/// A clip that came out: its length, and whether it carries the game sound (a dead or silent
+/// loopback once downgraded 7 saves in 15 to mic only, each announced as a normal save).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Saved {
+    pub seconds: u32,
+    pub game_sound: GameSound,
+}
+
+/// What was saved, or why not.
+pub type Outcome = Result<Saved, GiveUp>;
 
 /// Starts a save. `done` runs on the UI thread once, whatever happens.
 pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32, folder: &Path, done: fn(Outcome)) {
@@ -31,18 +40,15 @@ pub fn start(capture: &Capture, audio: &Audio, ffmpeg: &Path, clip_seconds: u32,
         started_at: capture.started_at(),
     };
     let dir = source.dir.to_path_buf();
-    let mut wav = |kind: Kind, end: f64, duration: f64| -> Option<PathBuf> {
+    let mut wav = |kind: Kind, end: f64, duration: f64| -> Option<(PathBuf, Written)> {
         if !audio.has(kind) {
             return None;
         }
         log(&format!("[{id}] {}", audio.describe(kind)));
-        let path = dir.join(format!(
-            "{}_{id}.wav",
-            if kind == Kind::Loopback { "loopback" } else { "mic" }
-        ));
-        let ok = audio.save_wav(kind, &path, end, duration);
-        log(&format!("[{id}] save_wav({kind:?}) ok={ok}"));
-        ok.then_some(path)
+        let path = dir.join(format!("{}_{id}.wav", kind.label()));
+        let written = audio.save_wav(kind, &path, end, duration);
+        log(&format!("[{id}] save_wav({kind:?}) {written:?}"));
+        written.map(|w| (path, w))
     };
     match prepare(&source, &mut wav, ffmpeg, clip_seconds, folder, save_time, &id) {
         Ok(job) => {
@@ -66,7 +72,7 @@ struct Source<'a> {
 }
 
 /// Writes one side's WAV over (end, duration), or None when that side has nothing.
-type WavWriter<'a> = dyn FnMut(Kind, f64, f64) -> Option<PathBuf> + 'a;
+type WavWriter<'a> = dyn FnMut(Kind, f64, f64) -> Option<(PathBuf, Written)> + 'a;
 
 /// Everything the worker needs, decided at the press.
 struct Job {
@@ -77,6 +83,8 @@ struct Job {
     snapshots: Vec<PathBuf>,
     loopback: Option<PathBuf>,
     mic: Option<PathBuf>,
+    /// Decided from the loopback's WAV at the press.
+    game_sound: GameSound,
     work: PathBuf,
     output: PathBuf,
     started: Instant,
@@ -164,7 +172,9 @@ fn prepare(
 
     // The audio window is the video's: same end, same length as the concat's -t.
     let loopback = wav(Kind::Loopback, save_time, chosen.duration);
-    let mic = wav(Kind::Mic, save_time, chosen.duration);
+    let mic = wav(Kind::Mic, save_time, chosen.duration).map(|(path, _)| path);
+    let game_sound = render::game_sound(loopback.as_ref().map(|(_, w)| *w));
+    let loopback = loopback.map(|(path, _)| path);
     Ok(Job {
         id: id.into(),
         ffmpeg: ffmpeg.into(),
@@ -173,6 +183,7 @@ fn prepare(
         snapshots,
         loopback,
         mic,
+        game_sound,
         work: dir.into(),
         output,
         started,
@@ -230,7 +241,10 @@ impl Job {
         };
         // Two saves in the same second share the output name: only the run whose ffmpeg
         // actually wrote it may judge or delete it.
-        let concat = self.ffmpeg("concat", &ffmpeg_cmd::concat_args(&self.list, self.duration, &video));
+        let concat = self.ffmpeg(
+            "concat",
+            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, !has_audio),
+        );
         let mut mux = None;
         let mut temp = vec![self.list.clone()];
         if has_audio && concat == Some(true) {
@@ -263,7 +277,11 @@ impl Job {
             self.started.elapsed().as_secs_f64()
         ));
         if saved {
-            Ok(self.duration.round() as u32)
+            // A failed mix still muxes the loopback, so the loopback WAV alone decides.
+            Ok(Saved {
+                seconds: self.duration.round() as u32,
+                game_sound: self.game_sound,
+            })
         } else {
             Err(GiveUp::Error)
         }
@@ -291,18 +309,7 @@ impl Job {
             }
             text
         });
-        let deadline = Instant::now() + FFMPEG_TIMEOUT;
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-            }
-        };
+        let status = crate::winutil::wait_or_kill(&mut child, FFMPEG_TIMEOUT, Duration::from_millis(50));
         let text = reader.join().unwrap_or_default();
         let ok = status.is_some_and(|s| s.success());
         if ok {
@@ -367,7 +374,7 @@ mod tests {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
     }
 
-    fn no_audio() -> impl FnMut(Kind, f64, f64) -> Option<PathBuf> {
+    fn no_audio() -> impl FnMut(Kind, f64, f64) -> Option<(PathBuf, Written)> {
         |_, _, _| None
     }
 
@@ -574,6 +581,7 @@ mod tests {
             list: dir.join("concat_t.txt"),
             snapshots: vec![],
             loopback: audio.then_some(wav),
+            game_sound: GameSound::Full,
             mic: None,
             work: dir.into(),
             output,
@@ -634,6 +642,7 @@ mod tests {
             list,
             snapshots: vec![snapshot],
             loopback: loopback.then(|| wav("loopback")),
+            game_sound: if loopback { GameSound::Full } else { GameSound::Missing },
             mic: mic.then(|| wav("mic")),
             work: dir.clone(),
             output: output.clone(),
@@ -662,9 +671,17 @@ mod tests {
             (false, true, "mic_t.wav"),
         ] {
             let (outcome, output, dir) = run_with("ffmpeg", loopback, mic);
-            assert_eq!(outcome, Ok(3), "loopback={loopback} mic={mic}");
+            assert_eq!(
+                outcome,
+                Ok(Saved {
+                    seconds: 3,
+                    game_sound: if loopback { GameSound::Full } else { GameSound::Missing }
+                }),
+                "loopback={loopback} mic={mic}"
+            );
             let clip = std::fs::read_to_string(&output).unwrap();
             assert!(clip.contains(expected), "loopback={loopback} mic={mic}: {clip}");
+            assert!(clip.contains("+faststart"), "the clip itself is fast-started: {clip}");
             assert_eq!(leftovers(&dir), Vec::<String>::new(), "temporary files left behind");
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -673,7 +690,13 @@ mod tests {
     #[test]
     fn a_failed_mix_still_saves_the_clip_with_the_game_sound() {
         let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true);
-        assert_eq!(outcome, Ok(3));
+        assert_eq!(
+            outcome,
+            Ok(Saved {
+                seconds: 3,
+                game_sound: GameSound::Full
+            })
+        );
         let clip = std::fs::read_to_string(&output).unwrap();
         assert!(
             clip.contains("loopback_t.wav") && !clip.contains("mixed_t.wav"),
