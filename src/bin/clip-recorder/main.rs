@@ -45,6 +45,9 @@ thread_local! {
 struct App {
     config: Config,
     screens: Vec<Screen>,
+    /// The device the capture was last started on: a health tick moves it when the screen the
+    /// config picks is another one.
+    capturing_on: String,
     capture: Capture,
     audio: audio::Audio,
     ffmpeg: PathBuf,
@@ -58,7 +61,8 @@ struct App {
 impl App {
     /// The banner goes on the captured screen: that is where the user is looking.
     fn notify(&self, state: banner::State, text: &str, seconds: Option<u32>, duration_ms: u32) {
-        let index = clip_recorder::settings::screen_index(self.config.monitor, self.screens.len());
+        let index =
+            clip_recorder::settings::screen_index(&self.config.monitor, self.screens.iter().map(|s| s.name.as_str()));
         self.banner
             .show(state, text, seconds, duration_ms, self.screens[index].rect);
     }
@@ -67,6 +71,9 @@ impl App {
     /// launch, an unplugged screen was restarted on every 3 s until the app was.
     fn start_capture(&mut self, restart: bool) {
         self.screens = monitors::list();
+        let index =
+            clip_recorder::settings::screen_index(&self.config.monitor, self.screens.iter().map(|s| s.name.as_str()));
+        self.capturing_on = self.screens[index].name.clone();
         if restart {
             self.capture.restart_video(&self.config, &self.screens);
         } else {
@@ -133,6 +140,7 @@ fn main() {
         *app.borrow_mut() = Some(App {
             config,
             screens: monitors::list(),
+            capturing_on: String::new(),
             capture,
             audio,
             ffmpeg,
@@ -167,6 +175,17 @@ fn check_health() {
         });
     }
     with_app(|app| {
+        // The chosen screen came back, or went: listing them is cheap, and a resolution change of
+        // the same screen moves nothing.
+        let screens = monitors::list();
+        let names = screens.iter().map(|s| s.name.as_str());
+        if let Some(i) = clip_recorder::settings::screen_to_move_to(&app.config.monitor, names, &app.capturing_on) {
+            log(&format!(
+                "capture moves from {} to {}",
+                app.capturing_on, screens[i].name
+            ));
+            app.start_capture(true);
+        }
         app.audio.heal();
         let recording = app.capture.is_running();
         if let Some(w) = &app.settings {
@@ -288,7 +307,7 @@ fn apply_settings() {
         let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else {
             return;
         };
-        let mut new = settings_window::read(&w, &app.config);
+        let mut new = settings_window::read(&w, &app.config, &app.screens);
         let changes = clip_recorder::settings::changes(&app.config, &new);
         let mut problems = Vec::new();
         if changes.hotkey {

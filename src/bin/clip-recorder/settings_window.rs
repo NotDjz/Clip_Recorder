@@ -2,7 +2,7 @@
 //! Save then restarts is decided in clip_recorder::settings and applied by main.rs.
 
 use crate::monitors::Screen;
-use clip_recorder::config::{BUFFER_OPTIONS, Config};
+use clip_recorder::config::{BUFFER_OPTIONS, Config, MonitorChoice};
 use clip_recorder::ffmpeg_cmd::{Encoder, Grabber};
 use clip_recorder::settings::{device_at, device_choices, fps_choices, index_of};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
@@ -350,7 +350,9 @@ pub fn fill(
         .into(),
     );
     w.set_monitors(strings(screens.iter().enumerate().map(|(i, s)| label(i, s))));
-    w.set_monitor(clip_recorder::settings::screen_index(config.monitor, screens.len()) as i32);
+    w.set_monitor(
+        clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str())) as i32,
+    );
     let fps = fps_choices(hw.grabber == Grabber::Ddagrab);
     w.set_fps_options(strings(fps.iter().map(u32::to_string)));
     w.set_fps(index_of(&fps, config.fps) as i32);
@@ -386,7 +388,8 @@ fn picked(model: ModelRc<SharedString>, index: i32) -> String {
 
 /// The form as a Config. The folder is written back empty while it is the default, so the
 /// default keeps following a relocated Videos folder.
-pub fn read(w: &SettingsWindow, config: &Config) -> Config {
+/// The screen is written back by its device name, whatever the config held before.
+pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
     let number = |model: ModelRc<SharedString>, index: i32, fallback: u32| {
         model
             .row_data(index.max(0) as usize)
@@ -396,7 +399,9 @@ pub fn read(w: &SettingsWindow, config: &Config) -> Config {
     let folder = w.get_folder().trim().to_string();
     let default = crate::folders::clips("").display().to_string();
     Config {
-        monitor: w.get_monitor().max(0) as usize,
+        monitor: screens
+            .get(w.get_monitor().max(0) as usize)
+            .map_or(config.monitor.clone(), |s| MonitorChoice::Device(s.name.clone())),
         fps: number(w.get_fps_options(), w.get_fps(), config.fps),
         buffer_seconds: number(w.get_buffer_options(), w.get_buffer(), config.buffer_seconds),
         output_folder: if folder == default || folder.is_empty() {
@@ -494,7 +499,7 @@ mod tests {
 
     fn screens() -> Vec<Screen> {
         let s = |x, primary| Screen {
-            name: String::new(),
+            name: format!(r"\\.\DISPLAY{}", if primary { 1 } else { 2 }),
             rect: Monitor {
                 x,
                 y: 0,
@@ -531,10 +536,14 @@ mod tests {
     #[test]
     fn an_untouched_form_reads_back_the_same_config() {
         i_slint_backend_testing::init_no_event_loop();
+        let primary = || MonitorChoice::Device(r"\\.\DISPLAY1".into());
         for config in [
-            Config::default(),
             Config {
-                monitor: 1,
+                monitor: primary(),
+                ..Config::default()
+            },
+            Config {
+                monitor: MonitorChoice::Device(r"\\.\DISPLAY2".into()),
                 fps: 240,
                 buffer_seconds: 90,
                 mic_device: "Microphone (Realtek)".into(),
@@ -542,13 +551,30 @@ mod tests {
                 ..Config::default()
             },
             Config {
+                monitor: primary(),
                 loopback_device: "Unplugged (USB)".into(),
                 output_folder: r"D:\Clips".into(),
                 ..Config::default()
             },
         ] {
-            assert_eq!(read(&window(&config), &config), config);
+            assert_eq!(read(&window(&config), &config, &screens()), config);
         }
+    }
+
+    /// An older config's index is shown on its screen and saved back as that screen's name.
+    #[test]
+    fn an_older_screen_index_is_saved_back_as_the_screens_name() {
+        i_slint_backend_testing::init_no_event_loop();
+        let config = Config {
+            monitor: MonitorChoice::Index(1),
+            ..Config::default()
+        };
+        let w = window(&config);
+        assert_eq!(w.get_monitor(), 1);
+        assert_eq!(
+            read(&w, &config, &screens()).monitor,
+            MonitorChoice::Device(r"\\.\DISPLAY2".into())
+        );
     }
 
     #[test]
@@ -561,10 +587,10 @@ mod tests {
         w.set_loopback(2);
         let monitors: Vec<String> = w.get_monitors().iter().map(String::from).collect();
         assert_eq!(monitors, ["1: 2560×1440  (primary)", "2: 2560×1440"]);
-        let new = read(&w, &config);
+        let new = read(&w, &config, &screens());
         assert_eq!(
             (new.monitor, new.fps, new.loopback_device.as_str()),
-            (1, 120, "Headphones (USB)")
+            (MonitorChoice::Device(r"\\.\DISPLAY2".into()), 120, "Headphones (USB)")
         );
     }
 

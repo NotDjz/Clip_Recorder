@@ -194,7 +194,7 @@ impl Capture {
         // A restart starts from an empty set: mixing a dead capture's segments (its last one
         // cut mid-write) with the new one put the restart gap inside a clip.
         self.wipe_segments();
-        let index = clip_recorder::settings::screen_index(config.monitor, screens.len());
+        let index = clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str()));
         // Only a DXGI pipeline asks DXGI: where it cannot be asked (RDP, a basic display adapter)
         // GDI needs no answer, and a failure would be logged on every health restart.
         let outputs = match self.grabber {

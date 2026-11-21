@@ -1,7 +1,7 @@
 //! What the Settings window shows and what its Save does, without the window. Pickers work on
 //! indices, so no label is ever parsed back (the Python app's "N: name" and "(Auto" contracts).
 
-use crate::config::{Config, FPS_OPTIONS};
+use crate::config::{Config, FPS_OPTIONS, MonitorChoice};
 
 /// Index 0 of each device picker: empty in config.json.
 pub const AUTO: &str = "Auto (system default)";
@@ -89,9 +89,26 @@ pub fn pick_device(names: &[String], configured: &str) -> Option<usize> {
         .or_else(|| names.iter().position(|n| n.contains(configured)))
 }
 
-/// The screen the capture, the banner and Settings use, among `count` listed primary first.
-pub fn screen_index(configured: usize, count: usize) -> usize {
-    configured.min(count.saturating_sub(1))
+/// The screen the capture, the banner and Settings use, among the device names listed primary
+/// first: the chosen one if it is there, else the primary; an older index is clamped.
+pub fn screen_index<'a>(choice: &MonitorChoice, names: impl IntoIterator<Item = &'a str>) -> usize {
+    let names: Vec<&str> = names.into_iter().collect();
+    match choice {
+        MonitorChoice::Device(name) => names.iter().position(|n| n == name).unwrap_or(0),
+        MonitorChoice::Index(i) => (*i).min(names.len().saturating_sub(1)),
+    }
+}
+
+/// Where the capture must move, if the screen `choice` picks now is not the one it runs on: back to
+/// the chosen screen when it returns, to the primary when it goes. None with no screen listed.
+pub fn screen_to_move_to<'a>(
+    choice: &MonitorChoice,
+    names: impl IntoIterator<Item = &'a str>,
+    capturing_on: &str,
+) -> Option<usize> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let wanted = screen_index(choice, names.iter().copied());
+    names.get(wanted).filter(|&&n| n != capturing_on).map(|_| wanted)
 }
 
 /// Above 60 fps only DXGI capture keeps up.
@@ -149,7 +166,7 @@ mod tests {
             ),
             (
                 Config {
-                    monitor: 1,
+                    monitor: MonitorChoice::Index(1),
                     ..old.clone()
                 },
                 video,
@@ -193,7 +210,7 @@ mod tests {
         let video = Config {
             fps: 120,
             buffer_seconds: 90,
-            monitor: 1,
+            monitor: MonitorChoice::Index(1),
             ..old.clone()
         };
         assert_eq!(
@@ -324,11 +341,54 @@ mod tests {
         assert_eq!(index_of(&fps_choices(true), 120), 2);
     }
 
+    const NAMES: [&str; 3] = [r"\\.\DISPLAY1", r"\\.\DISPLAY3", r"\\.\DISPLAY2"];
+
+    /// By name: unplugging another screen no longer shifts which one is captured.
     #[test]
-    fn the_configured_screen_is_clamped_to_the_screens_there_are() {
-        assert_eq!(screen_index(1, 2), 1);
-        assert_eq!(screen_index(5, 2), 1, "a screen since unplugged: the last one");
-        assert_eq!(screen_index(0, 0), 0, "no screen listed: never out of bounds below");
+    fn the_chosen_screen_is_found_by_its_name() {
+        let second = MonitorChoice::Device(r"\\.\DISPLAY2".into());
+        assert_eq!(screen_index(&second, NAMES), 2);
+        assert_eq!(screen_index(&second, [NAMES[0], NAMES[2]]), 1, "DISPLAY3 unplugged");
+        assert_eq!(
+            screen_index(&second, [NAMES[0], NAMES[1]]),
+            0,
+            "gone itself: the primary"
+        );
+    }
+
+    #[test]
+    fn an_older_index_is_clamped_to_the_screens_there_are() {
+        assert_eq!(screen_index(&MonitorChoice::Index(1), NAMES), 1);
+        assert_eq!(screen_index(&MonitorChoice::Index(5), NAMES), 2, "the last one");
+        assert_eq!(
+            screen_index(&MonitorChoice::Index(0), [] as [&str; 0]),
+            0,
+            "none listed"
+        );
+    }
+
+    /// The capture moves when the screen the config picks now is another one: back to the chosen
+    /// screen when it returns, to the primary when it goes. Same screen: never (a mode change of
+    /// the screen must not cost the buffer).
+    #[test]
+    fn the_capture_moves_only_when_another_screen_is_picked() {
+        let second = MonitorChoice::Device(r"\\.\DISPLAY2".into());
+        assert_eq!(
+            screen_to_move_to(&second, NAMES, r"\\.\DISPLAY1"),
+            Some(2),
+            "it came back"
+        );
+        assert_eq!(screen_to_move_to(&second, NAMES, r"\\.\DISPLAY2"), None);
+        assert_eq!(
+            screen_to_move_to(&second, [NAMES[0]], r"\\.\DISPLAY2"),
+            Some(0),
+            "it went: the primary"
+        );
+        assert_eq!(
+            screen_to_move_to(&second, [] as [&str; 0], r"\\.\DISPLAY2"),
+            None,
+            "no screen: stay"
+        );
     }
 
     #[test]
