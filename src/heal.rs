@@ -52,6 +52,11 @@ impl Retry {
         if alive && frames == 0 {
             return Decision::Keep; // open, nothing delivered yet: silence
         }
+        self.backoff()
+    }
+
+    /// A dead or stalled stream: reopen it unless still waiting, or once out of reopens.
+    fn backoff(&mut self) -> Decision {
         if self.wait > 0 {
             self.wait -= 1;
             return Decision::Keep;
