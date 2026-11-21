@@ -29,6 +29,18 @@ pub enum Grabber {
     Gdigrab,
 }
 
+impl Grabber {
+    /// The -debug_ts line a capture through it reads its clock from: ddagrab is a source filter,
+    /// gdigrab an input.
+    pub fn clock_line(self) -> ClockLine {
+        if self == Grabber::Ddagrab {
+            ClockLine::Filter
+        } else {
+            ClockLine::Demuxer
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Encoder {
     Nvenc,
@@ -49,14 +61,6 @@ impl Source {
         match self {
             Source::Ddagrab { .. } => Grabber::Ddagrab,
             Source::Gdigrab(_) => Grabber::Gdigrab,
-        }
-    }
-
-    /// The -debug_ts line its capture clock is read from.
-    pub fn clock_line(&self) -> ClockLine {
-        match self {
-            Source::Ddagrab { .. } => ClockLine::Filter,
-            Source::Gdigrab(_) => ClockLine::Demuxer,
         }
     }
 }
@@ -516,8 +520,8 @@ mod tests {
         let at = |flag: &str| a.iter().position(|x| x == flag).unwrap();
         assert!(at("-init_hw_device") < at("-filter_hw_device") && at("-filter_hw_device") < at("-filter_complex"));
         assert!(!a.contains(&"lavfi".to_string()), "{a:?}");
-        assert_eq!(Source::Ddagrab { output: 1 }.clock_line(), ClockLine::Filter);
-        assert_eq!(Source::Gdigrab(SECOND).clock_line(), ClockLine::Demuxer);
+        assert_eq!(Grabber::Ddagrab.clock_line(), ClockLine::Filter);
+        assert_eq!(Grabber::Gdigrab.clock_line(), ClockLine::Demuxer);
     }
 
     /// ddagrab counts the outputs of the first graphics adapter in DXGI's own order, which is not

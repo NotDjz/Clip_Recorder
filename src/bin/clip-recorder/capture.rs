@@ -206,7 +206,7 @@ impl Capture {
             encoder: self.encoder,
             segment_dir: &self.segment_dir,
         });
-        match self.spawn(&args, source.clock_line()) {
+        match self.spawn(&args, source.grabber().clock_line()) {
             Ok(running) => {
                 let pid = running.child.id();
                 // A later launch kills this pid if we die before stop() runs and the job missed it.
