@@ -49,6 +49,8 @@ struct Side {
     frames: Arc<AtomicU64>,
     history: History,
     retry: Retry,
+    /// When the current stream opened: whether it delivered all along is judged from it.
+    opened_at: f64,
 }
 
 impl Side {
@@ -65,6 +67,7 @@ impl Side {
             frames: Arc::new(AtomicU64::new(0)),
             history: Arc::new(Mutex::new(VecDeque::new())),
             retry: Retry::default(),
+            opened_at: 0.0,
         }
     }
 
@@ -155,6 +158,7 @@ impl Side {
                     self.channels
                 ));
                 self.stream = Some(stream);
+                self.opened_at = clock::now();
             }
             Err(e) => log(&format!(
                 "{} stream OPEN FAILED: device={:?}: {e}",
@@ -213,7 +217,11 @@ impl Side {
             .back()
             .map(|(t, _)| *t);
         let idle = newest.map_or(f64::INFINITY, |t| clock::now() - t);
-        match self.retry.decide(self.device.is_some(), self.alive(), frames, idle) {
+        let continuous = newest.is_some_and(|t| heal::delivered_continuously(frames, self.rate, self.opened_at, t));
+        match self
+            .retry
+            .decide(self.device.is_some(), self.alive(), frames, idle, continuous)
+        {
             Decision::Keep => {}
             Decision::Reopen => {
                 log(&format!(
