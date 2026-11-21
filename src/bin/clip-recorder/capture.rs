@@ -195,7 +195,13 @@ impl Capture {
         // cut mid-write) with the new one put the restart gap inside a clip.
         self.wipe_segments();
         let index = config.monitor.min(screens.len().saturating_sub(1));
-        let source = ffmpeg_cmd::source(self.grabber, &crate::monitors::dxgi_outputs(), screens[index].rect);
+        // Only a DXGI pipeline asks DXGI: where it cannot be asked (RDP, a basic display adapter)
+        // GDI needs no answer, and a failure would be logged on every health restart.
+        let outputs = match self.grabber {
+            Grabber::Ddagrab => crate::monitors::dxgi_outputs(),
+            Grabber::Gdigrab => Vec::new(),
+        };
+        let source = ffmpeg_cmd::source(self.grabber, &outputs, screens[index].rect);
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
             fps: config.fps,
             buffer_seconds: config.buffer_seconds,
