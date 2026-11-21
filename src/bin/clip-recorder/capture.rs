@@ -6,7 +6,7 @@ use crate::monitors::Screen;
 use crate::orphans::{PID_FILE, SEGMENT_DIR_PREFIX};
 use clip_recorder::clock::{self, Estimator, capture_pts};
 use clip_recorder::config::Config;
-use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber};
+use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber, Source};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
@@ -184,6 +184,20 @@ impl Capture {
         died
     }
 
+    /// How each screen would be captured now: what the capture starts with and Settings shows.
+    pub fn sources(&self, screens: &[Screen]) -> Vec<Source> {
+        // Only a DXGI pipeline asks DXGI: where it cannot be asked (RDP, a basic display adapter)
+        // GDI needs no answer, and a failure would be logged on every health restart.
+        let outputs = match self.grabber {
+            Grabber::Ddagrab => crate::monitors::dxgi_outputs(),
+            Grabber::Gdigrab => Vec::new(),
+        };
+        screens
+            .iter()
+            .map(|s| ffmpeg_cmd::source(self.grabber, &outputs, s.rect))
+            .collect()
+    }
+
     pub fn start(&mut self, config: &Config, screens: &[Screen]) {
         if self.is_running() {
             return;
@@ -195,13 +209,7 @@ impl Capture {
         // cut mid-write) with the new one put the restart gap inside a clip.
         self.wipe_segments();
         let index = clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str()));
-        // Only a DXGI pipeline asks DXGI: where it cannot be asked (RDP, a basic display adapter)
-        // GDI needs no answer, and a failure would be logged on every health restart.
-        let outputs = match self.grabber {
-            Grabber::Ddagrab => crate::monitors::dxgi_outputs(),
-            Grabber::Gdigrab => Vec::new(),
-        };
-        let source = ffmpeg_cmd::source(self.grabber, &outputs, screens[index].rect);
+        let source = self.sources(screens)[index];
         let args = ffmpeg_cmd::capture_args(&ffmpeg_cmd::Capture {
             fps: config.fps,
             buffer_seconds: config.buffer_seconds,

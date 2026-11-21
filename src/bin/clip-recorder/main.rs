@@ -264,6 +264,7 @@ fn open_settings() {
         let hw = settings_window::Hardware {
             encoder: app.capture.encoder(),
             grabber: app.capture.grabber(),
+            screens: app.capture.sources(&app.screens).iter().map(|s| s.grabber()).collect(),
         };
         // From a dev build the Run value would start target\debug: only the installed app offers it.
         let startup = (!cfg!(debug_assertions)).then(startup::enabled);

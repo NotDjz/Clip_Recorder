@@ -136,12 +136,18 @@ slint::slint! {
         default-font-size: 13px;
 
         in property <bool> recording;
-        // Encoder and capture method: hardware facts, read out rather than offered as rows.
-        in property <string> hardware;
+        // Encoder and capture method of each screen: hardware facts, read out rather than offered
+        // as rows. A screen ddagrab cannot reach goes through GDI, capped at its max fps.
+        in property <[string]> monitor-hardware;
+        in property <[int]> monitor-max-fps;
         in property <[string]> monitors;
         in-out property <int> monitor;
         in property <[string]> fps-options;
         in-out property <int> fps;
+        property <int> chosen-fps: fps-options[fps].to-float();
+        out property <bool> fps-capped: chosen-fps > monitor-max-fps[monitor];
+        out property <string> capture-status: monitor-hardware[monitor] + "     "
+            + (fps-capped ? monitor-max-fps[monitor] : chosen-fps) + " fps";
         in property <[string]> buffer-options;
         in-out property <int> buffer;
         in property <[string]> loopbacks;
@@ -201,7 +207,7 @@ slint::slint! {
                             color: Ink.fg; font-size: 14px; font-weight: 700;
                         }
                         Text {
-                            text: hardware + "     " + fps-options[fps] + " fps";
+                            text: capture-status;
                             color: Ink.fg2; font-size: 11px;
                             horizontal-alignment: right; vertical-alignment: center;
                             horizontal-stretch: 1;
@@ -245,6 +251,10 @@ slint::slint! {
                         ComboBox { model: fps-options; current-index <=> fps; width: 90px; }
                         Unit { text: "fps"; }
                         Rectangle {}
+                    }
+                    if fps-capped: Text {
+                        text: "This screen is captured through GDI: " + monitor-max-fps[monitor] + " fps at most.";
+                        color: Ink.fg2; font-size: 11px; wrap: word-wrap;
                     }
                 }
 
@@ -328,7 +338,10 @@ fn label(i: usize, s: &Screen) -> String {
 
 pub struct Hardware {
     pub encoder: Encoder,
+    /// The pipeline's: whether 120/240 fps can be offered at all.
     pub grabber: Grabber,
+    /// How each screen, in Settings' order, would really be captured.
+    pub screens: Vec<Grabber>,
 }
 
 /// Fills the form from the config. Device lists are read live, so one plugged in since launch
@@ -341,14 +354,18 @@ pub fn fill(
     devices: (Vec<String>, Vec<String>),
     startup: Option<bool>,
 ) {
-    w.set_hardware(
-        format!(
-            "{}     {}",
-            if hw.encoder == Encoder::Nvenc { "NVENC" } else { "x264" },
-            if hw.grabber == Grabber::Ddagrab { "DXGI" } else { "GDI" }
-        )
-        .into(),
-    );
+    let encoder = if hw.encoder == Encoder::Nvenc { "NVENC" } else { "x264" };
+    w.set_monitor_hardware(strings(
+        hw.screens
+            .iter()
+            .map(|&g| format!("{encoder}     {}", if g == Grabber::Ddagrab { "DXGI" } else { "GDI" })),
+    ));
+    w.set_monitor_max_fps(ModelRc::new(VecModel::from(
+        hw.screens
+            .iter()
+            .map(|&g| clip_recorder::ffmpeg_cmd::effective_fps(240, g) as i32)
+            .collect::<Vec<_>>(),
+    )));
     w.set_monitors(strings(screens.iter().enumerate().map(|(i, s)| label(i, s))));
     w.set_monitor(
         clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str())) as i32,
@@ -514,9 +531,11 @@ mod tests {
     /// The testing platform is set once per thread: call this once per test.
     fn window(config: &Config) -> SettingsWindow {
         let w = SettingsWindow::new().unwrap();
+        // The second screen is on an adapter ddagrab cannot reach.
         let hw = Hardware {
             encoder: Encoder::Nvenc,
             grabber: Grabber::Ddagrab,
+            screens: vec![Grabber::Ddagrab, Grabber::Gdigrab],
         };
         let devices = (
             vec!["Speakers (Realtek)".into(), "Headphones (USB)".into()],
@@ -591,6 +610,28 @@ mod tests {
         assert_eq!(
             (new.monitor, new.fps, new.loopback_device.as_str()),
             (MonitorChoice::Device(r"\\.\DISPLAY2".into()), 120, "Headphones (USB)")
+        );
+    }
+
+    /// A screen ddagrab cannot reach goes through GDI at 60 fps at most: Settings says so for the
+    /// selected screen instead of showing DXGI and 240 fps.
+    #[test]
+    fn settings_shows_how_the_selected_screen_is_really_captured() {
+        i_slint_backend_testing::init_no_event_loop();
+        let config = Config {
+            fps: 240,
+            ..Config::default()
+        };
+        let w = window(&config);
+        assert_eq!(w.get_capture_status().as_str(), "NVENC     DXGI     240 fps");
+        assert!(!w.get_fps_capped());
+        w.set_monitor(1);
+        assert_eq!(w.get_capture_status().as_str(), "NVENC     GDI     60 fps");
+        assert!(w.get_fps_capped(), "the cap is explained under the frame rate");
+        assert_eq!(
+            read(&w, &config, &screens()).fps,
+            240,
+            "the choice is kept for a DXGI screen"
         );
     }
 
