@@ -416,9 +416,7 @@ pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
     let folder = w.get_folder().trim().to_string();
     let default = crate::folders::clips("").display().to_string();
     Config {
-        monitor: screens
-            .get(w.get_monitor().max(0) as usize)
-            .map_or(config.monitor.clone(), |s| MonitorChoice::Device(s.name.clone())),
+        monitor: picked_screen(w.get_monitor().max(0) as usize, config, screens),
         fps: number(w.get_fps_options(), w.get_fps(), config.fps),
         buffer_seconds: number(w.get_buffer_options(), w.get_buffer(), config.buffer_seconds),
         output_folder: if folder == default || folder.is_empty() {
@@ -429,6 +427,17 @@ pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
         loopback_device: picked(w.get_loopbacks(), w.get_loopback()),
         mic_device: picked(w.get_mics(), w.get_mic()),
         hotkey: w.get_hotkey().to_string(),
+    }
+}
+
+/// The screen a Save keeps: the config's own choice unless another screen was picked. Rewriting
+/// it always replaced an unplugged chosen screen by the primary it was shown on, and turned an
+/// older index into a name, a "change" that restarted the video for nothing.
+fn picked_screen(picked: usize, config: &Config, screens: &[Screen]) -> MonitorChoice {
+    let shown = clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str()));
+    match screens.get(picked) {
+        Some(s) if picked != shown => MonitorChoice::Device(s.name.clone()),
+        _ => config.monitor.clone(),
     }
 }
 
@@ -557,6 +566,20 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let primary = || MonitorChoice::Device(r"\\.\DISPLAY1".into());
         for config in [
+            // An older or fresh config's index: a Save that picks nothing must not restart the
+            // video (a changed monitor field does), so it stays an index.
+            Config::default(),
+            Config {
+                monitor: MonitorChoice::Index(1),
+                ..Config::default()
+            },
+            // The chosen screen unplugged: shown on the primary, and still the chosen one after a
+            // Save made for something else.
+            Config {
+                monitor: MonitorChoice::Device(r"\\.\DISPLAY9".into()),
+                hotkey: "Ctrl+Shift+F9".into(),
+                ..Config::default()
+            },
             Config {
                 monitor: primary(),
                 ..Config::default()
@@ -580,9 +603,9 @@ mod tests {
         }
     }
 
-    /// An older config's index is shown on its screen and saved back as that screen's name.
+    /// An older config's index is shown on its screen; picking a screen saves its name.
     #[test]
-    fn an_older_screen_index_is_saved_back_as_the_screens_name() {
+    fn an_older_screen_index_becomes_a_name_once_a_screen_is_picked() {
         i_slint_backend_testing::init_no_event_loop();
         let config = Config {
             monitor: MonitorChoice::Index(1),
@@ -590,9 +613,10 @@ mod tests {
         };
         let w = window(&config);
         assert_eq!(w.get_monitor(), 1);
+        w.set_monitor(0);
         assert_eq!(
             read(&w, &config, &screens()).monitor,
-            MonitorChoice::Device(r"\\.\DISPLAY2".into())
+            MonitorChoice::Device(r"\\.\DISPLAY1".into())
         );
     }
 
