@@ -168,6 +168,24 @@ fn the_health_tick_moves_the_capture_to_the_chosen_screen() {
     assert!(start.contains("self.capturing_on ="), "{start}");
 }
 
+/// Save reads the form against the screens Settings showed, not the list a health tick may have
+/// refreshed since: a screen unplugged while the window was open shifted the picked index onto
+/// another screen.
+#[test]
+fn settings_reads_the_form_against_the_screens_it_showed() {
+    let main = code("src/bin/clip-recorder/main.rs", "//");
+    let open = between(&main, "fn open_settings()", "\n}");
+    assert!(
+        position(open, "app.settings_shown =") < position(open, "settings_window::fill("),
+        "{open}"
+    );
+    let apply = between(&main, "fn apply_settings()", "\n}");
+    assert!(
+        apply.contains("settings_window::read(&w, &app.config, &app.settings_shown)"),
+        "{apply}"
+    );
+}
+
 /// tests/regressions.md lists every fixed bug and its tests. A test it names must still exist:
 /// deleting or renaming a guard has to update the registry in the same commit.
 #[test]

@@ -56,6 +56,8 @@ struct App {
     tray: Tray,
     hotkey: Option<hotkey_thread::HotkeyThread>,
     settings: Option<settings_window::SettingsWindow>,
+    /// The screens Settings showed when it opened: its Save reads the picker against these.
+    settings_shown: Vec<settings_window::ShownScreen>,
     _health: slint::Timer,
 }
 
@@ -149,6 +151,7 @@ fn main() {
             tray,
             hotkey,
             settings: None,
+            settings_shown: Vec::new(),
             _health: health,
         })
     });
@@ -261,15 +264,23 @@ fn open_settings() {
             app.settings = Some(w);
         }
         app.screens = monitors::list();
+        app.settings_shown = app
+            .screens
+            .iter()
+            .zip(app.capture.sources(&app.screens))
+            .map(|(screen, source)| settings_window::ShownScreen {
+                screen: screen.clone(),
+                grabber: source.grabber(),
+            })
+            .collect();
         let w = app.settings.as_ref().expect("just made");
         let hw = settings_window::Hardware {
             encoder: app.capture.encoder(),
             grabber: app.capture.grabber(),
-            screens: app.capture.sources(&app.screens).iter().map(|s| s.grabber()).collect(),
         };
         // From a dev build the Run value would start target\debug: only the installed app offers it.
         let startup = (!cfg!(debug_assertions)).then(startup::enabled);
-        settings_window::fill(w, &app.config, &app.screens, &hw, audio::list_devices(), startup);
+        settings_window::fill(w, &app.config, &app.settings_shown, &hw, audio::list_devices(), startup);
         w.set_recording(app.capture.is_running());
         w.show().is_ok()
     });
@@ -309,7 +320,7 @@ fn apply_settings() {
         let Some(w) = app.settings.as_ref().map(|w| w.clone_strong()) else {
             return;
         };
-        let mut new = settings_window::read(&w, &app.config, &app.screens);
+        let mut new = settings_window::read(&w, &app.config, &app.settings_shown);
         let changes = clip_recorder::settings::changes(&app.config, &new);
         let mut problems = Vec::new();
         if changes.hotkey {

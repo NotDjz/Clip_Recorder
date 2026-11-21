@@ -340,8 +340,14 @@ pub struct Hardware {
     pub encoder: Encoder,
     /// The pipeline's: whether 120/240 fps can be offered at all.
     pub grabber: Grabber,
-    /// How each screen, in Settings' order, would really be captured.
-    pub screens: Vec<Grabber>,
+}
+
+/// A screen as Settings shows it: the screen, and how it would really be captured. One list
+/// feeds the picker and its per-screen facts, and a Save reads the picker against it.
+#[derive(Clone)]
+pub struct ShownScreen {
+    pub screen: Screen,
+    pub grabber: Grabber,
 }
 
 /// Fills the form from the config. Device lists are read live, so one plugged in since launch
@@ -349,26 +355,27 @@ pub struct Hardware {
 pub fn fill(
     w: &SettingsWindow,
     config: &Config,
-    screens: &[Screen],
+    shown: &[ShownScreen],
     hw: &Hardware,
     devices: (Vec<String>, Vec<String>),
     startup: Option<bool>,
 ) {
     let encoder = if hw.encoder == Encoder::Nvenc { "NVENC" } else { "x264" };
-    w.set_monitor_hardware(strings(
-        hw.screens
-            .iter()
-            .map(|&g| format!("{encoder}     {}", if g == Grabber::Ddagrab { "DXGI" } else { "GDI" })),
-    ));
+    w.set_monitor_hardware(strings(shown.iter().map(|s| {
+        format!(
+            "{encoder}     {}",
+            if s.grabber == Grabber::Ddagrab { "DXGI" } else { "GDI" }
+        )
+    })));
     w.set_monitor_max_fps(ModelRc::new(VecModel::from(
-        hw.screens
+        shown
             .iter()
-            .map(|&g| clip_recorder::ffmpeg_cmd::effective_fps(240, g) as i32)
+            .map(|s| clip_recorder::ffmpeg_cmd::effective_fps(240, s.grabber) as i32)
             .collect::<Vec<_>>(),
     )));
-    w.set_monitors(strings(screens.iter().enumerate().map(|(i, s)| label(i, s))));
+    w.set_monitors(strings(shown.iter().enumerate().map(|(i, s)| label(i, &s.screen))));
     w.set_monitor(
-        clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str())) as i32,
+        clip_recorder::settings::screen_index(&config.monitor, shown.iter().map(|s| s.screen.name.as_str())) as i32,
     );
     let fps = fps_choices(hw.grabber == Grabber::Ddagrab);
     w.set_fps_options(strings(fps.iter().map(u32::to_string)));
@@ -406,7 +413,7 @@ fn picked(model: ModelRc<SharedString>, index: i32) -> String {
 /// The form as a Config. The folder is written back empty while it is the default, so the
 /// default keeps following a relocated Videos folder.
 /// The screen is written back by its device name, whatever the config held before.
-pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
+pub fn read(w: &SettingsWindow, config: &Config, shown: &[ShownScreen]) -> Config {
     let number = |model: ModelRc<SharedString>, index: i32, fallback: u32| {
         model
             .row_data(index.max(0) as usize)
@@ -416,7 +423,7 @@ pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
     let folder = w.get_folder().trim().to_string();
     let default = crate::folders::clips("").display().to_string();
     Config {
-        monitor: picked_screen(w.get_monitor().max(0) as usize, config, screens),
+        monitor: picked_screen(w.get_monitor().max(0) as usize, config, shown),
         fps: number(w.get_fps_options(), w.get_fps(), config.fps),
         buffer_seconds: number(w.get_buffer_options(), w.get_buffer(), config.buffer_seconds),
         output_folder: if folder == default || folder.is_empty() {
@@ -433,10 +440,11 @@ pub fn read(w: &SettingsWindow, config: &Config, screens: &[Screen]) -> Config {
 /// The screen a Save keeps: the config's own choice unless another screen was picked. Rewriting
 /// it always replaced an unplugged chosen screen by the primary it was shown on, and turned an
 /// older index into a name, a "change" that restarted the video for nothing.
-fn picked_screen(picked: usize, config: &Config, screens: &[Screen]) -> MonitorChoice {
-    let shown = clip_recorder::settings::screen_index(&config.monitor, screens.iter().map(|s| s.name.as_str()));
-    match screens.get(picked) {
-        Some(s) if picked != shown => MonitorChoice::Device(s.name.clone()),
+fn picked_screen(picked: usize, config: &Config, shown: &[ShownScreen]) -> MonitorChoice {
+    let names = shown.iter().map(|s| s.screen.name.as_str());
+    let configured = clip_recorder::settings::screen_index(&config.monitor, names);
+    match shown.get(picked) {
+        Some(s) if picked != configured => MonitorChoice::Device(s.screen.name.clone()),
         _ => config.monitor.clone(),
     }
 }
@@ -537,6 +545,15 @@ mod tests {
         vec![s(0, true), s(2560, false)]
     }
 
+    /// The two test screens, the second on an adapter ddagrab cannot reach.
+    fn shown() -> Vec<ShownScreen> {
+        screens()
+            .into_iter()
+            .zip([Grabber::Ddagrab, Grabber::Gdigrab])
+            .map(|(screen, grabber)| ShownScreen { screen, grabber })
+            .collect()
+    }
+
     /// The testing platform is set once per thread: call this once per test.
     fn window(config: &Config) -> SettingsWindow {
         let w = SettingsWindow::new().unwrap();
@@ -544,13 +561,12 @@ mod tests {
         let hw = Hardware {
             encoder: Encoder::Nvenc,
             grabber: Grabber::Ddagrab,
-            screens: vec![Grabber::Ddagrab, Grabber::Gdigrab],
         };
         let devices = (
             vec!["Speakers (Realtek)".into(), "Headphones (USB)".into()],
             vec!["Microphone (Realtek)".into()],
         );
-        fill(&w, config, &screens(), &hw, devices, Some(true));
+        fill(&w, config, &shown(), &hw, devices, Some(true));
         w.on_key_combination(|text, ctrl, alt, shift| {
             clip_recorder::hotkey::format(ctrl, alt, shift, &key_name(&text))
                 .unwrap_or_default()
@@ -599,7 +615,7 @@ mod tests {
                 ..Config::default()
             },
         ] {
-            assert_eq!(read(&window(&config), &config, &screens()), config);
+            assert_eq!(read(&window(&config), &config, &shown()), config);
         }
     }
 
@@ -615,7 +631,7 @@ mod tests {
         assert_eq!(w.get_monitor(), 1);
         w.set_monitor(0);
         assert_eq!(
-            read(&w, &config, &screens()).monitor,
+            read(&w, &config, &shown()).monitor,
             MonitorChoice::Device(r"\\.\DISPLAY1".into())
         );
     }
@@ -630,7 +646,7 @@ mod tests {
         w.set_loopback(2);
         let monitors: Vec<String> = w.get_monitors().iter().map(String::from).collect();
         assert_eq!(monitors, ["1: 2560×1440  (primary)", "2: 2560×1440"]);
-        let new = read(&w, &config, &screens());
+        let new = read(&w, &config, &shown());
         assert_eq!(
             (new.monitor, new.fps, new.loopback_device.as_str()),
             (MonitorChoice::Device(r"\\.\DISPLAY2".into()), 120, "Headphones (USB)")
@@ -653,7 +669,7 @@ mod tests {
         assert_eq!(w.get_capture_status().as_str(), "NVENC     GDI     60 fps");
         assert!(w.get_fps_capped(), "the cap is explained under the frame rate");
         assert_eq!(
-            read(&w, &config, &screens()).fps,
+            read(&w, &config, &shown()).fps,
             240,
             "the choice is kept for a DXGI screen"
         );
