@@ -49,6 +49,7 @@ struct App {
     /// The device the capture was last started on: a health tick moves it when the screen the
     /// config picks is another one.
     capturing_on: String,
+    screen_move: clip_recorder::settings::ScreenMove,
     capture: Capture,
     audio: audio::Audio,
     ffmpeg: PathBuf,
@@ -144,6 +145,7 @@ fn main() {
             config,
             screens: monitors::list(),
             capturing_on: String::new(),
+            screen_move: Default::default(),
             capture,
             audio,
             ffmpeg,
@@ -179,15 +181,14 @@ fn check_health() {
         });
     }
     with_app(|app| {
-        // The chosen screen came back, or went: listing them is cheap, and a resolution change of
-        // the same screen moves nothing.
+        // The chosen screen came back, or went, for 10 s: listing them is cheap, and a resolution
+        // change of the same screen moves nothing.
         let screens = monitors::list();
         let names = screens.iter().map(|s| s.name.as_str());
-        if let Some(i) = clip_recorder::settings::screen_to_move_to(&app.config.monitor, names, &app.capturing_on) {
-            log(&format!(
-                "capture moves from {} to {}",
-                app.capturing_on, screens[i].name
-            ));
+        let wanted = clip_recorder::settings::screen_to_move_to(&app.config.monitor, names, &app.capturing_on)
+            .map(|i| screens[i].name.as_str());
+        if let Some(to) = app.screen_move.tick(wanted) {
+            log(&format!("capture moves from {} to {to}", app.capturing_on));
             app.start_capture(true);
         }
         app.audio.heal();

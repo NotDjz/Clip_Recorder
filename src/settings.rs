@@ -111,6 +111,38 @@ pub fn screen_to_move_to<'a>(
     names.get(wanted).filter(|&&n| n != capturing_on).map(|_| wanted)
 }
 
+/// Health ticks a screen change must hold before the capture follows it (10 s).
+pub const MOVE_TICKS: u32 = 5;
+
+/// Waits out short screen changes: a DisplayPort screen can leave the list while it sleeps or
+/// switches input, and each move wipes the replay buffer. A capture whose ffmpeg dies restarts
+/// on the screen picked then, without waiting.
+#[derive(Debug, Default)]
+pub struct ScreenMove {
+    pending: Option<(String, u32)>,
+}
+
+impl ScreenMove {
+    /// One tick with the screen the capture should move to, if any (screen_to_move_to): that
+    /// screen once it has been the answer MOVE_TICKS ticks in a row.
+    pub fn tick(&mut self, wanted: Option<&str>) -> Option<String> {
+        let Some(wanted) = wanted else {
+            self.pending = None;
+            return None;
+        };
+        let held = match &self.pending {
+            Some((name, n)) if name == wanted => n + 1,
+            _ => 1,
+        };
+        if held >= MOVE_TICKS {
+            self.pending = None;
+            return Some(wanted.to_string());
+        }
+        self.pending = Some((wanted.to_string(), held));
+        None
+    }
+}
+
 /// Above 60 fps only DXGI capture keeps up.
 pub fn fps_choices(ddagrab: bool) -> Vec<u32> {
     FPS_OPTIONS.into_iter().filter(|&f| ddagrab || f <= 60).collect()
@@ -354,6 +386,29 @@ mod tests {
             0,
             "gone itself: the primary"
         );
+    }
+
+    /// A DisplayPort screen can leave the list while it sleeps: each move wipes the buffer, so a
+    /// change has to hold MOVE_TICKS (10 s) before the capture follows it.
+    #[test]
+    fn a_screen_change_must_hold_before_the_capture_follows() {
+        assert_eq!(MOVE_TICKS, 5, "10 s at one tick every 2 s");
+        let mut m = ScreenMove::default();
+        for _ in 1..MOVE_TICKS {
+            assert_eq!(m.tick(Some("B")), None);
+        }
+        assert_eq!(m.tick(Some("B")), Some("B".to_string()), "held long enough");
+        // A blip: the change goes away before it held, and the count starts over.
+        for _ in 1..MOVE_TICKS {
+            assert_eq!(m.tick(Some("A")), None);
+        }
+        assert_eq!(m.tick(None), None);
+        assert_eq!(m.tick(Some("A")), None, "counting again from one");
+        // Another target restarts the count too.
+        for _ in 2..MOVE_TICKS {
+            assert_eq!(m.tick(Some("A")), None);
+        }
+        assert_eq!(m.tick(Some("C")), None);
     }
 
     #[test]

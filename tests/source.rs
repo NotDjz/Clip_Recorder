@@ -163,6 +163,11 @@ fn the_health_tick_moves_the_capture_to_the_chosen_screen() {
         position(tick, "monitors::list()") < position(tick, "screen_to_move_to("),
         "{tick}"
     );
+    // Waited out: a sleeping DisplayPort screen must not cost the buffer twice.
+    assert!(
+        position(tick, "screen_to_move_to(") < position(tick, "app.screen_move.tick("),
+        "{tick}"
+    );
     assert!(tick.contains("start_capture(true)"), "{tick}");
     let start = between(&main, "fn start_capture(", "\n    }");
     assert!(start.contains("self.capturing_on ="), "{start}");
