@@ -2,6 +2,21 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.1.0] - 2026-11-21
+
+### Features
+
+- Choose MP4 or MKV for clips
+
+### Documentation
+
+- Point the download page at v2.0.4
+
+### Tests
+
+- Let the harness ask for an MKV clip
+- Picking MP4 over an MKV config reads back MP4
+
 ## [2.0.4] - 2026-11-21
 
 ### Fixes
