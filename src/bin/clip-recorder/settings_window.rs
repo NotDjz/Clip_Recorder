@@ -350,7 +350,7 @@ pub fn fill(
         .into(),
     );
     w.set_monitors(strings(screens.iter().enumerate().map(|(i, s)| label(i, s))));
-    w.set_monitor(config.monitor.min(screens.len().saturating_sub(1)) as i32);
+    w.set_monitor(clip_recorder::settings::screen_index(config.monitor, screens.len()) as i32);
     let fps = fps_choices(hw.grabber == Grabber::Ddagrab);
     w.set_fps_options(strings(fps.iter().map(u32::to_string)));
     w.set_fps(index_of(&fps, config.fps) as i32);

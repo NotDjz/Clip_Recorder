@@ -58,7 +58,7 @@ struct App {
 impl App {
     /// The banner goes on the captured screen: that is where the user is looking.
     fn notify(&self, state: banner::State, text: &str, seconds: Option<u32>, duration_ms: u32) {
-        let index = self.config.monitor.min(self.screens.len().saturating_sub(1));
+        let index = clip_recorder::settings::screen_index(self.config.monitor, self.screens.len());
         self.banner
             .show(state, text, seconds, duration_ms, self.screens[index].rect);
     }

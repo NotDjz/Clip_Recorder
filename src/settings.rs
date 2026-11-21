@@ -89,6 +89,11 @@ pub fn pick_device(names: &[String], configured: &str) -> Option<usize> {
         .or_else(|| names.iter().position(|n| n.contains(configured)))
 }
 
+/// The screen the capture, the banner and Settings use, among `count` listed primary first.
+pub fn screen_index(configured: usize, count: usize) -> usize {
+    configured.min(count.saturating_sub(1))
+}
+
 /// Above 60 fps only DXGI capture keeps up.
 pub fn fps_choices(ddagrab: bool) -> Vec<u32> {
     FPS_OPTIONS.into_iter().filter(|&f| ddagrab || f <= 60).collect()
@@ -317,6 +322,13 @@ mod tests {
             "falls back to the highest offered"
         );
         assert_eq!(index_of(&fps_choices(true), 120), 2);
+    }
+
+    #[test]
+    fn the_configured_screen_is_clamped_to_the_screens_there_are() {
+        assert_eq!(screen_index(1, 2), 1);
+        assert_eq!(screen_index(5, 2), 1, "a screen since unplugged: the last one");
+        assert_eq!(screen_index(0, 0), 0, "no screen listed: never out of bounds below");
     }
 
     #[test]
