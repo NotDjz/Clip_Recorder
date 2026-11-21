@@ -257,12 +257,23 @@ fn press(keys: &[u16]) {
 /// nobody uses, so an installed Clip Recorder holding Ctrl+Alt+R is left alone.
 #[test]
 fn the_hotkey_saves_a_clip_that_decodes() {
-    let dir = data_dir("save");
+    hotkey_save_decodes("save", "mp4");
+}
+
+/// The same through the real ffmpeg into Matroska: a TS-to-MKV copy it refused would turn every
+/// MKV save into "Clip not saved", with the fake ffmpeg's tests still green.
+#[test]
+fn the_hotkey_saves_an_mkv_that_decodes() {
+    hotkey_save_decodes("save-mkv", "mkv");
+}
+
+fn hotkey_save_decodes(name: &str, format: &str) {
+    let dir = data_dir(name);
     let clips = dir.join("clips");
     std::fs::create_dir_all(&dir).unwrap();
     let config = serde_json::json!({
         "monitor": 1, "fps": 30, "buffer_seconds": 15,
-        "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12",
+        "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12", "format": format,
     });
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
     let log = || std::fs::read_to_string(dir.join("clip_recorder.log")).unwrap_or_default();
@@ -282,8 +293,8 @@ fn the_hotkey_saves_a_clip_that_decodes() {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .find(|p| p.extension().is_some_and(|x| x == "mp4"));
-    let clip = clip.expect("no MP4 in the clips folder");
+        .find(|p| p.extension().is_some_and(|x| x == format));
+    let clip = clip.unwrap_or_else(|| panic!("no .{format} in the clips folder"));
     let decode = Command::new(concat!(env!("CARGO_MANIFEST_DIR"), r"\target\ffmpeg\ffmpeg.exe"))
         .args(["-v", "error", "-i"])
         .arg(&clip)

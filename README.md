@@ -1,7 +1,7 @@
 # Clip Recorder
 
 Replay screen recorder for Windows: it keeps the last few seconds of your screen and sound in the background, and
-`Ctrl+Alt+R` saves them as an MP4. An open-source alternative to ShadowPlay or Medal.
+`Ctrl+Alt+R` saves them as an MP4 (or MKV, in Settings). An open-source alternative to ShadowPlay or Medal.
 
 ## Features
 

@@ -2,6 +2,7 @@
 //! the tests pin each one to the bug it once caused.
 
 use crate::clock::ClockLine;
+use crate::config::ClipFormat;
 use std::path::Path;
 
 /// Each segment's length. The segment ffmpeg is still writing is unusable, so this is exactly
@@ -237,16 +238,24 @@ fn path(p: &Path) -> String {
 
 /// Joins the snapshots without re-encoding. No -ss, not even 0: with B-frames each segment's
 /// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
-/// `is_clip`: it writes the clip itself (no audio), which alone is worth +faststart's rewrite.
-pub fn concat_args(list: &Path, duration: f64, out: &Path, is_clip: bool) -> Vec<String> {
+/// `clip`: the format when it writes the clip itself (no audio); None for the intermediate video
+/// the mux reads next, which is never worth +faststart's rewrite.
+pub fn concat_args(list: &Path, duration: f64, out: &Path, clip: Option<ClipFormat>) -> Vec<String> {
     let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
     a.extend([path(list), "-t".into(), duration.to_string()]);
     a.extend(["-c", "copy"].map(String::from));
-    if is_clip {
-        a.extend(["-movflags", "+faststart"].map(String::from));
-    }
+    a.extend(clip.map_or(&[][..], clip_flags).iter().map(|f| f.to_string()));
     a.push(path(out));
     a
+}
+
+/// What the clip's container needs: an MP4 gets its index first, so players start at once;
+/// +faststart is the MP4 muxer's flag, MKV has none.
+fn clip_flags(format: ClipFormat) -> &'static [&'static str] {
+    match format {
+        ClipFormat::Mp4 => &["-movflags", "+faststart"],
+        ClipFormat::Mkv => &[],
+    }
 }
 
 /// Game sound + mic. Both resampled to 48 kHz stereo before amix, normalize off: otherwise the
@@ -272,22 +281,10 @@ pub fn mix_args(loopback: &Path, mic: &Path, out: &Path) -> Vec<String> {
 }
 
 /// The clip: the video copied, the audio in AAC, cut to the shorter of the two.
-pub fn mux_args(video: &Path, audio: &Path, out: &Path) -> Vec<String> {
+pub fn mux_args(video: &Path, audio: &Path, out: &Path, format: ClipFormat) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-i".into(), path(video), "-i".into(), path(audio)];
-    a.extend(
-        [
-            "-c:v",
-            "copy",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "192k",
-            "-shortest",
-            "-movflags",
-            "+faststart",
-        ]
-        .map(String::from),
-    );
+    a.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"].map(String::from));
+    a.extend(clip_flags(format).iter().map(|f| f.to_string()));
     a.push(path(out));
     a
 }
@@ -302,23 +299,39 @@ mod tests {
     #[test]
     fn only_the_clip_is_rewritten_for_fast_start() {
         let fast = |a: Vec<String>| a.contains(&"+faststart".to_string());
-        assert!(fast(concat_args(Path::new("l.txt"), 3.0, Path::new("clip.mp4"), true)));
-        assert!(!fast(concat_args(
+        let concat = |clip| concat_args(Path::new("l.txt"), 3.0, Path::new("out"), clip);
+        let mux = |format| mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("out"), format);
+        assert!(fast(concat(Some(ClipFormat::Mp4))));
+        assert!(!fast(concat(None)), "the intermediate video");
+        assert!(fast(mux(ClipFormat::Mp4)));
+    }
+
+    /// +faststart is the MP4 muxer's flag: an MKV clip gets no -movflags at all.
+    #[test]
+    fn an_mkv_clip_gets_no_mp4_flags() {
+        let movflags = |a: Vec<String>| a.contains(&"-movflags".to_string());
+        assert!(!movflags(concat_args(
             Path::new("l.txt"),
             3.0,
-            Path::new("video.mp4"),
-            false
+            Path::new("clip.mkv"),
+            Some(ClipFormat::Mkv)
         )));
-        assert!(fast(mux_args(
+        assert!(!movflags(mux_args(
             Path::new("v.mp4"),
             Path::new("a.wav"),
-            Path::new("clip.mp4")
+            Path::new("clip.mkv"),
+            ClipFormat::Mkv
         )));
     }
 
     #[test]
     fn the_concat_never_seeks_and_cuts_at_the_selected_duration() {
-        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"), true);
+        let a = concat_args(
+            Path::new("list.txt"),
+            15.25,
+            Path::new("out.mp4"),
+            Some(ClipFormat::Mp4),
+        );
         assert!(!a.contains(&"-ss".to_string()), "{a:?}");
         assert_eq!(value(&a, "-t"), Some("15.25"));
         assert_eq!(value(&a, "-c"), Some("copy"));
@@ -334,7 +347,12 @@ mod tests {
 
     #[test]
     fn the_mux_copies_the_video_and_stops_at_the_shorter_stream() {
-        let a = mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("clip.mp4"));
+        let a = mux_args(
+            Path::new("v.mp4"),
+            Path::new("a.wav"),
+            Path::new("clip.mp4"),
+            ClipFormat::Mp4,
+        );
         assert_eq!(
             (value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")),
             (Some("copy"), Some("aac"), Some("192k"))

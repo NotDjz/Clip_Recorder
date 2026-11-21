@@ -334,7 +334,7 @@ def run_generate(args):
     os.makedirs(clips)
     with open(os.path.join(data, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"monitor": mon_idx, "fps": args.fps, "buffer_seconds": args.buffer,
-                   "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12"}, f)
+                   "output_folder": clips, "hotkey": "Ctrl+Alt+Shift+F12", "format": args.format}, f)
     env = dict(os.environ, CLIPREC_DATA_DIR=data, CLIPREC_FFMPEG=_ffmpeg_path())
     app = subprocess.Popen([args.exe], env=env)
 
@@ -395,7 +395,7 @@ def run_generate(args):
     result = {}
 
     def wait_for_clip(deadline):
-        files = [f for f in os.listdir(clips) if f.endswith(".mp4")]
+        files = [f for f in os.listdir(clips) if f.endswith("." + args.format)]
         if files:
             result["path"] = os.path.join(clips, files[0])
             print(f"  saved: {result['path']}")
@@ -450,6 +450,8 @@ def main():
                    help="Save at this timecode instead of waiting for the buffer to "
                         "fill — exercises the not-enough-history path taken right "
                         "after a settings change.")
+    p.add_argument("--format", choices=["mp4", "mkv"], default="mp4",
+                   help="The clip container the app writes (its \"format\" setting).")
     p.add_argument("--json", metavar="FILE", default=None,
                    help="Also write what the analysis measured to FILE (read by scripts/release-check.ps1).")
     args = p.parse_args()

@@ -18,6 +18,25 @@ pub enum MonitorChoice {
     Device(String),
 }
 
+/// The clip's container. The video and audio are the same in both: MP4 plays everywhere and
+/// Discord previews it; MKV is what editing software and OBS users often prefer.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipFormat {
+    #[default]
+    Mp4,
+    Mkv,
+}
+
+impl ClipFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ClipFormat::Mp4 => "mp4",
+            ClipFormat::Mkv => "mkv",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Config {
     pub monitor: MonitorChoice,
@@ -32,6 +51,7 @@ pub struct Config {
     /// Empty: Auto (the Windows default input).
     pub mic_device: String,
     pub hotkey: String,
+    pub format: ClipFormat,
 }
 
 impl Default for Config {
@@ -44,6 +64,7 @@ impl Default for Config {
             loopback_device: String::new(),
             mic_device: String::new(),
             hotkey: DEFAULT_HOTKEY.into(),
+            format: ClipFormat::Mp4,
         }
     }
 }
@@ -80,6 +101,10 @@ impl Config {
             loopback_device: text("loopback_device").unwrap_or(d.loopback_device),
             mic_device: text("mic_device").unwrap_or(d.mic_device),
             hotkey: text("hotkey").filter(|h| !h.trim().is_empty()).unwrap_or(d.hotkey),
+            format: match text("format").map(|f| f.trim().to_lowercase()).as_deref() {
+                Some("mkv") => ClipFormat::Mkv,
+                _ => ClipFormat::Mp4,
+            },
         }
     }
 
@@ -149,6 +174,21 @@ mod tests {
         );
     }
 
+    /// The clip's container, MP4 unless the user picked MKV; hand-edited case is accepted.
+    #[test]
+    fn the_clip_format_is_mp4_unless_mkv_is_asked_for() {
+        assert_eq!(Config::parse(r#"{"format": "MKV"}"#).format, ClipFormat::Mkv);
+        assert_eq!(Config::parse(r#"{"format": " mkv "}"#).format, ClipFormat::Mkv);
+        assert_eq!(Config::parse(r#"{"format": "mp4"}"#).format, ClipFormat::Mp4);
+        for other in [r#"{"format": "avi"}"#, r#"{"format": 3}"#, "{}"] {
+            assert_eq!(Config::parse(other).format, ClipFormat::Mp4, "{other}");
+        }
+        assert_eq!(
+            (ClipFormat::Mp4.extension(), ClipFormat::Mkv.extension()),
+            ("mp4", "mkv")
+        );
+    }
+
     #[test]
     fn values_outside_the_options_fall_back_to_the_defaults() {
         let c = Config::parse(r#"{"fps": 144, "buffer_seconds": 0, "hotkey": ""}"#);
@@ -165,6 +205,7 @@ mod tests {
             buffer_seconds: 90,
             loopback_device: "Haut-parleurs (Realtek(R) Audio)".into(),
             monitor: MonitorChoice::Device(r"\\.\DISPLAY2".into()),
+            format: ClipFormat::Mkv,
             ..Config::default()
         };
         c.save(&path).unwrap();
