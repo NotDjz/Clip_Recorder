@@ -94,12 +94,17 @@ impl Side {
         (configured, default)
     }
 
+    /// The format a stream on `device` would open with: a loopback captures an output's.
+    fn format(&self, device: &cpal::Device) -> Option<cpal::SupportedStreamConfig> {
+        match self.kind {
+            Kind::Loopback => device.default_output_config().ok(),
+            Kind::Mic => device.default_input_config().ok(),
+        }
+    }
+
     /// Takes `device` with its current format, or none.
     fn adopt(&mut self, device: Option<cpal::Device>) {
-        let config = device.as_ref().and_then(|d| match self.kind {
-            Kind::Loopback => d.default_output_config().ok(),
-            Kind::Mic => d.default_input_config().ok(),
-        });
+        let config = device.as_ref().and_then(|d| self.format(d));
         match (device, config) {
             (Some(d), Some(c)) => {
                 self.name = device_name(&d);
@@ -121,11 +126,7 @@ impl Side {
     fn open(&mut self) {
         self.stream = None;
         let Some(device) = self.device.clone() else { return };
-        let config = match self.kind {
-            Kind::Loopback => device.default_output_config(),
-            Kind::Mic => device.default_input_config(),
-        };
-        let Ok(config) = config else {
+        let Some(config) = self.format(&device) else {
             log(&format!(
                 "{} stream OPEN FAILED: no config for {}",
                 self.kind.label(),
@@ -245,7 +246,10 @@ impl Side {
             // Silent while nothing is found: a side with no device would otherwise log every 30 s.
             Decision::Detect => {
                 let (configured, default) = self.candidates();
-                let Some(device) = configured.or(default) else { return };
+                // One that cannot give a format is not found either: adopt would log every 30 s.
+                let Some(device) = configured.or(default).filter(|d| self.format(d).is_some()) else {
+                    return;
+                };
                 let format = (self.rate, self.channels);
                 self.adopt(Some(device));
                 if !heal::keeps_history(format, (self.rate, self.channels)) {
