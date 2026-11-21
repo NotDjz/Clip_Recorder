@@ -21,13 +21,26 @@ pub fn seconds(t: std::time::SystemTime) -> f64 {
 const FIRST_WINDOW_S: f64 = 1.0;
 const WINDOW_S: f64 = 10.0;
 
-/// The pts of a capture line, or None for any other line.
-pub fn capture_pts(line: &[u8]) -> Option<f64> {
+/// Which -debug_ts line carries a capture's frames as they leave it: the demuxer's for an input
+/// (gdigrab), the filter graph's for a source filter (ddagrab under -filter_complex). gdigrab
+/// prints both, with different origins, so a capture reads exactly one kind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClockLine {
+    Demuxer,
+    Filter,
+}
+
+/// The pts of a capture line of `kind`, or None for any other line.
+pub fn capture_pts(line: &[u8], kind: ClockLine) -> Option<f64> {
     let line = std::str::from_utf8(line).ok()?;
-    if !line.contains("demuxer+ffmpeg ->") {
+    let (marker, key) = match kind {
+        ClockLine::Demuxer => ("demuxer+ffmpeg ->", "pkt_pts_time:"),
+        ClockLine::Filter => ("filter_raw ->", " pts_time:"),
+    };
+    if !line.contains(marker) {
         return None;
     }
-    let (_, rest) = line.split_once("pkt_pts_time:")?;
+    let (_, rest) = line.split_once(key)?;
     rest.split_whitespace().next()?.parse().ok()
 }
 
@@ -73,13 +86,35 @@ mod tests {
         assert!(e.observe(111.0, 11.0).is_some(), "and closes 10 s after it opened");
     }
 
+    const DEMUXER: &[u8] =
+        b"[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:0 pkt_pts_time:1.5 pkt_dts:0";
+    const FILTER: &[u8] =
+        b"[fc#0 @ 0000] [vo0->#0:0 @ 0000] filter_raw -> pts:33534 pts_time:0.033534 time_base:1/1000000";
+
     #[test]
     fn only_capture_lines_carry_the_clock() {
-        let capture = b"[vist#0:0/wrapped_avframe] demuxer+ffmpeg -> ist_index:0:0 type:video pkt_pts:0 pkt_pts_time:1.5 pkt_dts:0";
-        assert_eq!(capture_pts(capture), Some(1.5));
-        assert_eq!(capture_pts(b"[out#0] muxer <- pkt_pts_time:9.0 must be ignored"), None);
-        assert_eq!(capture_pts(b"demuxer+ffmpeg -> pkt_pts_time:garbage"), None);
-        assert_eq!(capture_pts(b"demuxer+ffmpeg -> no pts here"), None);
+        assert_eq!(capture_pts(DEMUXER, ClockLine::Demuxer), Some(1.5));
+        assert_eq!(
+            capture_pts(b"[out#0] muxer <- pkt_pts_time:9.0 must be ignored", ClockLine::Demuxer),
+            None
+        );
+        assert_eq!(
+            capture_pts(b"demuxer+ffmpeg -> pkt_pts_time:garbage", ClockLine::Demuxer),
+            None
+        );
+        assert_eq!(capture_pts(b"demuxer+ffmpeg -> no pts here", ClockLine::Demuxer), None);
+        assert_eq!(capture_pts(FILTER, ClockLine::Filter), Some(0.033534));
+        assert_eq!(
+            capture_pts(b"filter -> pts:0 pts_time:0 exact:0.000000", ClockLine::Filter),
+            None
+        );
+    }
+
+    /// gdigrab prints both kinds, with different origins: a capture reads exactly one of them.
+    #[test]
+    fn each_capture_reads_only_its_own_kind_of_line() {
+        assert_eq!(capture_pts(FILTER, ClockLine::Demuxer), None);
+        assert_eq!(capture_pts(DEMUXER, ClockLine::Filter), None);
     }
 
     #[test]

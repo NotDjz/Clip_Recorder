@@ -1,6 +1,7 @@
 //! The capture ffmpeg's command line. Every argument here was measured on the Python app;
 //! the tests pin each one to the bug it once caused.
 
+use crate::clock::ClockLine;
 use std::path::Path;
 
 /// Each segment's length. The segment ffmpeg is still writing is unusable, so this is exactly
@@ -50,6 +51,32 @@ impl Source {
             Source::Gdigrab(_) => Grabber::Gdigrab,
         }
     }
+
+    /// The -debug_ts line its capture clock is read from.
+    pub fn clock_line(&self) -> ClockLine {
+        match self {
+            Source::Ddagrab { .. } => ClockLine::Filter,
+            Source::Gdigrab(_) => ClockLine::Demuxer,
+        }
+    }
+}
+
+/// NVIDIA's PCI vendor id: NVENC encodes only its adapter's frames, and the app lists only its
+/// outputs (monitors::dxgi_outputs).
+pub const NVIDIA_VENDOR_ID: u32 = 0x10DE;
+
+/// ddagrab as a source filter on the NVIDIA adapter, named explicitly. Read through -f lavfi it
+/// ignores any device and runs on the ffmpeg process's default adapter, which a per-app GPU
+/// preference can make another one than the app's (measured: lavfi keeps an internal device).
+pub fn ddagrab_input(fps: u32, output: usize) -> Vec<String> {
+    vec![
+        "-init_hw_device".into(),
+        format!("d3d11va=dda:,vendor_id={NVIDIA_VENDOR_ID:#06x}"),
+        "-filter_hw_device".into(),
+        "dda".into(),
+        "-filter_complex".into(),
+        format!("ddagrab=framerate={fps}:output_idx={output}:draw_mouse=0"),
+    ]
 }
 
 /// ddagrab on the DXGI output whose rectangle is `screen`'s, else GDI on that rectangle.
@@ -119,12 +146,7 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
     let wrap = segment_wrap(c.buffer_seconds).to_string();
     let mut a: Vec<String> = vec!["-y".into(), "-debug_ts".into()];
     match c.source {
-        Source::Ddagrab { output } => a.extend([
-            "-f".into(),
-            "lavfi".into(),
-            "-i".into(),
-            format!("ddagrab=framerate={fps}:output_idx={output}:draw_mouse=0"),
-        ]),
+        Source::Ddagrab { output } => a.extend(ddagrab_input(rate, output)),
         Source::Gdigrab(m) => a.extend([
             "-f".into(),
             "gdigrab".into(),
@@ -476,6 +498,26 @@ mod tests {
             (Some("1920"), Some("0"), Some("2560x1440"))
         );
         assert_eq!(value(&a, "-i"), Some("desktop"));
+    }
+
+    /// ddagrab read through `-f lavfi` ignores any device given to it and runs on the ffmpeg
+    /// process's default adapter, which a per-app GPU preference can change. Through
+    /// -filter_complex it takes the device named here: the NVIDIA adapter, which NVENC needs
+    /// anyway, and whose outputs the app lists (measured: no internal device is created then).
+    #[test]
+    fn ddagrab_runs_on_the_nvidia_adapter_named_explicitly() {
+        let a = args(240, Grabber::Ddagrab, Encoder::Nvenc);
+        assert_eq!(value(&a, "-init_hw_device"), Some("d3d11va=dda:,vendor_id=0x10de"));
+        assert_eq!(value(&a, "-filter_hw_device"), Some("dda"));
+        assert_eq!(
+            value(&a, "-filter_complex"),
+            Some("ddagrab=framerate=240:output_idx=1:draw_mouse=0")
+        );
+        let at = |flag: &str| a.iter().position(|x| x == flag).unwrap();
+        assert!(at("-init_hw_device") < at("-filter_hw_device") && at("-filter_hw_device") < at("-filter_complex"));
+        assert!(!a.contains(&"lavfi".to_string()), "{a:?}");
+        assert_eq!(Source::Ddagrab { output: 1 }.clock_line(), ClockLine::Filter);
+        assert_eq!(Source::Gdigrab(SECOND).clock_line(), ClockLine::Demuxer);
     }
 
     /// ddagrab counts the outputs of the first graphics adapter in DXGI's own order, which is not

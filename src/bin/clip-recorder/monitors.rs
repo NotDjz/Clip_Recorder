@@ -37,14 +37,20 @@ unsafe extern "system" fn visit(handle: HMONITOR, _dc: HDC, _rect: *mut RECT, da
     1
 }
 
-/// The first graphics adapter's outputs, in DXGI's order: what ddagrab's output_idx counts (its
-/// D3D11 device is made on the default adapter). Empty if DXGI cannot be asked: GDI then.
+/// The NVIDIA adapter's outputs, in DXGI's order: what ddagrab's output_idx counts, since the
+/// capture names that adapter to ffmpeg (ffmpeg_cmd::ddagrab_input) by the same rule, the first
+/// adapter with NVIDIA's vendor id. Empty without one, or if DXGI cannot be asked: GDI then.
 pub fn dxgi_outputs() -> Vec<Monitor> {
+    use clip_recorder::ffmpeg_cmd::NVIDIA_VENDOR_ID;
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
     let outputs = || -> windows::core::Result<Vec<Monitor>> {
-        let adapter = unsafe { CreateDXGIFactory1::<IDXGIFactory1>()?.EnumAdapters1(0)? };
+        let factory = unsafe { CreateDXGIFactory1::<IDXGIFactory1>()? };
+        // EnumAdapters1 and EnumOutputs fail (DXGI_ERROR_NOT_FOUND) one past the last.
+        let nvidia = (0..)
+            .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
+            .find(|a| unsafe { a.GetDesc1() }.is_ok_and(|d| d.VendorId == NVIDIA_VENDOR_ID));
+        let Some(adapter) = nvidia else { return Ok(Vec::new()) };
         let mut found = Vec::new();
-        // EnumOutputs fails (DXGI_ERROR_NOT_FOUND) one past the last output.
         while let Ok(output) = unsafe { adapter.EnumOutputs(found.len() as u32) } {
             let r = unsafe { output.GetDesc()? }.DesktopCoordinates;
             found.push(Monitor {
@@ -95,7 +101,7 @@ mod tests {
     #[ignore]
     fn dxgi_outputs_on_this_machine() {
         let outputs = dxgi_outputs();
-        println!("DXGI outputs (adapter 0): {outputs:?}");
+        println!("DXGI outputs (NVIDIA adapter): {outputs:?}");
         for (i, s) in list().iter().enumerate() {
             let source =
                 clip_recorder::ffmpeg_cmd::source(clip_recorder::ffmpeg_cmd::Grabber::Ddagrab, &outputs, s.rect);
