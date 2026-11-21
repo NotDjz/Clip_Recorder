@@ -39,7 +39,9 @@ pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, durat
     let start = end - duration;
     let tolerance = (rate as f64 * TOLERANCE_S) as i64;
     let mut cursor: Option<i64> = None; // where a continuing run would land next
-    let mut filled = 0usize;
+    // One bit per frame: a re-anchored chunk can overlap the one before it, and counting its
+    // frames again could hide a real gap elsewhere in the window.
+    let mut written = vec![0u64; (total as usize).div_ceil(64)];
     for chunk in chunks {
         let frames = (chunk.samples.len() / channels) as i64;
         if frames == 0 {
@@ -61,13 +63,10 @@ pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, durat
         let (from, to) = ((skip as usize) * channels, (dst as usize) * channels);
         let n = count as usize * channels;
         out[to..to + n].copy_from_slice(&chunk.samples[from..from + n]);
-        filled += count as usize;
+        (dst as usize..(dst + count) as usize).for_each(|f| written[f / 64] |= 1 << (f % 64));
     }
-    // A re-anchored chunk can overlap the one before it: never more than the window.
-    (filled > 0).then(|| Rendered {
-        samples: out,
-        filled: filled.min(total as usize),
-    })
+    let filled = written.iter().map(|w| w.count_ones() as usize).sum();
+    (filled > 0).then_some(Rendered { samples: out, filled })
 }
 
 /// A side's WAV, as a save wrote it: the share of its window that came from the stream, and
@@ -279,6 +278,10 @@ mod tests {
             half,
             "clipped to the window"
         );
+        // Re-anchored 50 ms back (past the tolerance), over the chunk before it: [0.45, 1.0] is
+        // filled once, not 1.0 s; counted twice, overlap could hide a real gap.
+        let overlap = [(1.0, chunk(1, half)), (0.95, chunk(2, half))];
+        assert_eq!(filled(&overlap, 2.0, 2.0), (0.55 * RATE as f64) as usize);
     }
 
     #[test]
