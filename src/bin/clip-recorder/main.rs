@@ -24,6 +24,7 @@ use chimes::Chime;
 use clip_recorder::config::Config;
 use clip_recorder::hotkey;
 use clip_recorder::paths;
+use clip_recorder::render::GameSound;
 use clip_recorder::selection::GiveUp;
 use logging::log;
 use monitors::Screen;
@@ -387,10 +388,10 @@ fn feedback(event: SaveEvent) -> Feedback {
         SaveEvent::Ended(Ok(save::Saved { seconds, game_sound })) => (
             Chime::Saved,
             banner::State::Saved,
-            if game_sound {
-                "Clip saved"
-            } else {
-                "Clip saved, no game sound"
+            match game_sound {
+                GameSound::Full => "Clip saved",
+                GameSound::Partial => "Clip saved, game sound partly missing",
+                GameSound::Missing => "Clip saved, no game sound",
             },
             Some(seconds),
             banner::HOLD_MS,
@@ -494,7 +495,7 @@ mod tests {
         );
         let saved = feedback(SaveEvent::Ended(Ok(save::Saved {
             seconds: 31,
-            game_sound: true,
+            game_sound: GameSound::Full,
         })));
         assert_eq!(
             (saved.chime, saved.state, saved.seconds),
@@ -503,13 +504,22 @@ mod tests {
         // 7 saves in 15 lost the game sound and said "Clip saved" all the same.
         let mute = feedback(SaveEvent::Ended(Ok(save::Saved {
             seconds: 31,
-            game_sound: false,
+            game_sound: GameSound::Missing,
+        })));
+        let partial = feedback(SaveEvent::Ended(Ok(save::Saved {
+            seconds: 31,
+            game_sound: GameSound::Partial,
         })));
         assert_eq!(
             (mute.chime, mute.state, mute.seconds),
             (Chime::Saved, banner::State::Saved, Some(31))
         );
         assert_ne!(mute.text, saved.text, "a clip without game sound must say so");
+        assert_eq!(partial.state, banner::State::Saved);
+        assert!(
+            partial.text != saved.text && partial.text != mute.text,
+            "part of the game sound missing reads apart from both"
+        );
         let soon = feedback(SaveEvent::Ended(Err(GiveUp::TooSoon)));
         let lost = feedback(SaveEvent::Ended(Err(GiveUp::Error)));
         for f in [&soon, &lost] {

@@ -7,7 +7,7 @@
 use crate::logging::log;
 use clip_recorder::clock;
 use clip_recorder::heal::{self, Decision, Retry};
-use clip_recorder::render::{self, Chunk, render_window};
+use clip_recorder::render::{self, Chunk, Written, render_window};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
 use std::collections::VecDeque;
@@ -266,7 +266,7 @@ impl Side {
     }
 
     /// Writes this side's window as a WAV. False when nothing overlaps it (a dead stream).
-    fn save_wav(&self, path: &Path, end: f64, duration: f64) -> bool {
+    fn save_wav(&self, path: &Path, end: f64, duration: f64) -> Option<Written> {
         // Only the chunks that can reach the window (a chunk ends at its arrival), so the
         // callbacks wait on a short copy, not on 120 s of audio.
         let history: Vec<(f64, Vec<i16>)> = {
@@ -280,9 +280,8 @@ impl Side {
                 samples: s,
             })
             .collect();
-        let Some(samples) = render_window(&chunks, self.rate, self.channels, end, duration) else {
-            return false;
-        };
+        let rendered = render_window(&chunks, self.rate, self.channels, end, duration)?;
+        let samples = &rendered.samples;
         let spec = hound::WavSpec {
             channels: self.channels,
             sample_rate: self.rate,
@@ -297,7 +296,15 @@ impl Side {
             s.flush()?;
             w.finalize()
         };
-        write().is_ok()
+        write().ok()?;
+        let frames = samples.len() / self.channels.max(1) as usize;
+        let continuous = history.last().is_some_and(|(t, _)| {
+            heal::delivered_continuously(self.frames.load(Ordering::Relaxed), self.rate, self.opened_at, *t)
+        });
+        Some(Written {
+            coverage: rendered.filled as f64 / frames.max(1) as f64,
+            continuous,
+        })
     }
 
     /// One line for the save log: enough to tell silence, a stall and a dead stream apart.
@@ -385,7 +392,7 @@ impl Audio {
         self.side(kind).device.is_some()
     }
 
-    pub fn save_wav(&self, kind: Kind, path: &Path, end: f64, duration: f64) -> bool {
+    pub fn save_wav(&self, kind: Kind, path: &Path, end: f64, duration: f64) -> Option<Written> {
         self.side(kind).save_wav(path, end, duration)
     }
 
@@ -431,6 +438,7 @@ mod tests {
         let size = std::fs::metadata(&wav).map(|m| m.len()).unwrap_or(0);
         let _ = std::fs::remove_file(&wav);
         audio.stop();
-        assert!(saved && size > 0, "loopback WAV not written ({size} bytes)");
+        println!("loopback WAV: {saved:?}");
+        assert!(saved.is_some() && size > 0, "loopback WAV not written ({size} bytes)");
     }
 }

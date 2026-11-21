@@ -20,9 +20,16 @@ pub struct Chunk<'a> {
     pub samples: &'a [i16],
 }
 
+/// A rendered window: its samples, and how many of its frames came from chunks (the rest is
+/// silence put in the gaps).
+pub struct Rendered {
+    pub samples: Vec<i16>,
+    pub filled: usize,
+}
+
 /// Exactly round(duration * rate) frames ending at `end`, or None if no chunk overlaps the
 /// window (a dead stream: the clip then falls back to the other source).
-pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, duration: f64) -> Option<Vec<i16>> {
+pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, duration: f64) -> Option<Rendered> {
     let channels = channels.max(1) as usize;
     let total = (duration * rate as f64).round() as i64;
     if total <= 0 {
@@ -32,7 +39,7 @@ pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, durat
     let start = end - duration;
     let tolerance = (rate as f64 * TOLERANCE_S) as i64;
     let mut cursor: Option<i64> = None; // where a continuing run would land next
-    let mut wrote = false;
+    let mut filled = 0usize;
     for chunk in chunks {
         let frames = (chunk.samples.len() / channels) as i64;
         if frames == 0 {
@@ -54,9 +61,41 @@ pub fn render_window(chunks: &[Chunk], rate: u32, channels: u16, end: f64, durat
         let (from, to) = ((skip as usize) * channels, (dst as usize) * channels);
         let n = count as usize * channels;
         out[to..to + n].copy_from_slice(&chunk.samples[from..from + n]);
-        wrote = true;
+        filled += count as usize;
     }
-    wrote.then_some(out)
+    // A re-anchored chunk can overlap the one before it: never more than the window.
+    (filled > 0).then(|| Rendered {
+        samples: out,
+        filled: filled.min(total as usize),
+    })
+}
+
+/// A side's WAV, as a save wrote it: the share of its window that came from the stream, and
+/// whether that stream delivers all along (a loopback that skips silence has gaps that are not
+/// losses, see heal::delivered_continuously).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Written {
+    pub coverage: f64,
+    pub continuous: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GameSound {
+    Full,
+    /// A loopback that delivers all along filled under 90 % of the window: it stalled or died
+    /// during the clip.
+    Partial,
+    /// No loopback WAV at all.
+    Missing,
+}
+
+/// What a clip says about its game sound, from the loopback's WAV.
+pub fn game_sound(loopback: Option<Written>) -> GameSound {
+    match loopback {
+        None => GameSound::Missing,
+        Some(w) if w.continuous && w.coverage < 0.9 => GameSound::Partial,
+        Some(_) => GameSound::Full,
+    }
 }
 
 /// Adds a chunk to a side's history and drops what is older than `keep_seconds`. By age, not by
@@ -102,7 +141,7 @@ mod tests {
                 samples: s,
             })
             .collect();
-        render_window(&chunks, RATE, 1, end, duration)
+        render_window(&chunks, RATE, 1, end, duration).map(|r| r.samples)
     }
 
     #[test]
@@ -143,7 +182,8 @@ mod tests {
             2.0,
             1.0,
         )
-        .unwrap();
+        .unwrap()
+        .samples;
         assert_eq!(
             (out[0], out[1]),
             (12000, -12000),
@@ -209,8 +249,53 @@ mod tests {
             1.0,
             1.0,
         )
-        .unwrap();
+        .unwrap()
+        .samples;
         assert_eq!(out.len(), 2 * RATE as usize);
         assert_eq!((out[2 * 12000], out[2 * 36000], out[2 * 36000 + 1]), (0, 9, 9));
+    }
+
+    /// How much of the window came from chunks: what tells a partly missing game sound.
+    #[test]
+    fn the_window_says_how_much_of_it_was_filled() {
+        let filled = |chunks: &[(f64, Vec<i16>)], end: f64, duration: f64| {
+            let chunks: Vec<Chunk> = chunks
+                .iter()
+                .map(|(t, s)| Chunk {
+                    arrival: *t,
+                    samples: s,
+                })
+                .collect();
+            render_window(&chunks, RATE, 1, end, duration).unwrap().filled
+        };
+        let half = RATE as usize / 2;
+        assert_eq!(
+            filled(&[(1.0, chunk(1, half)), (1.5, chunk(1, half))], 1.5, 1.0),
+            RATE as usize
+        );
+        assert_eq!(filled(&[(1.0, chunk(1, half))], 2.0, 2.0), half, "a 1.5 s gap");
+        assert_eq!(
+            filled(&[(1.0, chunk(1, 2 * RATE as usize))], 1.0, 0.5),
+            half,
+            "clipped to the window"
+        );
+    }
+
+    #[test]
+    fn a_game_sound_is_judged_partial_only_from_a_loopback_that_delivers_all_along() {
+        let written = |coverage, continuous| Some(Written { coverage, continuous });
+        assert_eq!(game_sound(None), GameSound::Missing);
+        assert_eq!(game_sound(written(1.0, true)), GameSound::Full);
+        assert_eq!(game_sound(written(0.9, true)), GameSound::Full);
+        assert_eq!(
+            game_sound(written(0.5, true)),
+            GameSound::Partial,
+            "a stall inside the window"
+        );
+        assert_eq!(
+            game_sound(written(0.5, false)),
+            GameSound::Full,
+            "skipped silence is silence"
+        );
     }
 }
