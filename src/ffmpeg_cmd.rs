@@ -234,6 +234,9 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
                 "zerolatency",
                 "-crf",
                 "18",
+                // From BGRA libx264 picks High 4:4:4, which no GPU decodes (DXVA).
+                "-pix_fmt",
+                "yuv420p",
             ]
             .map(String::from),
         ),
@@ -617,6 +620,14 @@ mod tests {
         // qp 26 was tried in v1.3: visibly worse in motion, reverted.
         assert_eq!(value(&args(60, Grabber::Ddagrab, HEVC), "-qp"), Some("20"));
         assert_eq!(value(&args(60, Grabber::Gdigrab, Encoder::X264), "-crf"), Some("18"));
+    }
+
+    /// Fed gdigrab's BGRA, libx264 wrote High 4:4:4: no GPU decodes it through DXVA and many
+    /// players refuse it. Every clip without an NVIDIA GPU was one.
+    #[test]
+    fn the_cpu_encoder_writes_4_2_0_that_gpus_decode() {
+        let a = args(60, Grabber::Gdigrab, Encoder::X264);
+        assert_eq!(value(&a, "-pix_fmt"), Some("yuv420p"));
     }
 
     /// HEVC 10-bit 4:2:0 at qp 20: same quality as H.264 qp 20 for 18 % less, gradients in 10 bits,
