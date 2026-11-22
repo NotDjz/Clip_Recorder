@@ -13,6 +13,9 @@ if (-not $r) { $problems += 'no result' } else {
     if (-not $r.decode_clean) { $problems += 'decode errors' }
     if ($r.discontinuities -ne 0) { $problems += "$($r.discontinuities) discontinuities" }
     if ($r.beeps_missing -or $r.unexpected_sound) { $problems += 'sound where silence was scheduled, or the reverse' }
+    # The live meter heard Windows play something between beeps (Discord, a notification): a polluted run.
+    if ($r.sound_leaks) { $problems += "$($r.sound_leaks) sound(s) during scheduled silence" }
+    if ($r.mic_leaks) { $problems += "$($r.mic_leaks) mic sound(s) during scheduled silence" }
     if ([math]::Abs($r.median_offset_ms) -gt $limits.median) { $problems += "median $($r.median_offset_ms) ms" }
     if ($r.max_abs_offset_ms -gt $limits.max) { $problems += "max $($r.max_abs_offset_ms) ms" }
     if ($r.duration_diff_ms -gt $limits.durationDiff) { $problems += "audio/video lengths differ by $($r.duration_diff_ms) ms" }

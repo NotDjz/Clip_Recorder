@@ -561,6 +561,28 @@ fn every_powershell_script_and_step_parses() {
     );
 }
 
+/// The A/V harness's analysis, checked without audio, a screen or the app: a clip opening on a
+/// beep's last 0.14 s read as a missing beep and failed the verdict (120 fps, 2026-11-22).
+#[test]
+fn the_timecode_analysis_checks_itself() {
+    // The repo runs the harness with the py launcher; CI's runner also has python on PATH.
+    let run = |exe: &str, first: &[&str]| {
+        std::process::Command::new(exe)
+            .args(first)
+            .args(["-I", "tests/timecode_sync_test.py", "--self-check"])
+            .output()
+    };
+    let out = run("py", &["-3"])
+        .or_else(|_| run("python", &[]))
+        .expect("the py launcher or python on PATH");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The release gate's verdict runs on real result files: a string check passed on a
 /// release-check.ps1 whose first measurement died on a parameter-binding error.
 #[test]
@@ -580,6 +602,16 @@ fn the_av_sync_verdict_runs_on_measured_results() {
             "crackle",
             Some(good.replace(r#""discontinuities":0"#, r#""discontinuities":3"#)),
             "3 discontinuities",
+        ),
+        (
+            "leak",
+            Some(good.replace(r#""rc":0"#, r#""rc":0,"sound_leaks":2"#)),
+            "2 sound(s) during scheduled silence",
+        ),
+        (
+            "mic",
+            Some(good.replace(r#""rc":0"#, r#""rc":0,"sound_leaks":0,"mic_leaks":1"#)),
+            "1 mic sound(s) during scheduled silence",
         ),
         ("missing", None, "no result"),
     ];
