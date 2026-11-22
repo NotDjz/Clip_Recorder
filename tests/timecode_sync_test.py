@@ -20,6 +20,7 @@ Usage:
 """
 import argparse
 import array
+import collections
 import math
 import os
 import struct
@@ -47,6 +48,7 @@ METER_FLOOR_DB = -60.0
 LEAK_DB = -50.0           # the test beep plays at -20 dBFS; digital silence reads nothing
 MIC_LEAK_DB = -30.0       # a mic always hisses (about -60 to -45 dBFS): only a voice or a knock counts
 LEAK_MARGIN = 0.3         # s around each beep's edges: output latency, fades
+MIC_MARGIN = 0.6          # the mic hears the beep through the air, after the speaker's latency
 LEAK_GAP = 0.5            # s: sounds closer than this are one leak (one sentence)
 METER_STALE = 0.1         # s: WASAPI loopback delivers nothing during digital silence
 AUDIO_WIN_MS = 10
@@ -83,11 +85,20 @@ def peak_dbfs(samples):
     return 20 * math.log10(peak / 32768) if peak else float("-inf")
 
 
-def in_silence(t):
-    """True when no beep is scheduled at timecode t, nor within LEAK_MARGIN of one."""
+def drain_loudest(blocks):
+    """The loudest of the peaks queued since the last read, emptying the queue; None if none."""
+    loudest = None
+    while blocks:
+        db = blocks.popleft()
+        loudest = db if loudest is None else max(loudest, db)
+    return loudest
+
+
+def in_silence(t, margin=LEAK_MARGIN):
+    """True when no beep is scheduled at timecode t, nor within `margin` of one."""
     k = round(t / BEEP_EVERY)
     for start in (k * BEEP_EVERY, (k - 1) * BEEP_EVERY):
-        if start >= BEEP_EVERY and start - LEAK_MARGIN <= t <= start + BEEP_LEN + LEAK_MARGIN:
+        if start >= BEEP_EVERY and start - margin <= t <= start + BEEP_LEN + margin:
             return False
     return True
 
@@ -96,14 +107,15 @@ class LeakCounter:
     """Counts the sounds heard during scheduled silence: a rise above `threshold` is one, unless
     it follows the last one by under LEAK_GAP (the syllables of one sentence)."""
 
-    def __init__(self, threshold=LEAK_DB):
+    def __init__(self, threshold=LEAK_DB, margin=LEAK_MARGIN):
         self.threshold = threshold
+        self.margin = margin
         self.count = 0
         self._on = False
         self._heard_at = float("-inf")
 
     def update(self, t, db):
-        on = in_silence(t) and db > self.threshold
+        on = in_silence(t, self.margin) and db > self.threshold
         if on and not self._on and t - self._heard_at > LEAK_GAP:
             self.count += 1
         if on:
@@ -204,13 +216,18 @@ def count_discontinuities(samples, rate):
     return count, (count / dur if dur else 0.0)
 
 
-def match_beeps(expected, actual):
+def match_beeps(expected, actual, end=None):
     """Pairs each expected beep (video) with the audio burst that starts nearest, None when no
-    burst starts within 2.5 s; and the bursts that match no expected beep. An interval starting
-    at the clip's first sample begins at the cut, not at an onset: it measures nothing, and its
-    sound can be too short to detect, so it is left out on both sides."""
-    expected = [iv for iv in expected if iv[0] > 0.05]
-    actual = [iv for iv in actual if iv[0] > 0.05]
+    burst starts within 2.5 s; and the bursts that match no expected beep. A beep cut by the
+    clip measures nothing, and its sound can be too short to detect: left out on both sides.
+    That is a picture interval from the first sample, a sound burst in the first 0.25 s when no
+    kept beep starts there (beeps are 5 s apart), and a short fragment ending at `end`."""
+    def tail(iv):
+        return end is not None and iv[1] >= end - 0.03 and iv[1] - iv[0] < 0.3
+
+    expected = [iv for iv in expected if iv[0] > 0 and not tail(iv)]
+    early = any(e0 < 0.25 for e0, _ in expected)
+    actual = [iv for iv in actual if (iv[0] >= 0.25 or early) and not tail(iv)]
     pairs = []
     for e0, e1 in expected:
         near = min(actual, key=lambda a: abs(a[0] - e0)) if actual else None
@@ -294,7 +311,7 @@ def run_analyze(mp4_path, save_tc=None):
         return 1
 
     print("  expected (video)      actual (audio)        offset")
-    pairs, unexpected = match_beeps(expected, actual)
+    pairs, unexpected = match_beeps(expected, actual, end=vdur)
     deltas = []
     for (e0, e1), near in pairs:
         if near is None:
@@ -314,6 +331,9 @@ def run_analyze(mp4_path, save_tc=None):
     if save_tc is not None:
         report_recency(expected, vdur, save_tc)
 
+    if not deltas:
+        print("  ERROR: no beep could be measured")
+        rc = 1
     if deltas:
         deltas_sorted = sorted(deltas)
         mean = sum(deltas) / len(deltas)
@@ -419,27 +439,34 @@ def run_generate(args):
     # is the only writer of its `level`, one tuple swapped at a time.
     meters = []
 
-    def add_meter(name, device, threshold, y):
-        level = [(0.0, float("-inf"))]
+    def add_meter(name, find_device, threshold, margin, y):
+        blocks = collections.deque(maxlen=500)
 
         def on_audio(data, _frames, _time, _status):
-            level[0] = (time.monotonic(), peak_dbfs(array.array("h", data)))
+            blocks.append(peak_dbfs(array.array("h", data)))
             return None, pyaudio.paContinue
 
-        rate = int(device["defaultSampleRate"])
-        stream = pa.open(format=pyaudio.paInt16, channels=device["maxInputChannels"], rate=rate, input=True,
-                         input_device_index=device["index"], frames_per_buffer=rate // 50, stream_callback=on_audio)
+        try:    # a meter that will not open (mic privacy, exclusive mode) is no meter, not a crash
+            device = find_device()
+            rate = int(device["defaultSampleRate"])
+            stream = pa.open(format=pyaudio.paInt16, channels=device["maxInputChannels"], rate=rate, input=True,
+                             input_device_index=device["index"], frames_per_buffer=rate // 50,
+                             stream_callback=on_audio)
+        except (OSError, LookupError) as e:
+            print(f"  no {name} meter: {e}")
+            return
         x0, x1 = mw * 0.25, mw * 0.75
         canvas.create_text(x0 - 20, y + 18, text=name, fill="#c0c0c0", anchor="e", font=("Consolas", 28))
         canvas.create_rectangle(x0, y, x1, y + 36, fill="#202020", outline="#404040")
-        meters.append({"name": name, "level": level, "stream": stream, "leaks": LeakCounter(threshold),
+        meters.append({"name": name, "blocks": blocks, "heard": (0.0, float("-inf")), "stream": stream,
+                       "leaks": LeakCounter(threshold, margin),
                        "x": (x0, x1, y), "bar": canvas.create_rectangle(x0, y, x0, y + 36, outline=""),
                        "text": canvas.create_text(x1 + 20, y + 18, fill="#c0c0c0", anchor="w",
                                                   font=("Consolas", 28))})
 
-    add_meter("OUT", pa.get_default_wasapi_loopback(), LEAK_DB, mh * 0.80)
-    if wasapi["defaultInputDevice"] >= 0:
-        add_meter("MIC", pa.get_device_info_by_index(wasapi["defaultInputDevice"]), MIC_LEAK_DB, mh * 0.80 + 56)
+    add_meter("OUT", pa.get_default_wasapi_loopback, LEAK_DB, LEAK_MARGIN, mh * 0.80)
+    add_meter("MIC", lambda: pa.get_device_info_by_index(wasapi["defaultInputDevice"]), MIC_LEAK_DB, MIC_MARGIN,
+              mh * 0.80 + 56)
     leak_text = canvas.create_text(mw // 2, mh * 0.80 - 40, text="", fill="#ff3030",
                                    font=("Consolas", 36, "bold"))
 
@@ -455,7 +482,10 @@ def run_generate(args):
         canvas.itemconfig(label, text=f"{t:6.1f}")
         canvas.itemconfig(hint, text="BEEP" if on else "silence")
         for m in meters:
-            heard_at, db = m["level"][0]
+            loudest = drain_loudest(m["blocks"])
+            if loudest is not None:
+                m["heard"] = (time.monotonic(), loudest)
+            heard_at, db = m["heard"]
             if time.monotonic() - heard_at > METER_STALE:
                 db = float("-inf")
             x0, x1, y = m["x"]
@@ -465,7 +495,7 @@ def run_generate(args):
             canvas.itemconfig(m["text"], text="silence" if db == float("-inf") else f"{db:6.1f} dBFS")
             if "save_tc" not in result:     # the app's own save chime comes after the press
                 m["leaks"].update(t, db)
-                if in_silence(t):
+                if in_silence(t, m["leaks"].margin):
                     m["loudest_silent"] = max(m.get("loudest_silent", float("-inf")), db)
         heard = [f"{m['name']} x{m['leaks'].count}" for m in meters if m["leaks"].count]
         canvas.itemconfig(leak_text, text=("SOUND LEAK  " + "  ".join(heard)) if heard else "")
@@ -535,7 +565,10 @@ def run_generate(args):
             print(f"SOUND LEAK ({m['name']}): {m['leaks'].count} sound(s) during scheduled silence; "
                   "this run is polluted")
     print()
-    return run_analyze(path, save_tc=result.get("save_tc"))
+    rc = run_analyze(path, save_tc=result.get("save_tc"))
+    if any(m["leaks"].count for m in meters):
+        rc = RESULT["rc"] = 1      # a polluted run measured nothing worth trusting
+    return rc
 
 
 def self_check():
@@ -551,16 +584,36 @@ def self_check():
     pairs, unexpected = match_beeps(expected, [(0.00, 0.16)] + actual)
     assert [round((n[0] - e[0]) * 1000) for e, n in pairs] == [-40, -20, -30], pairs
     assert not unexpected, unexpected
+    # A real onset right after the cut is measured, its sound early or late.
+    for beep, sound, offset in [((0.06, 2.06), (0.00, 2.03), -60), ((0.00, 2.04), (0.03, 2.07), None)]:
+        pairs, unexpected = match_beeps([beep, (5.06, 7.06)], [sound, (5.03, 7.03)])
+        assert [round((n[0] - e[0]) * 1000) for e, n in pairs][:1] == ([offset] if offset else [-30]), pairs
+        assert not unexpected, unexpected
+    # The clip's end can cut a beep too: 0.17 s of picture, 0.14 s of sound (under min_len).
+    pairs, unexpected = match_beeps([(3.20, 5.20), (14.83, 15.00)], [(3.18, 5.18)], end=15.0)
+    assert all(near is not None for _, near in pairs) and not unexpected, pairs
+    # ...or its sound only; a whole last beep running into the end is still measured.
+    pairs, unexpected = match_beeps([(3.20, 5.20), (13.18, 15.00)],
+                                    [(3.18, 5.18), (13.15, 14.99), (14.86, 15.00)], end=15.0)
+    assert len(pairs) == 2 and all(near is not None for _, near in pairs) and not unexpected, (pairs, unexpected)
+    pairs, unexpected = match_beeps([(3.20, 5.20)], [(3.18, 5.18), (14.84, 15.00)], end=15.0)
+    assert not unexpected, unexpected       # 0.16 s of sound, its 0.14 s of picture undetected
     # The meter: the test beep (10 % of full scale) reads -20 dBFS, digital silence -inf.
     assert round(peak_dbfs([0, 3277, -3277])) == -20
     assert peak_dbfs([]) == peak_dbfs([0, 0]) == float("-inf")
+    # Every block between two screen refreshes counts, not only the last one.
+    blocks = collections.deque([-60.0, -12.0, -70.0])
+    assert drain_loudest(blocks) == -12.0 and not blocks and drain_loudest(blocks) is None
     # Silence: before the first beep, and between beeps away from their edges only.
-    assert [in_silence(t) for t in (1.0, 4.6, 4.8, 6.0, 7.2, 7.4, 9.6, 9.8)] ==         [True, True, False, False, False, True, True, False]
+    expected_silence = [True, True, False, False, False, True, True, False]
+    assert [in_silence(t) for t in (1.0, 4.6, 4.8, 6.0, 7.2, 7.4, 9.6, 9.8)] == expected_silence
+    # The mic also hears the beep through the air, late (Bluetooth speakers): a wider margin.
+    assert in_silence(7.5) and not in_silence(7.5, MIC_MARGIN) and in_silence(8.0, MIC_MARGIN)
     leaks = LeakCounter()
     for t, db in [(1.0, -30), (1.1, -30), (1.2, -90), (6.0, -20), (8.0, -45), (8.1, -45)]:
         leaks.update(t, db)
     assert leaks.count == 2, leaks.count     # two rises in silence; the beep at 6.0 is not one
-    mic = LeakCounter(MIC_LEAK_DB)
+    mic = LeakCounter(MIC_LEAK_DB, MIC_MARGIN)
     for t, db in [(1.0, -45), (1.5, -52), (2.0, -18), (2.1, -48), (6.0, -12)]:
         mic.update(t, db)
     assert mic.count == 1, mic.count         # the hiss is not a leak, the voice at 2.0 is
@@ -568,6 +621,9 @@ def self_check():
     # a second sentence a second later is another.
     for t, db in [(2.3, -20), (2.4, -50), (2.6, -15), (2.8, -50), (3.0, -22), (3.2, -50), (4.0, -20)]:
         mic.update(t, db)
+    assert mic.count == 2, mic.count
+    mic.update(4.2, -50)
+    mic.update(7.5, -15)                     # the beep's echo, 0.5 s after it ends: not a leak
     assert mic.count == 2, mic.count
     print("self-check: ok")
     return 0

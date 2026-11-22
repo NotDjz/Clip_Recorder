@@ -565,10 +565,16 @@ fn every_powershell_script_and_step_parses() {
 /// beep's last 0.14 s read as a missing beep and failed the verdict (120 fps, 2026-11-22).
 #[test]
 fn the_timecode_analysis_checks_itself() {
-    let out = std::process::Command::new("python")
-        .args(["-I", "tests/timecode_sync_test.py", "--self-check"])
-        .output()
-        .expect("python on PATH (CI's Windows runner has it)");
+    // The repo runs the harness with the py launcher; CI's runner also has python on PATH.
+    let run = |exe: &str, first: &[&str]| {
+        std::process::Command::new(exe)
+            .args(first)
+            .args(["-I", "tests/timecode_sync_test.py", "--self-check"])
+            .output()
+    };
+    let out = run("py", &["-3"])
+        .or_else(|_| run("python", &[]))
+        .expect("the py launcher or python on PATH");
     assert!(
         out.status.success(),
         "{}{}",
