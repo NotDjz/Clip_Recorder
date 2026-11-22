@@ -305,10 +305,16 @@ fn adopt_settings_window(tries: u32) {
 }
 
 fn browse_folder() {
+    let Some(Some(settings)) = with_app(|app| app.settings.as_ref().map(|w| w.as_weak())) else {
+        return;
+    };
+    // Where Settings points now, an unsaved pick included.
+    let Some(start) = settings.upgrade().map(|w| folders::clips(&w.get_folder())) else {
+        return;
+    };
     let owner = with_app(|app| app.settings.as_ref().and_then(settings_window::adopt)).flatten();
-    if let Some(folder) = folders::pick(owner.unwrap_or(std::ptr::null_mut()), "Save clips to")
-        && let Some(Some(w)) = with_app(|app| app.settings.as_ref().map(|w| w.as_weak()))
-        && let Some(w) = w.upgrade()
+    if let Some(folder) = folders::pick(owner.unwrap_or(std::ptr::null_mut()), "Save clips to", &start)
+        && let Some(w) = settings.upgrade()
     {
         w.set_folder(folder.into());
     }
