@@ -32,14 +32,16 @@ pub fn ffmpeg_path() -> PathBuf {
         .unwrap_or_else(|| "ffmpeg.exe".into())
 }
 
-/// Whether ffmpeg really encodes one frame from `input`. Listing h264_nvenc or ddagrab only says
-/// they were compiled in: without an NVIDIA GPU both are listed and fail, and the capture died
-/// and restarted every two seconds (seen in Windows Sandbox).
-fn works(ffmpeg: &Path, input: &[String], encoder: &str) -> bool {
+/// Whether ffmpeg really encodes one frame from `input` with the capture's own NVENC settings.
+/// Listing hevc_nvenc or ddagrab only says they were compiled in: without an NVIDIA GPU both are
+/// listed and fail, and the capture died and restarted every two seconds (seen in Windows Sandbox).
+fn works(ffmpeg: &Path, input: &[String]) -> bool {
     let child = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error"])
         .args(input)
-        .args(["-frames:v", "1", "-c:v", encoder, "-f", "null", "-"])
+        .args(["-frames:v", "1"])
+        .args(ffmpeg_cmd::NVENC)
+        .args(["-f", "null", "-"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -54,9 +56,9 @@ fn works(ffmpeg: &Path, input: &[String], encoder: &str) -> bool {
 /// cannot read, so without NVENC the capture goes through GDI (an AMD or Intel GPU today).
 fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
     // The capture's own ddagrab input: on the NVIDIA adapter, named explicitly.
-    let dda = works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0), "h264_nvenc");
+    let dda = works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0));
     let color = ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=1"].map(String::from);
-    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, &color, "h264_nvenc"))
+    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, &color))
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process

@@ -49,6 +49,11 @@ pub enum Encoder {
     X264,
 }
 
+/// The NVENC encoder, for the capture and its probe alike: HEVC 10-bit 4:2:0 (from 8-bit frames).
+/// shortcut: NVIDIA cards before the GTX 10 series have no HEVC Main10 NVENC and fall to x264
+/// through GDI; add an H.264 NVENC tier if anyone reports one.
+pub const NVENC: [&str; 6] = ["-c:v", "hevc_nvenc", "-profile:v", "main10", "-highbitdepth", "1"];
+
 /// What one capture reads: a DXGI output, by its index on the first graphics adapter (as ddagrab
 /// counts them), or the GDI desktop at a screen's rectangle.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,7 +176,8 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
     }
     match c.encoder {
         Encoder::Nvenc => {
-            a.extend(["-c:v", "h264_nvenc", "-preset", "p1"].map(String::from));
+            a.extend(NVENC.map(String::from));
+            a.extend(["-preset", "p1"].map(String::from));
             if rate >= B_FRAMES_MIN_FPS {
                 a.extend(["-tune", "hq", "-bf", "3", "-delay", "0"].map(String::from));
             } else {
@@ -280,10 +286,20 @@ pub fn mix_args(loopback: &Path, mic: &Path, out: &Path) -> Vec<String> {
     ]
 }
 
-/// The clip: the video copied, the audio in AAC, cut to the shorter of the two.
+/// FLAC is lossless for ~1 % of a clip, but many players can't read it inside an MP4. AAC 256k
+/// encodes as fast as 192k; 320k took 5 to 10 s on 90 s of audio, all of it added to a save.
+fn audio_codec(format: ClipFormat) -> &'static [&'static str] {
+    match format {
+        ClipFormat::Mp4 => &["-c:a", "aac", "-b:a", "256k"],
+        ClipFormat::Mkv => &["-c:a", "flac"],
+    }
+}
+
+/// The clip: the video copied, the audio per the format, cut to the shorter of the two.
 pub fn mux_args(video: &Path, audio: &Path, out: &Path, format: ClipFormat) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-i".into(), path(video), "-i".into(), path(audio)];
-    a.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"].map(String::from));
+    a.extend(["-c:v", "copy", "-shortest"].map(String::from));
+    a.extend(audio_codec(format).iter().map(|f| f.to_string()));
     a.extend(clip_flags(format).iter().map(|f| f.to_string()));
     a.push(path(out));
     a
@@ -355,9 +371,22 @@ mod tests {
         );
         assert_eq!(
             (value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")),
-            (Some("copy"), Some("aac"), Some("192k"))
+            (Some("copy"), Some("aac"), Some("256k"))
         );
         assert!(a.contains(&"-shortest".to_string()) && a.contains(&"+faststart".to_string()));
+    }
+
+    /// FLAC is lossless for ~1 % of a clip's size, but many players can't read it inside an MP4.
+    #[test]
+    fn an_mkv_clip_keeps_lossless_flac_audio() {
+        let a = mux_args(
+            Path::new("v.mp4"),
+            Path::new("a.wav"),
+            Path::new("clip.mkv"),
+            ClipFormat::Mkv,
+        );
+        assert_eq!((value(&a, "-c:a"), value(&a, "-b:a")), (Some("flac"), None));
+        assert!(a.contains(&"-shortest".to_string()));
     }
 
     #[test]
@@ -510,6 +539,24 @@ mod tests {
         // qp 26 was tried in v1.3: visibly worse in motion, reverted.
         assert_eq!(value(&args(60, Grabber::Ddagrab, Encoder::Nvenc), "-qp"), Some("20"));
         assert_eq!(value(&args(60, Grabber::Gdigrab, Encoder::X264), "-crf"), Some("18"));
+    }
+
+    /// HEVC 10-bit 4:2:0 at qp 20: same quality as H.264 qp 20 for 18 % less, gradients in 10 bits,
+    /// and still decoded by the GPU (4:4:4 is not, through DXVA). Measured 2026-11-22 on gameplay.
+    #[test]
+    fn nvenc_encodes_hevc_10_bit_on_both_grabbers() {
+        for grabber in [Grabber::Ddagrab, Grabber::Gdigrab] {
+            let a = args(240, grabber, Encoder::Nvenc);
+            assert_eq!(
+                (value(&a, "-c:v"), value(&a, "-profile:v"), value(&a, "-highbitdepth")),
+                (Some("hevc_nvenc"), Some("main10"), Some("1")),
+                "{grabber:?}"
+            );
+        }
+        assert_eq!(
+            value(&args(60, Grabber::Gdigrab, Encoder::X264), "-c:v"),
+            Some("libx264")
+        );
     }
 
     #[test]

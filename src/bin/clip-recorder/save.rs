@@ -720,6 +720,7 @@ mod tests {
             assert_eq!(output.extension().unwrap(), "mkv");
             let clip = std::fs::read_to_string(&output).unwrap();
             assert!(clip.contains("Clip_t.mkv") && !clip.contains("-movflags"), "{clip}");
+            assert_eq!(clip.contains("-c:a flac"), loopback, "{clip}");
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
