@@ -6,7 +6,7 @@ use crate::monitors::Screen;
 use crate::orphans::{PID_FILE, SEGMENT_DIR_PREFIX};
 use clip_recorder::clock::{self, ClockLine, Estimator, capture_pts};
 use clip_recorder::config::Config;
-use clip_recorder::ffmpeg_cmd::{self, Encoder, Grabber, Source};
+use clip_recorder::ffmpeg_cmd::{self, Codec, Encoder, Grabber, Source};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
@@ -33,14 +33,14 @@ pub fn ffmpeg_path() -> PathBuf {
 }
 
 /// Whether ffmpeg really encodes one frame from `input` with the capture's own NVENC settings.
-/// Listing hevc_nvenc or ddagrab only says they were compiled in: without an NVIDIA GPU both are
+/// Listing an encoder or ddagrab only says they were compiled in: without an NVIDIA GPU both are
 /// listed and fail, and the capture died and restarted every two seconds (seen in Windows Sandbox).
-fn works(ffmpeg: &Path, input: &[String]) -> bool {
+fn works(ffmpeg: &Path, input: &[String], codec: Codec) -> bool {
     let child = Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error"])
         .args(input)
         .args(["-frames:v", "1"])
-        .args(ffmpeg_cmd::NVENC)
+        .args(ffmpeg_cmd::probe_args(codec))
         .args(["-f", "null", "-"])
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
@@ -52,13 +52,17 @@ fn works(ffmpeg: &Path, input: &[String]) -> bool {
         .is_some_and(|s| s.success())
 }
 
-/// DXGI capture straight into NVENC when both work. ddagrab hands over GPU frames, which x264
-/// cannot read, so without NVENC the capture goes through GDI (an AMD or Intel GPU today).
+/// The best NVENC codec the card has (HEVC, else H.264 on a GTX 9 or 10), then DXGI straight
+/// into it when that works too. ddagrab hands over GPU frames, which x264 cannot read, so without
+/// NVENC the capture goes through GDI (an AMD or Intel GPU today).
 fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
-    // The capture's own ddagrab input: on the NVIDIA adapter, named explicitly.
-    let dda = works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0));
     let color = ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=1"].map(String::from);
-    ffmpeg_cmd::choose(dda, dda || works(ffmpeg, &color))
+    let nvenc = [Codec::Hevc, Codec::H264]
+        .into_iter()
+        .find(|&c| works(ffmpeg, &color, c));
+    // The capture's own ddagrab input: on the NVIDIA adapter, named explicitly.
+    let dda = nvenc.filter(|&c| works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0), c));
+    ffmpeg_cmd::choose(dda, nvenc)
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process
@@ -117,7 +121,7 @@ impl Capture {
     /// DXGI may not be ready yet, and one failed probe must not leave the whole session on GDI.
     /// True when the pipeline improved (the caller restarts the video).
     pub fn reprobe(&mut self) -> bool {
-        if (self.encoder, self.grabber) == (Encoder::Nvenc, Grabber::Ddagrab) {
+        if (self.encoder, self.grabber) == (Encoder::Nvenc(Codec::Hevc), Grabber::Ddagrab) {
             return false;
         }
         let (encoder, grabber) = pipeline(&self.ffmpeg);

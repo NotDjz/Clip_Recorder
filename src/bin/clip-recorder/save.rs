@@ -10,6 +10,7 @@ use crate::logging::log;
 use clip_recorder::clock;
 use clip_recorder::config::ClipFormat;
 use clip_recorder::ffmpeg_cmd::{self, SEGMENT_LIST_FILE};
+use clip_recorder::ffmpeg_cmd::{Clip, Codec};
 use clip_recorder::render::{self, GameSound, Written};
 use clip_recorder::selection::{self, GiveUp, Segment};
 use std::io::Read;
@@ -35,6 +36,8 @@ pub type Outcome = Result<Saved, GiveUp>;
 pub struct Destination<'a> {
     pub folder: &'a Path,
     pub format: ClipFormat,
+    /// The capture's codec: an HEVC MP4 needs its own tag.
+    pub codec: Codec,
 }
 
 /// Starts a save. `done` runs on the UI thread once, whatever happens.
@@ -94,7 +97,7 @@ struct Job {
     game_sound: GameSound,
     work: PathBuf,
     output: PathBuf,
-    format: ClipFormat,
+    clip: Clip,
     started: Instant,
 }
 
@@ -194,7 +197,10 @@ fn prepare(
         game_sound,
         work: dir.into(),
         output,
-        format: to.format,
+        clip: Clip {
+            format: to.format,
+            codec: to.codec,
+        },
         started,
     })
 }
@@ -253,7 +259,7 @@ impl Job {
         // actually wrote it may judge or delete it.
         let concat = self.ffmpeg(
             "concat",
-            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, (!has_audio).then_some(self.format)),
+            &ffmpeg_cmd::concat_args(&self.list, self.duration, &video, (!has_audio).then_some(self.clip)),
         );
         let mut mux = None;
         let mut temp = vec![self.list.clone()];
@@ -268,7 +274,7 @@ impl Job {
                 (Some(only), None) | (None, Some(only)) => only.clone(),
                 (None, None) => unreachable!(),
             };
-            mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output, self.format));
+            mux = self.ffmpeg("mux", &ffmpeg_cmd::mux_args(&video, &audio, &self.output, self.clip));
         }
         // The name was reserved for this save: a clip that did not come out is removed.
         let saved = written(has_audio, concat, mux) && std::fs::metadata(&self.output).is_ok_and(|m| m.len() > 0);
@@ -357,6 +363,15 @@ fn local_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MP4: Clip = Clip {
+        format: ClipFormat::Mp4,
+        codec: Codec::Hevc,
+    };
+    const MKV: Clip = Clip {
+        format: ClipFormat::Mkv,
+        codec: Codec::Hevc,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp(name: &str) -> PathBuf {
@@ -402,6 +417,7 @@ mod tests {
             &Destination {
                 folder: &dir.join("clips"),
                 format: ClipFormat::Mp4,
+                codec: Codec::Hevc,
             },
             save_time,
             "t",
@@ -443,6 +459,7 @@ mod tests {
             &Destination {
                 folder: &dir.join("blocked").join("sub"),
                 format: ClipFormat::Mp4,
+                codec: Codec::Hevc,
             },
             t,
             "u",
@@ -607,7 +624,7 @@ mod tests {
             mic: None,
             work: dir.into(),
             output,
-            format: ClipFormat::Mp4,
+            clip: MP4,
             started: Instant::now(),
         }
     }
@@ -646,7 +663,7 @@ mod tests {
     }
 
     /// A job over two segments' worth of work, with the sides asked for, run by a fake ffmpeg.
-    fn run_with(fake: &str, loopback: bool, mic: bool, format: ClipFormat) -> (Outcome, PathBuf, PathBuf) {
+    fn run_with(fake: &str, loopback: bool, mic: bool, clip: Clip) -> (Outcome, PathBuf, PathBuf) {
         let dir = temp(fake);
         let wav = |side: &str| {
             let path = dir.join(format!("{side}_t.wav"));
@@ -657,7 +674,7 @@ mod tests {
         std::fs::write(&list, "file 'snap'").unwrap();
         let snapshot = dir.join("snap_t_000.ts");
         std::fs::write(&snapshot, "segment").unwrap();
-        let output = dir.join(format!("Clip_t.{}", format.extension()));
+        let output = dir.join(format!("Clip_t.{}", clip.format.extension()));
         let job = Job {
             id: "t".into(),
             ffmpeg: fake_ffmpeg(&dir, fake),
@@ -669,7 +686,7 @@ mod tests {
             mic: mic.then(|| wav("mic")),
             work: dir.clone(),
             output: output.clone(),
-            format,
+            clip,
             started: Instant::now(),
         };
         (job.run(), output, dir)
@@ -694,7 +711,7 @@ mod tests {
             (true, false, "loopback_t.wav"),
             (false, true, "mic_t.wav"),
         ] {
-            let (outcome, output, dir) = run_with("ffmpeg", loopback, mic, ClipFormat::Mp4);
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, mic, MP4);
             assert_eq!(
                 outcome,
                 Ok(Saved {
@@ -706,6 +723,11 @@ mod tests {
             let clip = std::fs::read_to_string(&output).unwrap();
             assert!(clip.contains(expected), "loopback={loopback} mic={mic}: {clip}");
             assert!(clip.contains("+faststart"), "the clip itself is fast-started: {clip}");
+            assert!(
+                clip.contains("-tag:v hvc1"),
+                "an HEVC MP4 plays on Apple players: {clip}"
+            );
+            assert_eq!(clip.contains("-c:a aac"), loopback || mic, "{clip}");
             assert_eq!(leftovers(&dir), Vec::<String>::new(), "temporary files left behind");
             let _ = std::fs::remove_dir_all(&dir);
         }
@@ -715,7 +737,7 @@ mod tests {
     #[test]
     fn an_mkv_save_writes_an_mkv_without_mp4_flags() {
         for loopback in [true, false] {
-            let (outcome, output, dir) = run_with("ffmpeg", loopback, false, ClipFormat::Mkv);
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, false, MKV);
             assert!(outcome.is_ok(), "loopback={loopback}: {outcome:?}");
             assert_eq!(output.extension().unwrap(), "mkv");
             let clip = std::fs::read_to_string(&output).unwrap();
@@ -725,9 +747,25 @@ mod tests {
         }
     }
 
+    /// A GTX 9/10 card captures H.264, which the hvc1 tag would make ffmpeg refuse.
+    #[test]
+    fn an_h264_mp4_save_gets_no_hevc_tag() {
+        for loopback in [true, false] {
+            let h264 = Clip {
+                format: ClipFormat::Mp4,
+                codec: Codec::H264,
+            };
+            let (outcome, output, dir) = run_with("ffmpeg", loopback, false, h264);
+            assert!(outcome.is_ok(), "loopback={loopback}: {outcome:?}");
+            let clip = std::fs::read_to_string(&output).unwrap();
+            assert!(clip.contains("+faststart") && !clip.contains("-tag:v"), "{clip}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn a_failed_mix_still_saves_the_clip_with_the_game_sound() {
-        let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true, ClipFormat::Mp4);
+        let (outcome, output, dir) = run_with("ffmpeg-failmix", true, true, MP4);
         assert_eq!(
             outcome,
             Ok(Saved {
@@ -747,7 +785,7 @@ mod tests {
     #[test]
     fn a_failed_or_empty_clip_is_reported_and_removed() {
         for (fake, loopback) in [("ffmpeg-failmux", true), ("ffmpeg-empty", false)] {
-            let (outcome, output, dir) = run_with(fake, loopback, false, ClipFormat::Mp4);
+            let (outcome, output, dir) = run_with(fake, loopback, false, MP4);
             assert_eq!(outcome, Err(GiveUp::Error), "{fake}");
             assert!(!output.exists(), "{fake}: the broken clip was kept");
             let _ = std::fs::remove_dir_all(&dir);

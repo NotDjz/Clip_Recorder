@@ -454,6 +454,7 @@ fn save_clip() {
             &save::Destination {
                 folder: &folder,
                 format: app.config.format,
+                codec: app.capture.encoder().codec(),
             },
             on_saved,
         );
