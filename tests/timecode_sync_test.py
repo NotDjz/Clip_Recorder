@@ -162,6 +162,21 @@ def count_discontinuities(samples, rate):
     return count, (count / dur if dur else 0.0)
 
 
+def match_beeps(expected, actual):
+    """Pairs each expected beep (video) with the audio burst that starts nearest, None when no
+    burst starts within 2.5 s; and the bursts that match no expected beep. An interval starting
+    at the clip's first sample begins at the cut, not at an onset: it measures nothing, and its
+    sound can be too short to detect, so it is left out on both sides."""
+    expected = [iv for iv in expected if iv[0] > 0.05]
+    actual = [iv for iv in actual if iv[0] > 0.05]
+    pairs = []
+    for e0, e1 in expected:
+        near = min(actual, key=lambda a: abs(a[0] - e0)) if actual else None
+        pairs.append(((e0, e1), near if near and abs(near[0] - e0) <= 2.5 else None))
+    unexpected = [a for a in actual if all(abs(a[0] - e0) > 2.5 for e0, _ in expected)]
+    return pairs, unexpected
+
+
 def report_recency(expected, vdur, save_tc):
     """How much of the moment right before the hotkey is missing from the clip.
     Each on-screen beep starts at a known timecode (k*BEEP_EVERY), so one
@@ -237,10 +252,10 @@ def run_analyze(mp4_path, save_tc=None):
         return 1
 
     print("  expected (video)      actual (audio)        offset")
+    pairs, unexpected = match_beeps(expected, actual)
     deltas = []
-    for e0, e1 in expected:
-        near = min(actual, key=lambda a: abs(a[0] - e0))
-        if abs(near[0] - e0) > 2.5:
+    for (e0, e1), near in pairs:
+        if near is None:
             print(f"    [{e0:6.2f}-{e1:6.2f}]   MISSING            --")
             RESULT["beeps_missing"] = RESULT.get("beeps_missing", 0) + 1
             rc = 1
@@ -249,11 +264,10 @@ def run_analyze(mp4_path, save_tc=None):
         deltas.append(d)
         print(f"    [{e0:6.2f}-{e1:6.2f}]   [{near[0]:6.2f}-{near[1]:6.2f}]   {d:+7.0f} ms")
 
-    for a0, a1 in actual:
-        if all(abs(a0 - e0) > 2.5 for e0, _ in expected):
-            print(f"    (silence expected)    [{a0:6.2f}-{a1:6.2f}]   UNEXPECTED SOUND")
-            RESULT["unexpected_sound"] = RESULT.get("unexpected_sound", 0) + 1
-            rc = 1
+    for a0, a1 in unexpected:
+        print(f"    (silence expected)    [{a0:6.2f}-{a1:6.2f}]   UNEXPECTED SOUND")
+        RESULT["unexpected_sound"] = RESULT.get("unexpected_sound", 0) + 1
+        rc = 1
 
     if save_tc is not None:
         report_recency(expected, vdur, save_tc)
@@ -432,12 +446,30 @@ def run_generate(args):
     return run_analyze(path, save_tc=result.get("save_tc"))
 
 
+def self_check():
+    """The analysis's pure parts, checked without audio, a window or the app (tests/source.rs)."""
+    # 120 fps A/B, 2026-11-22: the clip opened on a beep's last 0.18 s of picture; its 0.14 s of
+    # sound was under min_len, so the first beep read MISSING and the verdict failed.
+    expected = [(0.00, 0.18), (3.18, 5.20), (8.16, 10.18), (13.18, 15.00)]
+    actual = [(3.14, 5.14), (8.14, 10.14), (13.15, 14.99)]
+    pairs, unexpected = match_beeps(expected, actual)
+    assert all(near is not None for _, near in pairs), pairs
+    assert not unexpected, unexpected
+    # The same fragment, when detected, is the clip's cut on both sides: no free "+0 ms".
+    pairs, unexpected = match_beeps(expected, [(0.00, 0.16)] + actual)
+    assert [round((n[0] - e[0]) * 1000) for e, n in pairs] == [-40, -20, -30], pairs
+    assert not unexpected, unexpected
+    print("self-check: ok")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     m = p.add_mutually_exclusive_group(required=True)
     m.add_argument("--generate", action="store_true")
     m.add_argument("--analyze", metavar="MP4_PATH")
+    m.add_argument("--self-check", action="store_true", help="Check the analysis's pure parts and exit.")
     p.add_argument("--exe", default=os.path.join(REPO_DIR, "target", "release", "clip-recorder.exe"),
                    help="The app to drive, on its own data folder (an installed one is untouched).")
     p.add_argument("--fps", type=int, default=60)
@@ -455,6 +487,8 @@ def main():
     p.add_argument("--json", metavar="FILE", default=None,
                    help="Also write what the analysis measured to FILE (read by scripts/release-check.ps1).")
     args = p.parse_args()
+    if args.self_check:
+        sys.exit(self_check())
     rc = run_analyze(args.analyze) if args.analyze else run_generate(args)
     if args.json:
         import json

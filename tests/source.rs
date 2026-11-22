@@ -561,6 +561,22 @@ fn every_powershell_script_and_step_parses() {
     );
 }
 
+/// The A/V harness's analysis, checked without audio, a screen or the app: a clip opening on a
+/// beep's last 0.14 s read as a missing beep and failed the verdict (120 fps, 2026-11-22).
+#[test]
+fn the_timecode_analysis_checks_itself() {
+    let out = std::process::Command::new("python")
+        .args(["-I", "tests/timecode_sync_test.py", "--self-check"])
+        .output()
+        .expect("python on PATH (CI's Windows runner has it)");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The release gate's verdict runs on real result files: a string check passed on a
 /// release-check.ps1 whose first measurement died on a parameter-binding error.
 #[test]
