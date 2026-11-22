@@ -13,9 +13,17 @@ raw-window-handle = "0.6"
 cpal = "0.18"
 tray-icon = "0.26"
 hound = "3.5"
-# DXGI's COM interfaces (windows-sys has none), to find ddagrab's output by its rectangle. The
-# same 0.62 that cpal and slint already pull in: no new crate in the tree.
-windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
+# COM interfaces windows-sys has none of: DXGI, to find ddagrab's output by its rectangle, and the
+# folder picker. The same 0.62 that cpal and slint already pull in: no new crate in the tree.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",

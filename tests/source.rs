@@ -272,6 +272,20 @@ fn the_session_handler_leaves_through_main() {
     );
 }
 
+/// The classic SHBrowseForFolder built the whole shell tree before showing: when that took a
+/// while, the user had moved on and it opened behind other windows, Settings disabled under it.
+/// The modern picker opens at once, at the clip folder.
+#[test]
+fn the_folder_picker_opens_at_the_clip_folder() {
+    let folders = code("src/bin/clip-recorder/folders.rs", "//");
+    assert!(!folders.contains("SHBrowseForFolderW"), "the classic tree is back");
+    assert!(folders.contains("FOS_PICKFOLDERS"), "not the modern folder picker");
+    assert!(
+        folders.contains(".SetFolder("),
+        "the picker does not start at the clip folder"
+    );
+}
+
 /// The code signing policy (team roles, privacy statement, linked from the home and download
 /// pages, an installer that announces start with Windows). The policy, README and download page
 /// say "not signed yet" exactly while release.yml has no signing step: the policy once claimed a
