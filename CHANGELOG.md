@@ -2,6 +2,22 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.2.1] - 2026-11-22
+
+### Fixes
+
+- Ignore the beep cut by a clip's start in the A/V harness
+- Open the folder picker in front, at the clip folder
+
+### Documentation
+
+- Point the download page at v2.2.0
+
+### Tests
+
+- Live sound meters on the A/V harness, leaks fail the verdict
+- Harden the harness meters and beep matching after review
+
 ## [2.2.0] - 2026-11-22
 
 ### Features
