@@ -42,6 +42,13 @@ IND_X, IND_Y, IND_W, IND_H = 0.02, 0.02, 0.20, 0.20
 RESULT = {}
 
 VIDEO_SAMPLE_FPS = 50     # 20 ms resolution on the indicator edges
+# Live meter: what Windows really plays, read back through a WASAPI loopback.
+METER_FLOOR_DB = -60.0
+LEAK_DB = -50.0           # the test beep plays at -20 dBFS; digital silence reads nothing
+MIC_LEAK_DB = -30.0       # a mic always hisses (about -60 to -45 dBFS): only a voice or a knock counts
+LEAK_MARGIN = 0.3         # s around each beep's edges: output latency, fades
+LEAK_GAP = 0.5            # s: sounds closer than this are one leak (one sentence)
+METER_STALE = 0.1         # s: WASAPI loopback delivers nothing during digital silence
 AUDIO_WIN_MS = 10
 
 
@@ -68,6 +75,41 @@ def make_beep_pcm(seconds=BEEP_LEN, rate=TONE_RATE, freq=TONE_FREQ, channels=2):
         val = int(32767 * 0.10 * env * math.sin(2 * math.pi * freq * i / rate))
         samples.extend([val] * channels)
     return struct.pack("<" + "h" * len(samples), *samples)
+
+
+def peak_dbfs(samples):
+    """Peak of int16 samples in dBFS; -inf for silence."""
+    peak = max((abs(v) for v in samples), default=0)
+    return 20 * math.log10(peak / 32768) if peak else float("-inf")
+
+
+def in_silence(t):
+    """True when no beep is scheduled at timecode t, nor within LEAK_MARGIN of one."""
+    k = round(t / BEEP_EVERY)
+    for start in (k * BEEP_EVERY, (k - 1) * BEEP_EVERY):
+        if start >= BEEP_EVERY and start - LEAK_MARGIN <= t <= start + BEEP_LEN + LEAK_MARGIN:
+            return False
+    return True
+
+
+class LeakCounter:
+    """Counts the sounds heard during scheduled silence: a rise above `threshold` is one, unless
+    it follows the last one by under LEAK_GAP (the syllables of one sentence)."""
+
+    def __init__(self, threshold=LEAK_DB):
+        self.threshold = threshold
+        self.count = 0
+        self._on = False
+        self._heard_at = float("-inf")
+
+    def update(self, t, db):
+        on = in_silence(t) and db > self.threshold
+        if on and not self._on and t - self._heard_at > LEAK_GAP:
+            self.count += 1
+        if on:
+            self._heard_at = t
+        self._on = on
+        return self.count
 
 
 # ─── Analysis ────────────────────────────────────────────────────────────────
@@ -372,6 +414,34 @@ def run_generate(args):
                                   fill="black", outline="")
     label = canvas.create_text(mw // 2, mh // 2, text="0.0", fill="#20ff20", font=("Consolas", 140, "bold"))
     hint = canvas.create_text(mw // 2, mh // 2 + 160, text="", fill="#808080", font=("Consolas", 40))
+    # Live meters at the bottom, far from the indicator the analysis crops (top-left): what Windows
+    # plays (Discord, Spotify, a notification) and the mic, both mixed into the clip. Each callback
+    # is the only writer of its `level`, one tuple swapped at a time.
+    meters = []
+
+    def add_meter(name, device, threshold, y):
+        level = [(0.0, float("-inf"))]
+
+        def on_audio(data, _frames, _time, _status):
+            level[0] = (time.monotonic(), peak_dbfs(array.array("h", data)))
+            return None, pyaudio.paContinue
+
+        rate = int(device["defaultSampleRate"])
+        stream = pa.open(format=pyaudio.paInt16, channels=device["maxInputChannels"], rate=rate, input=True,
+                         input_device_index=device["index"], frames_per_buffer=rate // 50, stream_callback=on_audio)
+        x0, x1 = mw * 0.25, mw * 0.75
+        canvas.create_text(x0 - 20, y + 18, text=name, fill="#c0c0c0", anchor="e", font=("Consolas", 28))
+        canvas.create_rectangle(x0, y, x1, y + 36, fill="#202020", outline="#404040")
+        meters.append({"name": name, "level": level, "stream": stream, "leaks": LeakCounter(threshold),
+                       "x": (x0, x1, y), "bar": canvas.create_rectangle(x0, y, x0, y + 36, outline=""),
+                       "text": canvas.create_text(x1 + 20, y + 18, fill="#c0c0c0", anchor="w",
+                                                  font=("Consolas", 28))})
+
+    add_meter("OUT", pa.get_default_wasapi_loopback(), LEAK_DB, mh * 0.80)
+    if wasapi["defaultInputDevice"] >= 0:
+        add_meter("MIC", pa.get_device_info_by_index(wasapi["defaultInputDevice"]), MIC_LEAK_DB, mh * 0.80 + 56)
+    leak_text = canvas.create_text(mw // 2, mh * 0.80 - 40, text="", fill="#ff3030",
+                                   font=("Consolas", 36, "bold"))
 
     t0 = time.monotonic()
     stop_flag = threading.Event()
@@ -384,6 +454,21 @@ def run_generate(args):
         canvas.itemconfig(ind, fill=("white" if on else "black"))
         canvas.itemconfig(label, text=f"{t:6.1f}")
         canvas.itemconfig(hint, text="BEEP" if on else "silence")
+        for m in meters:
+            heard_at, db = m["level"][0]
+            if time.monotonic() - heard_at > METER_STALE:
+                db = float("-inf")
+            x0, x1, y = m["x"]
+            fill = max(0.0, min(1.0, (db - METER_FLOOR_DB) / -METER_FLOOR_DB))
+            canvas.coords(m["bar"], x0, y, x0 + (x1 - x0) * fill, y + 36)
+            canvas.itemconfig(m["bar"], fill="#ff3030" if db > -1 else "#ff9020" if db > -6 else "#20c020")
+            canvas.itemconfig(m["text"], text="silence" if db == float("-inf") else f"{db:6.1f} dBFS")
+            if "save_tc" not in result:     # the app's own save chime comes after the press
+                m["leaks"].update(t, db)
+                if in_silence(t):
+                    m["loudest_silent"] = max(m.get("loudest_silent", float("-inf")), db)
+        heard = [f"{m['name']} x{m['leaks'].count}" for m in meters if m["leaks"].count]
+        canvas.itemconfig(leak_text, text=("SOUND LEAK  " + "  ".join(heard)) if heard else "")
         root.after(20, tick)
 
     def audio_loop():
@@ -403,10 +488,9 @@ def run_generate(args):
 
     print(f"Capturing {args.fps} FPS, buffer={args.buffer}s, monitor={mon_idx} with {args.exe}")
     print(f"Schedule decided in advance: beep every {BEEP_EVERY:g}s for {BEEP_LEN:g}s")
+    result = {}
     tick()
     threading.Thread(target=audio_loop, daemon=True).start()
-
-    result = {}
 
     def wait_for_clip(deadline):
         files = [f for f in os.listdir(clips) if f.endswith("." + args.format)]
@@ -431,7 +515,8 @@ def run_generate(args):
     root.mainloop()
 
     stop_flag.set()
-    for fn in (out_stream.stop_stream, out_stream.close, pa.terminate, root.destroy, app.kill):
+    streams = [out_stream] + [m["stream"] for m in meters]
+    for fn in [f for st in streams for f in (st.stop_stream, st.close)] + [pa.terminate, root.destroy, app.kill]:
         try:
             fn()
         except Exception:
@@ -442,6 +527,13 @@ def run_generate(args):
     if not path:
         print(f"ERROR: no clip was saved; see {os.path.join(data, 'clip_recorder.log')}")
         return 1
+    for m in meters:
+        print(f"  {m['name']}: loudest during scheduled silence {m.get('loudest_silent', float('-inf')):.1f} dBFS "
+              f"(leak above {m['leaks'].threshold:g})")
+        RESULT["sound_leaks" if m["name"] == "OUT" else "mic_leaks"] = m["leaks"].count
+        if m["leaks"].count:
+            print(f"SOUND LEAK ({m['name']}): {m['leaks'].count} sound(s) during scheduled silence; "
+                  "this run is polluted")
     print()
     return run_analyze(path, save_tc=result.get("save_tc"))
 
@@ -459,6 +551,24 @@ def self_check():
     pairs, unexpected = match_beeps(expected, [(0.00, 0.16)] + actual)
     assert [round((n[0] - e[0]) * 1000) for e, n in pairs] == [-40, -20, -30], pairs
     assert not unexpected, unexpected
+    # The meter: the test beep (10 % of full scale) reads -20 dBFS, digital silence -inf.
+    assert round(peak_dbfs([0, 3277, -3277])) == -20
+    assert peak_dbfs([]) == peak_dbfs([0, 0]) == float("-inf")
+    # Silence: before the first beep, and between beeps away from their edges only.
+    assert [in_silence(t) for t in (1.0, 4.6, 4.8, 6.0, 7.2, 7.4, 9.6, 9.8)] ==         [True, True, False, False, False, True, True, False]
+    leaks = LeakCounter()
+    for t, db in [(1.0, -30), (1.1, -30), (1.2, -90), (6.0, -20), (8.0, -45), (8.1, -45)]:
+        leaks.update(t, db)
+    assert leaks.count == 2, leaks.count     # two rises in silence; the beep at 6.0 is not one
+    mic = LeakCounter(MIC_LEAK_DB)
+    for t, db in [(1.0, -45), (1.5, -52), (2.0, -18), (2.1, -48), (6.0, -12)]:
+        mic.update(t, db)
+    assert mic.count == 1, mic.count         # the hiss is not a leak, the voice at 2.0 is
+    # One sentence is one leak, whatever its syllables (27 counted for a few words, 2026-11-22);
+    # a second sentence a second later is another.
+    for t, db in [(2.3, -20), (2.4, -50), (2.6, -15), (2.8, -50), (3.0, -22), (3.2, -50), (4.0, -20)]:
+        mic.update(t, db)
+    assert mic.count == 2, mic.count
     print("self-check: ok")
     return 0
 

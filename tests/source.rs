@@ -597,6 +597,16 @@ fn the_av_sync_verdict_runs_on_measured_results() {
             Some(good.replace(r#""discontinuities":0"#, r#""discontinuities":3"#)),
             "3 discontinuities",
         ),
+        (
+            "leak",
+            Some(good.replace(r#""rc":0"#, r#""rc":0,"sound_leaks":2"#)),
+            "2 sound(s) during scheduled silence",
+        ),
+        (
+            "mic",
+            Some(good.replace(r#""rc":0"#, r#""rc":0,"sound_leaks":0,"mic_leaks":1"#)),
+            "1 mic sound(s) during scheduled silence",
+        ),
         ("missing", None, "no result"),
     ];
     for (name, json, expected) in cases {
