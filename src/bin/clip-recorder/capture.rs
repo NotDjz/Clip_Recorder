@@ -52,17 +52,20 @@ fn works(ffmpeg: &Path, input: &[String], codec: Codec) -> bool {
         .is_some_and(|s| s.success())
 }
 
-/// The best NVENC codec the card has (HEVC, else H.264 on a GTX 9 or 10), then DXGI straight
-/// into it when that works too. ddagrab hands over GPU frames, which x264 cannot read, so without
-/// NVENC the capture goes through GDI (an AMD or Intel GPU today).
+/// DXGI straight into the best NVENC codec that takes its frames (HEVC, else H.264 on a GTX 9 or
+/// 10), else GDI into the best one that takes BGRA (gdigrab's frames). ddagrab hands over GPU
+/// frames, which x264 cannot read, so without NVENC the capture goes through GDI (an AMD or Intel
+/// GPU today).
 fn pipeline(ffmpeg: &Path) -> (Encoder, Grabber) {
-    let color = ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=1"].map(String::from);
-    let nvenc = [Codec::Hevc, Codec::H264]
-        .into_iter()
-        .find(|&c| works(ffmpeg, &color, c));
+    let best = |input: &[String]| {
+        [Codec::Hevc, Codec::H264]
+            .into_iter()
+            .find(|&c| works(ffmpeg, input, c))
+    };
     // The capture's own ddagrab input: on the NVIDIA adapter, named explicitly.
-    let dda = nvenc.filter(|&c| works(ffmpeg, &ffmpeg_cmd::ddagrab_input(30, 0), c));
-    ffmpeg_cmd::choose(dda, nvenc)
+    let dda = best(&ffmpeg_cmd::ddagrab_input(30, 0));
+    let bgra = ["-f", "lavfi", "-i", "color=c=black:s=256x256:d=1,format=bgra"].map(String::from);
+    ffmpeg_cmd::choose(dda, dda.or_else(|| best(&bgra)))
 }
 
 /// One running ffmpeg with its own capture clock: a reader left over from a replaced process
@@ -121,7 +124,7 @@ impl Capture {
     /// DXGI may not be ready yet, and one failed probe must not leave the whole session on GDI.
     /// True when the pipeline improved (the caller restarts the video).
     pub fn reprobe(&mut self) -> bool {
-        if (self.encoder, self.grabber) == (Encoder::Nvenc(Codec::Hevc), Grabber::Ddagrab) {
+        if self.grabber == Grabber::Ddagrab {
             return false;
         }
         let (encoder, grabber) = pipeline(&self.ffmpeg);

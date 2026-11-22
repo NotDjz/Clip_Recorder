@@ -52,7 +52,8 @@ pub enum Codec {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Encoder {
-    /// HEVC where the card can (GTX 16 / RTX and later), else H.264 (GTX 9 and 10).
+    /// HEVC where the card's NVENC does Main10 with B-frames (RTX, GTX 16 but the TU117 1650),
+    /// else H.264 (GTX 9 and 10).
     Nvenc(Codec),
     /// CPU fallback when the GPU has no NVENC.
     X264,
