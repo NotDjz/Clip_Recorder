@@ -2,6 +2,26 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.2.0] - 2026-11-22
+
+### Features
+
+- Encode clips in HEVC 10-bit, FLAC audio in MKV
+- Keep H.264 NVENC on older cards, tag HEVC MP4s hvc1
+- Try DXGI with each NVENC codec before falling back to GDI
+
+### Fixes
+
+- Encode CPU clips in 4:2:0 so GPUs decode them
+
+### Documentation
+
+- Point the download page at v2.1.0
+
+### CI and build
+
+- Bump url to 2.5.9 for RUSTSEC-2026-0592
+
 ## [2.1.0] - 2026-11-21
 
 ### Features
