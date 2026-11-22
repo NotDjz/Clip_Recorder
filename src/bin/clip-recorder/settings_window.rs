@@ -368,7 +368,7 @@ pub fn fill(
     devices: (Vec<String>, Vec<String>),
     startup: Option<bool>,
 ) {
-    let encoder = if hw.encoder == Encoder::Nvenc { "NVENC" } else { "x264" };
+    let encoder = if hw.encoder == Encoder::X264 { "x264" } else { "NVENC" };
     w.set_monitor_hardware(strings(shown.iter().map(|s| {
         format!(
             "{encoder}     {}",
@@ -573,7 +573,7 @@ mod tests {
         let w = SettingsWindow::new().unwrap();
         // The second screen is on an adapter ddagrab cannot reach.
         let hw = Hardware {
-            encoder: Encoder::Nvenc,
+            encoder: Encoder::Nvenc(clip_recorder::ffmpeg_cmd::Codec::Hevc),
             grabber: Grabber::Ddagrab,
         };
         let devices = (

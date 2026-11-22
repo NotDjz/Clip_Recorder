@@ -43,10 +43,52 @@ impl Grabber {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Codec {
+    /// HEVC 10-bit 4:2:0: H.264 qp 20's quality for 18 % less, 10-bit gradients, still decoded
+    /// by the GPU (4:4:4 is not, through DXVA). Measured 2026-11-22 on gameplay.
+    Hevc,
+    H264,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Encoder {
-    Nvenc,
+    /// HEVC where the card's NVENC does Main10 with B-frames (RTX, GTX 16 but the TU117 1650),
+    /// else H.264 (GTX 9 and 10).
+    Nvenc(Codec),
     /// CPU fallback when the GPU has no NVENC.
     X264,
+}
+
+impl Encoder {
+    pub fn codec(self) -> Codec {
+        match self {
+            Encoder::Nvenc(codec) => codec,
+            Encoder::X264 => Codec::H264,
+        }
+    }
+}
+
+/// What a clip is: its container, and the codec its video was captured in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Clip {
+    pub format: ClipFormat,
+    pub codec: Codec,
+}
+
+/// NVENC's codec, for the capture and its probe alike. Main10 from 8-bit frames: -highbitdepth.
+fn nvenc_args(codec: Codec) -> &'static [&'static str] {
+    match codec {
+        Codec::Hevc => &["-c:v", "hevc_nvenc", "-profile:v", "main10", "-highbitdepth", "1"],
+        Codec::H264 => &["-c:v", "h264_nvenc"],
+    }
+}
+
+/// The probe's encoder: the capture's, with the B-frames it uses from 120 fps. A GTX 10's HEVC
+/// NVENC has none: it fails here and stays on H.264 rather than a capture that never starts.
+pub fn probe_args(codec: Codec) -> Vec<String> {
+    let mut a: Vec<String> = nvenc_args(codec).iter().map(|f| f.to_string()).collect();
+    a.extend(["-bf", "3"].map(String::from));
+    a
 }
 
 /// What one capture reads: a DXGI output, by its index on the first graphics adapter (as ddagrab
@@ -109,21 +151,24 @@ pub fn segment_wrap(buffer_seconds: u32) -> u32 {
 }
 
 /// Arguments after the ffmpeg path.
-/// The capture pipeline from two real test encodes: DXGI into NVENC, else NVENC through GDI, else
-/// x264 through GDI. Never ddagrab with x264: ddagrab hands over GPU frames x264 cannot read.
-pub fn choose(ddagrab_into_nvenc: bool, nvenc: bool) -> (Encoder, Grabber) {
-    match (ddagrab_into_nvenc, nvenc) {
-        (true, _) => (Encoder::Nvenc, Grabber::Ddagrab),
-        (false, true) => (Encoder::Nvenc, Grabber::Gdigrab),
-        (false, false) => (Encoder::X264, Grabber::Gdigrab),
+/// The capture pipeline from real test encodes: the NVENC codec that works (if any), DXGI into it
+/// if that works too, else through GDI, else x264 through GDI. Never ddagrab with x264: ddagrab
+/// hands over GPU frames x264 cannot read.
+pub fn choose(ddagrab_into: Option<Codec>, nvenc: Option<Codec>) -> (Encoder, Grabber) {
+    match (ddagrab_into, nvenc) {
+        (Some(codec), _) => (Encoder::Nvenc(codec), Grabber::Ddagrab),
+        (None, Some(codec)) => (Encoder::Nvenc(codec), Grabber::Gdigrab),
+        (None, None) => (Encoder::X264, Grabber::Gdigrab),
     }
 }
 
+/// DXGI first (it holds 240 fps, GDI 60), then HEVC over H.264, then any NVENC over the CPU.
 fn rank(p: (Encoder, Grabber)) -> u8 {
+    let codec = |e: Encoder| if e.codec() == Codec::Hevc { 1 } else { 0 };
     match p {
-        (Encoder::Nvenc, Grabber::Ddagrab) => 2,
-        (Encoder::Nvenc, Grabber::Gdigrab) => 1,
-        _ => 0,
+        (Encoder::X264, _) => 0,
+        (e, Grabber::Gdigrab) => 1 + codec(e),
+        (e, Grabber::Ddagrab) => 3 + codec(e),
     }
 }
 
@@ -170,8 +215,9 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
         ]),
     }
     match c.encoder {
-        Encoder::Nvenc => {
-            a.extend(["-c:v", "h264_nvenc", "-preset", "p1"].map(String::from));
+        Encoder::Nvenc(codec) => {
+            a.extend(nvenc_args(codec).iter().map(|f| f.to_string()));
+            a.extend(["-preset", "p1"].map(String::from));
             if rate >= B_FRAMES_MIN_FPS {
                 a.extend(["-tune", "hq", "-bf", "3", "-delay", "0"].map(String::from));
             } else {
@@ -189,6 +235,9 @@ pub fn capture_args(c: &Capture) -> Vec<String> {
                 "zerolatency",
                 "-crf",
                 "18",
+                // From BGRA libx264 picks High 4:4:4, which no GPU decodes (DXVA).
+                "-pix_fmt",
+                "yuv420p",
             ]
             .map(String::from),
         ),
@@ -238,9 +287,9 @@ fn path(p: &Path) -> String {
 
 /// Joins the snapshots without re-encoding. No -ss, not even 0: with B-frames each segment's
 /// first IDR has a negative DTS, and -ss 0 dropped the whole first segment (measured).
-/// `clip`: the format when it writes the clip itself (no audio); None for the intermediate video
-/// the mux reads next, which is never worth +faststart's rewrite.
-pub fn concat_args(list: &Path, duration: f64, out: &Path, clip: Option<ClipFormat>) -> Vec<String> {
+/// `clip`: set when it writes the clip itself (no audio); None for the intermediate video the mux
+/// reads next, which is never worth +faststart's rewrite.
+pub fn concat_args(list: &Path, duration: f64, out: &Path, clip: Option<Clip>) -> Vec<String> {
     let mut a: Vec<String> = ["-y", "-f", "concat", "-safe", "0", "-i"].map(String::from).to_vec();
     a.extend([path(list), "-t".into(), duration.to_string()]);
     a.extend(["-c", "copy"].map(String::from));
@@ -249,12 +298,14 @@ pub fn concat_args(list: &Path, duration: f64, out: &Path, clip: Option<ClipForm
     a
 }
 
-/// What the clip's container needs: an MP4 gets its index first, so players start at once;
-/// +faststart is the MP4 muxer's flag, MKV has none.
-fn clip_flags(format: ClipFormat) -> &'static [&'static str] {
-    match format {
-        ClipFormat::Mp4 => &["-movflags", "+faststart"],
-        ClipFormat::Mkv => &[],
+/// What the clip's container needs: an MP4 gets its index first, so players start at once
+/// (+faststart is the MP4 muxer's flag, MKV has none), and HEVC in MP4 the hvc1 tag Apple players
+/// require (ffmpeg writes hev1; the tag would fail on H.264).
+fn clip_flags(clip: Clip) -> &'static [&'static str] {
+    match (clip.format, clip.codec) {
+        (ClipFormat::Mp4, Codec::Hevc) => &["-movflags", "+faststart", "-tag:v", "hvc1"],
+        (ClipFormat::Mp4, Codec::H264) => &["-movflags", "+faststart"],
+        (ClipFormat::Mkv, _) => &[],
     }
 }
 
@@ -280,11 +331,21 @@ pub fn mix_args(loopback: &Path, mic: &Path, out: &Path) -> Vec<String> {
     ]
 }
 
-/// The clip: the video copied, the audio in AAC, cut to the shorter of the two.
-pub fn mux_args(video: &Path, audio: &Path, out: &Path, format: ClipFormat) -> Vec<String> {
+/// FLAC is lossless for ~1 % of a clip, but many players can't read it inside an MP4. AAC 256k
+/// encodes as fast as 192k; 320k took 5 to 10 s on 90 s of audio, all of it added to a save.
+fn audio_codec(format: ClipFormat) -> &'static [&'static str] {
+    match format {
+        ClipFormat::Mp4 => &["-c:a", "aac", "-b:a", "256k"],
+        ClipFormat::Mkv => &["-c:a", "flac"],
+    }
+}
+
+/// The clip: the video copied, the audio per the format, cut to the shorter of the two.
+pub fn mux_args(video: &Path, audio: &Path, out: &Path, clip: Clip) -> Vec<String> {
     let mut a: Vec<String> = vec!["-y".into(), "-i".into(), path(video), "-i".into(), path(audio)];
-    a.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest"].map(String::from));
-    a.extend(clip_flags(format).iter().map(|f| f.to_string()));
+    a.extend(["-c:v", "copy", "-shortest"].map(String::from));
+    a.extend(audio_codec(clip.format).iter().map(|f| f.to_string()));
+    a.extend(clip_flags(clip).iter().map(|f| f.to_string()));
     a.push(path(out));
     a
 }
@@ -294,6 +355,15 @@ mod tests {
     use super::*;
     use crate::config::{BUFFER_OPTIONS, FPS_OPTIONS};
 
+    const MP4: Clip = Clip {
+        format: ClipFormat::Mp4,
+        codec: Codec::Hevc,
+    };
+    const MKV: Clip = Clip {
+        format: ClipFormat::Mkv,
+        codec: Codec::Hevc,
+    };
+
     /// +faststart rewrites the whole file to move its index first: worth it for the clip, wasted
     /// on the video the mux reads next (up to 4 GB written twice).
     #[test]
@@ -301,9 +371,9 @@ mod tests {
         let fast = |a: Vec<String>| a.contains(&"+faststart".to_string());
         let concat = |clip| concat_args(Path::new("l.txt"), 3.0, Path::new("out"), clip);
         let mux = |format| mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("out"), format);
-        assert!(fast(concat(Some(ClipFormat::Mp4))));
+        assert!(fast(concat(Some(MP4))));
         assert!(!fast(concat(None)), "the intermediate video");
-        assert!(fast(mux(ClipFormat::Mp4)));
+        assert!(fast(mux(MP4)));
     }
 
     /// +faststart is the MP4 muxer's flag: an MKV clip gets no -movflags at all.
@@ -314,24 +384,19 @@ mod tests {
             Path::new("l.txt"),
             3.0,
             Path::new("clip.mkv"),
-            Some(ClipFormat::Mkv)
+            Some(MKV)
         )));
         assert!(!movflags(mux_args(
             Path::new("v.mp4"),
             Path::new("a.wav"),
             Path::new("clip.mkv"),
-            ClipFormat::Mkv
+            MKV
         )));
     }
 
     #[test]
     fn the_concat_never_seeks_and_cuts_at_the_selected_duration() {
-        let a = concat_args(
-            Path::new("list.txt"),
-            15.25,
-            Path::new("out.mp4"),
-            Some(ClipFormat::Mp4),
-        );
+        let a = concat_args(Path::new("list.txt"), 15.25, Path::new("out.mp4"), Some(MP4));
         assert!(!a.contains(&"-ss".to_string()), "{a:?}");
         assert_eq!(value(&a, "-t"), Some("15.25"));
         assert_eq!(value(&a, "-c"), Some("copy"));
@@ -347,17 +412,20 @@ mod tests {
 
     #[test]
     fn the_mux_copies_the_video_and_stops_at_the_shorter_stream() {
-        let a = mux_args(
-            Path::new("v.mp4"),
-            Path::new("a.wav"),
-            Path::new("clip.mp4"),
-            ClipFormat::Mp4,
-        );
+        let a = mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("clip.mp4"), MP4);
         assert_eq!(
             (value(&a, "-c:v"), value(&a, "-c:a"), value(&a, "-b:a")),
-            (Some("copy"), Some("aac"), Some("192k"))
+            (Some("copy"), Some("aac"), Some("256k"))
         );
         assert!(a.contains(&"-shortest".to_string()) && a.contains(&"+faststart".to_string()));
+    }
+
+    /// FLAC is lossless for ~1 % of a clip's size, but many players can't read it inside an MP4.
+    #[test]
+    fn an_mkv_clip_keeps_lossless_flac_audio() {
+        let a = mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("clip.mkv"), MKV);
+        assert_eq!((value(&a, "-c:a"), value(&a, "-b:a")), (Some("flac"), None));
+        assert!(a.contains(&"-shortest".to_string()));
     }
 
     #[test]
@@ -397,32 +465,77 @@ mod tests {
             .map(String::as_str)
     }
 
+    const HEVC: Encoder = Encoder::Nvenc(Codec::Hevc);
+    const H264: Encoder = Encoder::Nvenc(Codec::H264);
+
     #[test]
     fn the_pipeline_is_never_ddagrab_into_x264() {
-        assert_eq!(choose(true, true), (Encoder::Nvenc, Grabber::Ddagrab));
-        assert_eq!(choose(false, true), (Encoder::Nvenc, Grabber::Gdigrab));
-        assert_eq!(choose(false, false), (Encoder::X264, Grabber::Gdigrab));
-        for (a, b) in [(true, false), (false, false), (false, true), (true, true)] {
-            assert!(choose(a, b) != (Encoder::X264, Grabber::Ddagrab));
-        }
+        let (hevc, h264) = (Some(Codec::Hevc), Some(Codec::H264));
+        assert_eq!(choose(hevc, hevc), (HEVC, Grabber::Ddagrab));
+        assert_eq!(choose(h264, h264), (H264, Grabber::Ddagrab));
+        assert_eq!(choose(None, hevc), (HEVC, Grabber::Gdigrab));
+        assert_eq!(choose(None, h264), (H264, Grabber::Gdigrab));
+        assert_eq!(choose(None, None), (Encoder::X264, Grabber::Gdigrab));
     }
 
     #[test]
     fn a_later_probe_upgrades_only_to_a_better_pipeline() {
-        let (best, gdi, cpu) = (
-            (Encoder::Nvenc, Grabber::Ddagrab),
-            (Encoder::Nvenc, Grabber::Gdigrab),
+        // Best first: DXGI beats codec (fps), HEVC beats H.264, any NVENC beats the CPU.
+        let ladder = [
+            (HEVC, Grabber::Ddagrab),
+            (H264, Grabber::Ddagrab),
+            (HEVC, Grabber::Gdigrab),
+            (H264, Grabber::Gdigrab),
             (Encoder::X264, Grabber::Gdigrab),
-        );
-        assert!(better(cpu, gdi) && better(cpu, best) && better(gdi, best));
-        assert!(!better(best, best) && !better(best, gdi) && !better(gdi, cpu) && !better(cpu, cpu));
+        ];
+        for (i, &high) in ladder.iter().enumerate() {
+            for &low in &ladder[i + 1..] {
+                assert!(better(low, high) && !better(high, low), "{high:?} over {low:?}");
+            }
+            assert!(!better(high, high));
+        }
+    }
+
+    /// A GTX 10 card's HEVC NVENC has no B-frames, which the capture asks for from 120 fps: the
+    /// probe asks for them too, so such a card fails it and stays on H.264 NVENC instead of a
+    /// capture that dies at every start. Same codec arguments as the capture's.
+    #[test]
+    fn the_probe_tests_the_capture_s_own_encoder_with_b_frames() {
+        for (codec, encoder) in [(Codec::Hevc, HEVC), (Codec::H264, H264)] {
+            let probe = probe_args(codec);
+            let capture = args(240, Grabber::Ddagrab, encoder);
+            assert_eq!(value(&probe, "-bf"), Some("3"), "{codec:?}");
+            for flag in ["-c:v", "-profile:v", "-highbitdepth"] {
+                assert_eq!(value(&probe, flag), value(&capture, flag), "{codec:?} {flag}");
+            }
+        }
+    }
+
+    /// Apple players refuse an HEVC MP4 tagged hev1 (ffmpeg's default); the hvc1 tag would make
+    /// ffmpeg fail on an H.264 stream, and MKV has no such tag.
+    #[test]
+    fn an_hevc_mp4_clip_is_tagged_for_apple_players() {
+        let tag = |a: Vec<String>| value(&a, "-tag:v").map(String::from);
+        let concat = |clip| concat_args(Path::new("l.txt"), 3.0, Path::new("out"), Some(clip));
+        let mux = |clip| mux_args(Path::new("v.mp4"), Path::new("a.wav"), Path::new("out"), clip);
+        for (format, codec, expected) in [
+            (ClipFormat::Mp4, Codec::Hevc, Some("hvc1")),
+            (ClipFormat::Mp4, Codec::H264, None),
+            (ClipFormat::Mkv, Codec::Hevc, None),
+            (ClipFormat::Mkv, Codec::H264, None),
+        ] {
+            let clip = Clip { format, codec };
+            assert_eq!(tag(concat(clip)).as_deref(), expected, "{clip:?}");
+            assert_eq!(tag(mux(clip)).as_deref(), expected, "{clip:?}");
+        }
+        assert_eq!(tag(concat_args(Path::new("l"), 3.0, Path::new("o"), None)), None);
     }
 
     /// GDI cannot hold 120/240: a config saved on a DXGI session is capped, keyframes and
     /// B-frames follow the capped rate.
     #[test]
     fn gdigrab_never_captures_above_60_fps() {
-        let a = args(240, Grabber::Gdigrab, Encoder::Nvenc);
+        let a = args(240, Grabber::Gdigrab, HEVC);
         assert_eq!(value(&a, "-framerate"), Some("60"));
         assert_eq!(value(&a, "-g"), Some("60"));
         assert!(!a.contains(&"-bf".to_string()), "B-frames are for 120 fps and up");
@@ -453,7 +566,7 @@ mod tests {
     fn the_keyframe_interval_equals_fps_times_the_segment_length() {
         // Otherwise segment boundaries miss keyframes and the concat shows artifacts.
         for fps in FPS_OPTIONS {
-            for encoder in [Encoder::Nvenc, Encoder::X264] {
+            for encoder in [HEVC, H264, Encoder::X264] {
                 let a = args(fps, Grabber::Ddagrab, encoder);
                 assert_eq!(
                     value(&a, "-g"),
@@ -467,10 +580,7 @@ mod tests {
 
     #[test]
     fn packets_are_flushed_so_snapshots_are_current() {
-        assert_eq!(
-            value(&args(60, Grabber::Ddagrab, Encoder::Nvenc), "-flush_packets"),
-            Some("1")
-        );
+        assert_eq!(value(&args(60, Grabber::Ddagrab, HEVC), "-flush_packets"), Some("1"));
     }
 
     #[test]
@@ -484,15 +594,15 @@ mod tests {
     #[test]
     fn ddagrab_with_nvenc_has_no_pixel_format_filter_and_picks_the_output() {
         // "-vf format=yuv420p" with ddagrab + NVENC fails with "Invalid argument".
-        let a = args(240, Grabber::Ddagrab, Encoder::Nvenc).join(" ");
+        let a = args(240, Grabber::Ddagrab, HEVC).join(" ");
         assert!(!a.contains("format=yuv420p"), "{a}");
         assert!(a.contains("ddagrab=framerate=240:output_idx=1:draw_mouse=0"), "{a}");
     }
 
     #[test]
     fn nvenc_b_frames_start_at_120_fps_and_never_hold_output_back() {
-        for fps in FPS_OPTIONS {
-            let a = args(fps, Grabber::Ddagrab, Encoder::Nvenc);
+        for (fps, encoder) in FPS_OPTIONS.into_iter().flat_map(|f| [(f, HEVC), (f, H264)]) {
+            let a = args(fps, Grabber::Ddagrab, encoder);
             if fps >= B_FRAMES_MIN_FPS {
                 // Without -delay 0 NVENC holds ~15 frames: +70 ms of A/V offset, measured.
                 assert_eq!(
@@ -502,14 +612,44 @@ mod tests {
             } else {
                 assert_eq!((value(&a, "-bf"), value(&a, "-tune")), (None, Some("ll")), "{fps} fps");
             }
+            assert_eq!(value(&a, "-qp"), Some("20"), "{encoder:?}");
         }
     }
 
     #[test]
     fn quality_is_the_measured_one() {
         // qp 26 was tried in v1.3: visibly worse in motion, reverted.
-        assert_eq!(value(&args(60, Grabber::Ddagrab, Encoder::Nvenc), "-qp"), Some("20"));
+        assert_eq!(value(&args(60, Grabber::Ddagrab, HEVC), "-qp"), Some("20"));
         assert_eq!(value(&args(60, Grabber::Gdigrab, Encoder::X264), "-crf"), Some("18"));
+    }
+
+    /// Fed gdigrab's BGRA, libx264 wrote High 4:4:4: no GPU decodes it through DXVA and many
+    /// players refuse it. Every clip without an NVIDIA GPU was one.
+    #[test]
+    fn the_cpu_encoder_writes_4_2_0_that_gpus_decode() {
+        let a = args(60, Grabber::Gdigrab, Encoder::X264);
+        assert_eq!(value(&a, "-pix_fmt"), Some("yuv420p"));
+    }
+
+    /// HEVC 10-bit 4:2:0 at qp 20: same quality as H.264 qp 20 for 18 % less, gradients in 10 bits,
+    /// and still decoded by the GPU (4:4:4 is not, through DXVA). Measured 2026-11-22 on gameplay.
+    #[test]
+    fn nvenc_encodes_hevc_10_bit_on_both_grabbers() {
+        for grabber in [Grabber::Ddagrab, Grabber::Gdigrab] {
+            let a = args(240, grabber, HEVC);
+            assert_eq!(
+                (value(&a, "-c:v"), value(&a, "-profile:v"), value(&a, "-highbitdepth")),
+                (Some("hevc_nvenc"), Some("main10"), Some("1")),
+                "{grabber:?}"
+            );
+        }
+        // The fallback tier is the H.264 line measured before HEVC.
+        let a = args(240, Grabber::Ddagrab, H264);
+        assert_eq!((value(&a, "-c:v"), value(&a, "-profile:v")), (Some("h264_nvenc"), None));
+        assert_eq!(
+            value(&args(60, Grabber::Gdigrab, Encoder::X264), "-c:v"),
+            Some("libx264")
+        );
     }
 
     #[test]
@@ -528,7 +668,7 @@ mod tests {
     /// anyway, and whose outputs the app lists (measured: no internal device is created then).
     #[test]
     fn ddagrab_runs_on_the_nvidia_adapter_named_explicitly() {
-        let a = args(240, Grabber::Ddagrab, Encoder::Nvenc);
+        let a = args(240, Grabber::Ddagrab, HEVC);
         assert_eq!(value(&a, "-init_hw_device"), Some("d3d11va=dda:,vendor_id=0x10de"));
         assert_eq!(value(&a, "-filter_hw_device"), Some("dda"));
         assert_eq!(
@@ -580,7 +720,7 @@ mod tests {
 
     #[test]
     fn the_capture_prints_its_clock_and_lists_its_segments() {
-        let a = args(240, Grabber::Ddagrab, Encoder::Nvenc);
+        let a = args(240, Grabber::Ddagrab, HEVC);
         assert!(a.contains(&"-debug_ts".to_string()));
         assert_eq!(value(&a, "-segment_list"), Some(r"C:\tmp\cliprec_x\segments.csv"));
         assert_eq!(value(&a, "-segment_list_type"), Some("csv"));
