@@ -286,6 +286,22 @@ fn the_folder_picker_opens_at_the_clip_folder() {
     );
 }
 
+/// League of Legends turns registered hotkeys off in game: a low-level keyboard hook catches the
+/// press. That hook sees every key the user types, so it must stay a matcher, never a keylogger:
+/// nothing in it logs, formats or keeps a key.
+#[test]
+fn the_hotkey_hook_records_no_keystroke() {
+    let thread = code("src/bin/clip-recorder/hotkey_thread.rs", "//");
+    assert!(thread.contains("SetWindowsHookExW(WH_KEYBOARD_LL"), "no keyboard hook");
+    let hotkey = code("src/hotkey.rs", "//");
+    let watch = between(&hotkey, "impl Watch {", "\n}\n");
+    for (name, body) in [("on_key", between(&thread, "fn on_key(", "\n}\n")), ("Watch", watch)] {
+        for sink in ["log", "format!", "write", "push", "File", "println", "insert", "Vec"] {
+            assert!(!body.contains(sink), "the keyboard hook's {name} uses {sink:?}");
+        }
+    }
+}
+
 /// The code signing policy (team roles, privacy statement, linked from the home and download
 /// pages, an installer that announces start with Windows). The policy, README and download page
 /// say "not signed yet" exactly while release.yml has no signing step: the policy once claimed a
