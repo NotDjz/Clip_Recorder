@@ -2,6 +2,16 @@
 
 Every release of Clip Recorder, newest first. Sections are generated from the commit history by git-cliff.
 
+## [2.2.2] - 2026-11-27
+
+### Fixes
+
+- Catch the save hotkey in games that turn hotkeys off
+
+### Documentation
+
+- Point the download page at v2.2.1
+
 ## [2.2.1] - 2026-11-22
 
 ### Fixes
