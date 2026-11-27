@@ -48,6 +48,9 @@ exclude_re = [
     # The sweep's shared 3 s budget: TerminateProcess is near-instant, so only the 250 ms floor
     # per orphan is observable (tested by an_orphan_ffmpeg_is_killed_and_waited_for).
     "src/bin/clip-recorder/orphans.rs:.*replace \\+ with - in sweep",
+    # GetAsyncKeyState's sign bit shows only for keys really held: the e2e
+    # the_hotkey_saves_while_a_game_turns_hotkeys_off presses them (the fold is unit-tested).
+    "src/bin/clip-recorder/hotkey_thread.rs:.*held_modifiers",
     # Equivalent: the stale-row screen's 2.0 * seg with seg = 1.
     "src/selection.rs:.*replace \\* with / in select",
 ]

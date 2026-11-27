@@ -52,6 +52,8 @@ winresource = "0.1"
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
+# Raw input, for the e2e test's window that turns hotkeys off like League of Legends.
+windows-sys = { version = "0.61", features = ["Win32_UI_Input"] }
 
 [profile.release]
 strip = true

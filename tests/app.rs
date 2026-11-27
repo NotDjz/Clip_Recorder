@@ -257,17 +257,129 @@ fn press(keys: &[u16]) {
 /// nobody uses, so an installed Clip Recorder holding Ctrl+Alt+R is left alone.
 #[test]
 fn the_hotkey_saves_a_clip_that_decodes() {
-    hotkey_save_decodes("save", "mp4");
+    hotkey_save_decodes("save", "mp4", false);
 }
 
 /// The same through the real ffmpeg into Matroska: a TS-to-MKV copy it refused would turn every
 /// MKV save into "Clip not saved", with the fake ffmpeg's tests still green.
 #[test]
 fn the_hotkey_saves_an_mkv_that_decodes() {
-    hotkey_save_decodes("save-mkv", "mkv");
+    hotkey_save_decodes("save-mkv", "mkv", false);
 }
 
-fn hotkey_save_decodes(name: &str, format: &str) {
+/// League of Legends turns other apps' registered hotkeys off while it has the foreground
+/// (measured in a game: RegisterHotKey 0 presses in 3, a keyboard hook 3 in 3). The press is
+/// made with a window doing the same in front.
+#[test]
+fn the_hotkey_saves_while_a_game_turns_hotkeys_off() {
+    hotkey_save_decodes("save-nohotkeys", "mp4", true);
+}
+
+/// The top-left corner of a screen that is not the primary (the primary's on a single screen).
+fn second_screen_corner() -> (i32, i32) {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    use windows_sys::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+    unsafe extern "system" fn visit(screen: HMONITOR, _: HDC, _: *mut RECT, found: LPARAM) -> i32 {
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if unsafe { GetMonitorInfoW(screen, &mut info) } != 0 && info.dwFlags & MONITORINFOF_PRIMARY == 0 {
+            unsafe { *(found as *mut (i32, i32)) = (info.rcMonitor.left, info.rcMonitor.top) };
+            return 0;
+        }
+        1
+    }
+    let mut corner = (0, 0);
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(visit),
+            &mut corner as *mut (i32, i32) as LPARAM,
+        )
+    };
+    corner
+}
+
+/// A window that reads the keyboard as raw input with RIDEV_NOHOTKEYS, in the foreground, on a
+/// thread of its own that pumps its messages. Closed when dropped.
+struct Game {
+    thread: u32,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Game {
+    fn in_front() -> Game {
+        use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows_sys::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_NOHOTKEYS, RegisterRawInputDevices};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG,
+            SetForegroundWindow, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || unsafe {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let none = std::ptr::null_mut();
+            // 1 px on the second screen: it takes the foreground without covering anything.
+            let (x, y) = second_screen_corner();
+            let hwnd = CreateWindowExW(
+                WS_EX_TOPMOST,
+                class.as_ptr(),
+                std::ptr::null(),
+                WS_POPUP | WS_VISIBLE,
+                x,
+                y,
+                1,
+                1,
+                none,
+                none,
+                none,
+                std::ptr::null(),
+            );
+            let keyboard = RAWINPUTDEVICE {
+                usUsagePage: 1,
+                usUsage: 6,
+                dwFlags: RIDEV_NOHOTKEYS,
+                hwndTarget: hwnd,
+            };
+            let raw = RegisterRawInputDevices(&keyboard, 1, size_of::<RAWINPUTDEVICE>() as u32) != 0;
+            let me = GetCurrentThreadId();
+            let front = GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut());
+            AttachThreadInput(front, me, 1);
+            SetForegroundWindow(hwnd);
+            AttachThreadInput(front, me, 0);
+            let _ = tx.send((me, raw, GetForegroundWindow() == hwnd));
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                DispatchMessageW(&msg);
+            }
+            DestroyWindow(hwnd);
+        });
+        let (thread, raw, front) = rx.recv().unwrap();
+        let game = Game {
+            thread,
+            handle: Some(handle),
+        };
+        assert!(raw, "RegisterRawInputDevices failed");
+        assert!(
+            front,
+            "the game window did not get the foreground: the press would prove nothing"
+        );
+        game
+    }
+}
+
+impl Drop for Game {
+    fn drop(&mut self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+        unsafe { PostThreadMessageW(self.thread, WM_QUIT, 0, 0) };
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn hotkey_save_decodes(name: &str, format: &str, game_in_front: bool) {
     let dir = data_dir(name);
     let clips = dir.join("clips");
     std::fs::create_dir_all(&dir).unwrap();
@@ -280,6 +392,7 @@ fn hotkey_save_decodes(name: &str, format: &str) {
     let _app = launch(&dir);
     wait_until(Duration::from_secs(20), || ffmpeg_pid(&dir)).expect("the capture never started");
     std::thread::sleep(Duration::from_secs(5)); // past "too soon", with a few complete segments
+    let _game = game_in_front.then(Game::in_front);
     press(&[0x11, 0x12, 0x10, 0x7B]); // Ctrl, Alt, Shift, F12
     let done = wait_until(Duration::from_secs(40), || {
         log().lines().find(|l| l.contains("done: saved=")).map(String::from)
