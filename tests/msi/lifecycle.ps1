@@ -62,6 +62,7 @@ function Msi($verb, $msi, $log) {
     # checks report.
     Step "msiexec $verb $(Split-Path $msi -Leaf)"
     $p = Start-Process msiexec -ArgumentList $verb, "`"$msi`"", '/qn', '/norestart', '/l*v', "`"$Out\$log`"" -PassThru
+    $null = $p.Handle # cached now, or ExitCode can come back empty once msiexec has exited
     if (-not $p.WaitForExit(300000)) {
         $p.Kill($true)
         return 'timed out after 5 min'
@@ -72,6 +73,29 @@ function Count($name) { @(Get-Process $name -ErrorAction SilentlyContinue).Count
 # Not Start-Process: under PowerShell 7 in Windows Sandbox it started nothing and returned no process.
 function Launch { [Diagnostics.Process]::Start([Diagnostics.ProcessStartInfo]@{ FileName = $exe; UseShellExecute = $false }) }
 function RunValue { (Get-ItemProperty $run -ErrorAction SilentlyContinue).'Clip Recorder' }
+# GitHub Actions kills what a step started when the step ends: the app the start phase launched was gone by the
+# upgrade phase. Measured on run 46062460608: the upgrade and uninstall logs show a Restart Manager session with
+# nothing to close, and "never two instances after the upgrade" counted 0. Each phase that needs the app open starts
+# it itself, and checks it really runs before msiexec.
+function EnsureRunning($when) {
+    if ((Count clip-recorder) -eq 0) { Step "launch the app ($when)"; $null = Launch; Start-Sleep -Seconds 8 }
+    Check "app running $when" ((Count clip-recorder) -eq 1) (Count clip-recorder)
+}
+# msiexec exits 0 even when a file in use was moved to C:\Config.Msi for deletion at reboot: only its log says so.
+# A missing log answers -1, never 0: no log is no evidence.
+function RebootOps($log) {
+    if (-not (Test-Path "$Out\$log")) { return -1 }
+    @(Select-String -Path "$Out\$log" -Encoding unicode -Pattern 'Must reboot' -SimpleMatch).Count
+}
+# Waits up to 30 s for the named processes to exit; returns what is still there, described.
+function Leftovers($names) {
+    $t = [Diagnostics.Stopwatch]::StartNew()
+    while ((@($names | ForEach-Object { Count $_ }) | Measure-Object -Sum).Sum -gt 0 -and $t.Elapsed.TotalSeconds -lt 30) {
+        Start-Sleep -Milliseconds 250
+    }
+    $left = @(foreach ($n in $names) { Get-CimInstance Win32_Process -Filter "Name = '$n.exe'" | ForEach-Object { "pid $($_.ProcessId) $($_.CommandLine)" } })
+    @{ left = $left; took = $t.Elapsed.TotalSeconds }
+}
 
 if (Runs install) {
 $code = Msi '/i' $Old 'install.log'
@@ -104,8 +128,10 @@ Set-ItemProperty $approved 'Clip Recorder' ([byte[]](3, 0, 0, 0, 0, 0, 0, 0, 0, 
 }
 
 if (Runs upgrade) {
+EnsureRunning 'before the upgrade'
 $code = Msi '/i' $New 'upgrade.log'
 Check 'upgrade with the app running exits 0 (no reboot)' ($code -eq 0) $code
+Check 'upgrade leaves nothing for deletion at reboot' ((RebootOps 'upgrade.log') -eq 0) (RebootOps 'upgrade.log')
 Start-Sleep -Seconds 10
 Check 'never two instances after the upgrade' ((Count clip-recorder) -le 1) (Count clip-recorder)
 Check 'Run value kept by the upgrade' ((RunValue) -eq "`"$exe`"") (RunValue)
@@ -125,10 +151,12 @@ Check 'second launch leaves one instance' ((Count clip-recorder) -eq 1) (Count c
 }
 
 if (Runs uninstall) {
+EnsureRunning 'before the uninstall'
 $code = Msi '/x' $New 'uninstall.log'
 Check 'uninstall while running exits 0' ($code -eq 0) $code
-Start-Sleep -Seconds 3
-Check 'nothing left running' (((Count clip-recorder) + (Count ffmpeg)) -eq 0)
+Check 'uninstall leaves nothing for deletion at reboot' ((RebootOps 'uninstall.log') -eq 0) (RebootOps 'uninstall.log')
+$gone = Leftovers @('clip-recorder', 'ffmpeg')
+Check 'nothing left running within 30 s' ($gone.left.Count -eq 0) ($gone.left.Count ? ($gone.left -join ' | ') : ('{0:N1} s' -f $gone.took))
 Check 'Program Files folder removed' (-not (Test-Path $dir))
 Check 'Run value removed' ($null -eq (RunValue))
 Check 'clips kept' ($clip -and (Test-Path $clip))
